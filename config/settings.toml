@@ -1,0 +1,42 @@
+[general]
+mode = "paper"           # "paper" or "live"
+paper_balance_usd = 200.0  # Starting balance for paper trading
+timezone = "US/Eastern"
+log_level = "INFO"
+
+[kraken]
+rest_url = "https://api.kraken.com"
+ws_url = "wss://ws.kraken.com/v2"
+# Fee tier is checked daily via TradeVolume endpoint
+# Default fees (updated automatically by fee monitor)
+# Actual fees at $0 volume tier: 0.25% maker / 0.40% taker
+maker_fee_pct = 0.25
+taker_fee_pct = 0.40
+
+[markets]
+crypto_symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
+
+[analyst]
+scan_interval_minutes = 5
+min_signal_strength = 0.7
+daily_token_limit = 50000
+model = "claude-sonnet-4-5-20250929"
+
+[executive]
+model = "claude-opus-4-5-20250514"
+daily_token_limit = 100000
+# When to run daily evolution (UTC hour/minute)
+evolution_hour = 21
+evolution_minute = 30
+
+[telegram]
+enabled = true
+allowed_user_ids = []    # Empty = allow all (set your Telegram user ID for security)
+
+[fees]
+# Fee check interval in hours
+check_interval_hours = 24
+# Minimum profit-to-fee ratio required to take a trade
+min_profit_fee_ratio = 3.0
+# Minimum trade size in USD (must exceed fees meaningfully)
+min_trade_usd = 20.0
