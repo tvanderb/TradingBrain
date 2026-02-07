@@ -1,300 +1,326 @@
-"""Telegram command handlers."""
+"""Telegram Command Handlers — user interface to the trading system.
+
+Commands show existing system state and calculations.
+Only /ask calls Claude on-demand.
+"""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import datetime
 
+import structlog
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from src.brains.analyst import AnalystBrain
-from src.brains.executor import ExecutorBrain
-from src.brains.executive import ExecutiveBrain
-from src.core.config import Config
-from src.core.logging import get_logger
-from src.core.tokens import TokenTracker
-from src.storage.database import Database
-from src.storage import queries
+from src.shell.config import Config
+from src.shell.database import Database
 
-log = get_logger("commands")
+log = structlog.get_logger()
 
 
 class BotCommands:
-    """All Telegram command handlers."""
+    """Handles all Telegram bot commands."""
 
     def __init__(
         self,
         config: Config,
         db: Database,
-        executor: ExecutorBrain,
-        analyst: AnalystBrain,
-        executive: ExecutiveBrain,
-        token_tracker: TokenTracker,
-        scan_state: dict | None = None,
+        scan_state: dict,
+        portfolio_tracker=None,
+        risk_manager=None,
+        ai_client=None,
+        reporter=None,
     ) -> None:
         self._config = config
         self._db = db
-        self._executor = executor
-        self._analyst = analyst
-        self._executive = executive
-        self._tokens = token_tracker
-        self._scan_state = scan_state or {}
+        self._scan_state = scan_state
+        self._portfolio = portfolio_tracker
+        self._risk = risk_manager
+        self._ai = ai_client
+        self._reporter = reporter
+        self._paused = False
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
 
     def _authorized(self, update: Update) -> bool:
         """Check if user is authorized."""
         allowed = self._config.telegram.allowed_user_ids
         if not allowed:
-            return True  # Empty list = allow all
-        user_id = update.effective_user.id if update.effective_user else 0
-        return user_id in allowed
+            return True
+        return update.effective_user and update.effective_user.id in allowed
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
         await update.message.reply_text(
-            "Trading Brain Online\n\n"
+            "Trading Brain v2 (IO-Container)\n"
             f"Mode: {self._config.mode}\n"
-            f"Symbols: {', '.join(self._config.markets.crypto_symbols)}\n\n"
+            f"Symbols: {', '.join(self._config.symbols)}\n\n"
             "Commands:\n"
-            "/status - System overview\n"
+            "/status - System status\n"
             "/positions - Open positions\n"
             "/trades - Recent trades\n"
+            "/report - Latest scan data\n"
+            "/risk - Risk utilization\n"
             "/performance - Performance metrics\n"
-            "/signals - Recent analyst signals\n"
-            "/report - On-demand market analysis\n"
-            "/ask <question> - Ask the brain\n"
-            "/risk - Risk status\n"
-            "/evolution - Latest evolution\n"
+            "/strategy - Active strategy info\n"
             "/tokens - Token usage\n"
-            "/pause | /resume - Control trading\n"
+            "/ask <question> - Ask Claude\n"
+            "/pause - Pause trading\n"
+            "/resume - Resume trading\n"
             "/kill - Emergency stop"
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        status = self._executor.get_status()
-        msg = (
-            f"Mode: {status['mode']}\n"
-            f"Active: {'Yes' if status['active'] else 'No'}"
-            f"{' (PAUSED)' if status['paused'] else ''}\n\n"
-            f"Portfolio: ${status['portfolio_value']:.2f}\n"
-            f"Cash: ${status['cash_balance']:.2f}\n"
-            f"Positions: {status['open_positions']}\n"
-            f"Unrealized P&L: ${status['unrealized_pnl']:.2f}\n\n"
-            f"Today's P&L: ${status['daily_pnl']:.2f}\n"
-            f"Today's Trades: {status['daily_trades']}"
-        )
-        await update.message.reply_text(msg)
+
+        lines = [f"Mode: {self._config.mode}"]
+        lines.append(f"Status: {'PAUSED' if self._paused else 'ACTIVE'}")
+
+        if self._risk and self._risk.is_halted:
+            lines.append(f"HALTED: {self._risk.halt_reason}")
+
+        if self._portfolio:
+            value = await self._portfolio.total_value()
+            lines.append(f"Portfolio: ${value:.2f}")
+            lines.append(f"Cash: ${self._portfolio.cash:.2f}")
+            lines.append(f"Positions: {self._portfolio.position_count}")
+
+        if self._risk:
+            lines.append(f"Daily P&L: ${self._risk.daily_pnl:+.2f}")
+            lines.append(f"Daily Trades: {self._risk.daily_trades}")
+
+        # Last scan time
+        last_scan = self._scan_state.get("last_scan")
+        if last_scan:
+            lines.append(f"Last Scan: {last_scan}")
+
+        await update.message.reply_text("\n".join(lines))
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        positions = self._executor.position_tracker.open_positions
-        if not positions:
+
+        rows = await self._db.fetchall("SELECT * FROM positions")
+        if not rows:
             await update.message.reply_text("No open positions.")
             return
-        lines = []
-        for p in positions:
-            pnl = p.unrealized_pnl or 0
-            pnl_icon = "+" if pnl >= 0 else ""
+
+        lines = ["Open Positions:"]
+        for p in rows:
+            entry = p["avg_entry"]
+            current = p.get("current_price", entry)
+            qty = p["qty"]
+            pnl = (current - entry) * qty
+            pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+
             lines.append(
-                f"{p.symbol} ({p.side})\n"
-                f"  Qty: {p.qty:.6f} @ ${p.avg_entry:.2f}\n"
-                f"  Now: ${p.current_price:.2f} | P&L: {pnl_icon}${pnl:.2f}\n"
-                f"  SL: ${p.stop_loss:.2f} | TP: ${p.take_profit:.2f}"
+                f"\n{p['symbol']} ({p.get('intent', 'DAY')})\n"
+                f"  Qty: {qty:.6f} @ ${entry:.2f}\n"
+                f"  Now: ${current:.2f} ({pnl_pct:+.1f}%)\n"
+                f"  P&L: ${pnl:+.2f}\n"
+                f"  SL: ${p.get('stop_loss', 0):.2f} | TP: ${p.get('take_profit', 0):.2f}"
             )
-        await update.message.reply_text("\n\n".join(lines))
+
+        await update.message.reply_text("\n".join(lines))
 
     async def cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        trades = await queries.get_recent_trades(self._db, limit=10)
-        if not trades:
-            await update.message.reply_text("No trades yet.")
+
+        rows = await self._db.fetchall(
+            "SELECT * FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 10"
+        )
+        if not rows:
+            await update.message.reply_text("No completed trades yet.")
             return
-        lines = []
-        for t in trades:
-            pnl = f"P&L: ${t.pnl:.2f}" if t.pnl is not None else ""
+
+        lines = ["Recent Trades:"]
+        for t in rows:
+            pnl = t.get("pnl", 0)
+            pnl_pct = t.get("pnl_pct", 0) * 100
+            emoji = "+" if pnl and pnl > 0 else ""
             lines.append(
-                f"{t.side.upper()} {t.symbol} | {t.qty:.6f} @ ${t.filled_price or t.price:.2f} "
-                f"| {t.status} {pnl}"
+                f"{t['symbol']} {t['side']} ${pnl:{emoji}.2f} ({pnl_pct:+.1f}%) "
+                f"fee=${t.get('fees', 0):.3f}"
             )
+
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show latest scan results — indicators and signals from system calculations."""
+        if not self._authorized(update):
+            return
+
+        if not self._scan_state or not self._scan_state.get("symbols"):
+            await update.message.reply_text("No scan data yet. Waiting for first scan cycle.")
+            return
+
+        lines = ["--- Market Report ---"]
+        for symbol, data in self._scan_state.get("symbols", {}).items():
+            price = data.get("price", 0)
+            regime = data.get("regime", "unknown")
+            rsi = data.get("rsi", 0)
+            ema_f = data.get("ema_fast", 0)
+            ema_s = data.get("ema_slow", 0)
+            vol_ratio = data.get("vol_ratio", 0)
+
+            trend = "BULLISH" if ema_f > ema_s else "BEARISH" if ema_f < ema_s else "NEUTRAL"
+
+            lines.append(
+                f"\n{symbol}: ${price:,.2f}\n"
+                f"  Regime: {regime} | Trend: {trend}\n"
+                f"  RSI: {rsi:.1f} | EMA 9/21: {ema_f:.2f}/{ema_s:.2f}\n"
+                f"  Vol: {vol_ratio:.1f}x avg"
+            )
+
+            signal = data.get("signal")
+            if signal:
+                lines.append(f"  Signal: {signal['action']} ({signal['confidence']:.0%})")
+                lines.append(f"  Reason: {signal['reasoning']}")
+
+        last_scan = self._scan_state.get("last_scan", "unknown")
+        lines.append(f"\nLast scan: {last_scan}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+
+        r = self._config.risk
+        lines = [
+            "--- Risk Limits ---",
+            f"Max per trade: {r.max_trade_pct:.0%}",
+            f"Default per trade: {r.default_trade_pct:.0%}",
+            f"Max positions: {r.max_positions}",
+            f"Max daily loss: {r.max_daily_loss_pct:.0%}",
+            f"Max drawdown: {r.max_drawdown_pct:.0%}",
+            f"Kill switch: {'ON' if r.kill_switch else 'OFF'}",
+        ]
+
+        if self._risk:
+            lines.append(f"\n--- Current ---")
+            lines.append(f"Daily P&L: ${self._risk.daily_pnl:+.2f}")
+            lines.append(f"Daily Trades: {self._risk.daily_trades}/{r.max_daily_trades}")
+            lines.append(f"Consecutive Losses: {self._risk.consecutive_losses}")
+            lines.append(f"Halted: {'YES - ' + self._risk.halt_reason if self._risk.is_halted else 'NO'}")
+
         await update.message.reply_text("\n".join(lines))
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        today = date.today()
-        week_ago = (today - timedelta(days=7)).isoformat()
-        perf = await queries.get_performance_range(self._db, week_ago, today.isoformat())
-        if not perf:
-            await update.message.reply_text("No performance data yet.")
-            return
-        total_pnl = sum(p.net_pnl for p in perf)
-        total_trades = sum(p.total_trades for p in perf)
-        total_wins = sum(p.wins for p in perf)
-        total_token_cost = sum(p.token_cost_usd for p in perf)
-        win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
-        msg = (
-            f"7-Day Performance:\n\n"
-            f"Net P&L: ${total_pnl:.2f}\n"
-            f"Trades: {total_trades}\n"
-            f"Win Rate: {win_rate:.1f}%\n"
-            f"Token Cost: ${total_token_cost:.2f}\n"
-            f"Net (after tokens): ${total_pnl - total_token_cost:.2f}"
-        )
-        await update.message.reply_text(msg)
 
-    async def cmd_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._reporter:
+            summary = await self._reporter.daily_summary()
+            await update.message.reply_text(summary)
+        else:
+            await update.message.reply_text("Reporter not available.")
+
+    async def cmd_strategy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        question = " ".join(context.args) if context.args else ""
-        if not question:
-            await update.message.reply_text("Usage: /ask <your question>")
-            return
-        status = self._executor.get_status()
-        answer = await self._analyst.ask_question(question, context=status)
-        await update.message.reply_text(answer)
 
-    async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-        self._executor.pause()
-        self._analyst.pause()
-        await update.message.reply_text("Trading paused. Use /resume to restart.")
+        from src.strategy.loader import get_strategy_path, get_code_hash
 
-    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-        self._executor.resume()
-        self._analyst.resume()
-        await update.message.reply_text("Trading resumed.")
+        path = get_strategy_path()
+        if path.exists():
+            code_hash = get_code_hash(path)
+            # Read first 5 lines for description
+            lines_all = path.read_text().split("\n")
+            desc = "\n".join(lines_all[:6])
 
-    async def cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-        rm = self._executor.risk_manager
-        limits = self._config.risk
-        msg = (
-            f"Risk Status:\n\n"
-            f"Kill Switch: {'ON' if limits.emergency.kill_switch else 'OFF'}\n"
-            f"Daily P&L: ${rm.daily_pnl:.2f} (limit: -${limits.daily.max_daily_loss_pct * 100:.0f}%)\n"
-            f"Daily Trades: {rm.daily_trades}/{limits.daily.max_daily_trades}\n"
-            f"Max Position: {limits.position.max_position_pct * 100:.0f}%\n"
-            f"Max Per Trade: {limits.per_trade.max_trade_pct * 100:.0f}%\n"
-            f"Stop Loss: {limits.per_trade.default_stop_loss_pct * 100:.0f}%\n"
-            f"Take Profit: {limits.per_trade.default_take_profit_pct * 100:.0f}%\n"
-            f"Max Drawdown: {limits.emergency.max_drawdown_pct * 100:.0f}%"
-        )
-        await update.message.reply_text(msg)
+            version = await self._db.fetchone(
+                "SELECT version, deployed_at FROM strategy_versions ORDER BY created_at DESC LIMIT 1"
+            )
+            ver_str = version["version"] if version else "v001 (initial)"
 
-    async def cmd_evolution(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-        summary = await self._executive.get_latest_evolution_summary()
-        await update.message.reply_text(summary)
+            # Paper test status
+            test = await self._db.fetchone(
+                "SELECT * FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            )
+
+            lines = [
+                f"Strategy: {ver_str}",
+                f"Hash: {code_hash}",
+                f"\n{desc}",
+            ]
+
+            if test:
+                lines.append(f"\nPaper Test: tier {test['risk_tier']}, ends {test['ends_at'][:10]}")
+
+            await update.message.reply_text("\n".join(lines))
+        else:
+            await update.message.reply_text("No active strategy file found.")
 
     async def cmd_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        costs = await self._tokens.get_daily_cost_summary()
-        if not costs:
-            await update.message.reply_text("No token usage today.")
-            return
-        total = sum(costs.values())
-        lines = ["Today's Token Costs:\n"]
-        for brain, cost in costs.items():
-            lines.append(f"  {brain}: ${cost:.4f}")
-        lines.append(f"\nTotal: ${total:.4f}")
-        await update.message.reply_text("\n".join(lines))
 
-    async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show recent analyst signals and AI decisions."""
+        if self._ai:
+            usage = await self._ai.get_daily_usage()
+            lines = [
+                "--- Token Usage ---",
+                f"Budget: {usage['used']:,} / {usage['daily_limit']:,}",
+                f"Cost today: ${usage['total_cost']:.4f}",
+            ]
+            for model, data in usage.get("models", {}).items():
+                short = model.split("-")[1] if "-" in model else model
+                lines.append(f"  {short}: {data['calls']} calls, ${data['cost']:.4f}")
+            await update.message.reply_text("\n".join(lines))
+        else:
+            await update.message.reply_text("AI client not available.")
+
+    async def cmd_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """On-demand question to Claude."""
         if not self._authorized(update):
             return
-        signals = await queries.get_recent_signals(self._db, limit=10)
-        if not signals:
-            await update.message.reply_text("No signals generated yet.")
+
+        question = " ".join(context.args) if context.args else ""
+        if not question:
+            await update.message.reply_text("Usage: /ask <your question>")
             return
-        lines = ["Recent Signals:\n"]
-        for s in signals:
-            acted = "ACTED" if s.acted_on else "skipped"
-            lines.append(
-                f"{s.direction.upper()} {s.symbol} | {s.signal_type}\n"
-                f"  Strength: {s.strength:.2f} | {acted}\n"
-                f"  {s.reasoning or 'No reasoning'}"
+
+        if not self._ai:
+            await update.message.reply_text("AI client not available.")
+            return
+
+        await update.message.reply_text("Thinking...")
+        try:
+            answer = await self._ai.ask_sonnet(
+                question, max_tokens=500, purpose="user_ask"
             )
-            if s.ai_response:
-                # Show first 80 chars of AI response
-                snippet = s.ai_response[:80].replace("\n", " ")
-                lines.append(f"  AI: {snippet}...")
-            lines.append("")
-        await update.message.reply_text("\n".join(lines)[:4000])  # Telegram 4096 char limit
+            await update.message.reply_text(answer[:4000])
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
 
-    async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show latest scan results — indicators, regime, and signals from the system's own calculations."""
+    async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
+        self._paused = True
+        await update.message.reply_text("Trading PAUSED. Scan loop will skip signal execution.")
 
-        if not self._scan_state:
-            await update.message.reply_text("No scan data yet. Wait for the next 5-min scan cycle.")
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
             return
-
-        last_scan = self._scan_state.get("last_scan_time", "unknown")
-        lines = [f"Market Report (scan: {last_scan})\n"]
-
-        for symbol in self._config.markets.crypto_symbols:
-            data = self._scan_state.get(symbol)
-            if not data:
-                lines.append(f"{symbol}: No data\n")
-                continue
-
-            price = data.get("price", 0)
-            regime = data.get("regime", "unknown")
-            regime_desc = data.get("regime_desc", "")
-            rsi = data.get("rsi")
-            bb_pct = data.get("bb_pct")
-            ema_fast = data.get("ema_fast")
-            ema_slow = data.get("ema_slow")
-            macd_hist = data.get("macd_hist")
-            vol_ratio = data.get("vol_ratio")
-            signal_dir = data.get("signal_direction")
-            signal_str = data.get("signal_strength")
-            signal_type = data.get("signal_type")
-
-            ema_align = ""
-            if ema_fast and ema_slow:
-                ema_align = "bullish" if ema_fast > ema_slow else "bearish"
-
-            lines.append(f"{symbol} — ${price:,.2f}")
-            lines.append(f"  Regime: {regime} ({regime_desc})")
-            if rsi is not None:
-                rsi_label = " (oversold)" if rsi < 30 else " (overbought)" if rsi > 70 else ""
-                lines.append(f"  RSI: {rsi:.1f}{rsi_label}")
-            if bb_pct is not None:
-                bb_label = " (below lower)" if bb_pct < 0 else " (above upper)" if bb_pct > 1 else ""
-                lines.append(f"  BB%: {bb_pct:.2f}{bb_label}")
-            if ema_align:
-                lines.append(f"  EMA: {ema_align} (fast={ema_fast:.2f}, slow={ema_slow:.2f})")
-            if macd_hist is not None:
-                lines.append(f"  MACD hist: {macd_hist:+.4f}")
-            if vol_ratio is not None:
-                lines.append(f"  Volume: {vol_ratio:.1f}x avg")
-            if signal_dir:
-                lines.append(f"  Signal: {signal_dir.upper()} ({signal_type}, strength={signal_str:.2f})")
-            else:
-                lines.append("  Signal: none")
-            lines.append("")
-
-        await update.message.reply_text("\n".join(lines)[:4000])
+        self._paused = False
+        if self._risk and self._risk.is_halted:
+            self._risk.unhalt()
+            await update.message.reply_text("Trading RESUMED. Risk halt cleared.")
+        else:
+            await update.message.reply_text("Trading RESUMED.")
 
     async def cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Emergency stop — close all positions."""
         if not self._authorized(update):
             return
-        await update.message.reply_text("EMERGENCY: Closing all positions...")
-        results = await self._executor.emergency_close_all()
-        self._executor.pause()
-        self._analyst.pause()
-        msg = f"Closed {len(results)} positions. Trading halted.\nUse /resume to restart."
-        await update.message.reply_text(msg)
+
+        self._paused = True
+        await update.message.reply_text("EMERGENCY STOP initiated. Closing all positions...")
+
+        # This will be handled by main.py's emergency handler
+        self._scan_state["kill_requested"] = True

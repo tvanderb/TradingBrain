@@ -111,3 +111,92 @@ Continuing from session 1. System was running in paper mode, user tested Telegra
 - Old system stopped
 - Design phase complete
 - Ready to implement on new branch
+
+## Session 3 (2026-02-07)
+
+### Context
+Continuing from session 2. All design finalized, notes comprehensive, user said "let it rip."
+
+### Git Setup
+- Committed v1 code on master branch (commit 2a6dbe5)
+- Created `v2-io-container` branch
+- Cleaned out v1 source code, preserved claude_notes/, config/, data/
+- Created v2 directory structure per architecture.md
+
+### Build Progress
+- [x] Phase 1: Foundation (pyproject.toml, config, contracts, database, logging)
+- [x] Phase 2: Shell (Kraken, risk, portfolio, data store)
+- [x] Phase 3: Strategy (loader, sandbox, backtester, v001, skills)
+- [x] Phase 4: Orchestrator (AI client, nightly cycle, reporter)
+- [x] Phase 5: Telegram (bot, commands, notifications)
+- [x] Phase 6: Main (scheduler, lifecycle, startup/shutdown)
+- [x] Phase 7: Tests and verification — 18/18 passing
+
+### Files Created (v2)
+```
+config/settings.toml          — Updated for v2 (AI provider, orchestrator, data tiering)
+config/risk_limits.toml        — Updated (added rollback section)
+pyproject.toml                 — Updated (v2.0.0, added websockets, certifi, anthropic[vertex])
+.env.example                   — Updated (added Vertex comment)
+.gitignore                     — Updated (added reports/, .claude/)
+
+src/__init__.py
+src/main.py                    — Full TradingBrain class with lifecycle, scheduler, scan loop
+src/shell/__init__.py
+src/shell/contract.py          — IO Contract: Signal, SymbolData, Portfolio, RiskLimits, StrategyBase
+src/shell/config.py            — Config loading from TOML + .env
+src/shell/database.py          — SQLite schema (11 tables), async Database class
+src/shell/kraken.py            — Kraken REST + WebSocket v2 client
+src/shell/risk.py              — Risk manager with rollback triggers
+src/shell/portfolio.py         — Portfolio tracker (paper + live), P&L, daily snapshots
+src/shell/data_store.py        — Tiered OHLCV storage, aggregation, pruning
+src/strategy/__init__.py
+src/strategy/loader.py         — Dynamic strategy import, archive, deploy
+src/strategy/sandbox.py        — Strategy validation (syntax, imports, runtime)
+src/strategy/backtester.py     — Historical backtesting with full metrics
+src/orchestrator/__init__.py
+src/orchestrator/ai_client.py  — Anthropic/Vertex abstraction, token tracking
+src/orchestrator/orchestrator.py — Nightly cycle: analyze→generate→review→sandbox→deploy
+src/orchestrator/reporter.py   — Daily/weekly reports, strategy performance metrics
+src/telegram/__init__.py
+src/telegram/bot.py            — Bot setup and lifecycle
+src/telegram/commands.py       — 13 commands (/status, /positions, /report, /risk, etc.)
+src/telegram/notifications.py  — Proactive alerts (trades, P&L, strategy changes, rollbacks)
+src/utils/__init__.py
+src/utils/logging.py           — Structured logging with structlog
+
+strategy/active/strategy.py    — v001: EMA 9/21 + RSI 14 + Volume 1.2x
+strategy/strategy_document.md  — Initial strategy document (7 sections)
+strategy/skills/__init__.py
+strategy/skills/indicators.py  — Reusable indicators (RSI, EMA, BB, MACD, ATR, vol ratio, regime)
+
+tests/test_integration.py      — 18 tests covering all components
+```
+
+### Tests Passing (18/18)
+- Config loading from TOML + env
+- Database schema creation (11 tables)
+- Database CRUD operations
+- IO contract types (Signal, RiskLimits, etc.)
+- Risk manager: basic checks, daily limits, consecutive losses, size clamping
+- Strategy loading and initialization
+- Strategy analyze() returns correct types
+- Sandbox validates good strategies
+- Sandbox rejects forbidden imports, eval, syntax errors
+- Indicator computation (RSI, EMA, volume ratio, regime)
+- Paper trade buy/sell cycle with P&L verification
+- Paper trade fee deduction verification
+- Kraken pair mapping (BTC/USD <-> XBTUSD)
+- Backtester runs on synthetic data
+
+### Key Findings
+- Python 3.14.2 on macOS works with all deps
+- aiosqlite executescript fails if leftover DB file exists with partial schema — always use fresh path
+- Strategy sandbox catches forbidden imports via AST analysis before execution
+- Paper trade slippage of 0.05% + taker fee 0.40% means ~0.45% cost per side
+
+### Current Status
+- All v2 code compiles and tests pass
+- System ready to run in paper mode
+- Need user's .env file (Kraken key, Anthropic key, Telegram token)
+- System can start without API keys (will just fail on Kraken/AI calls gracefully)

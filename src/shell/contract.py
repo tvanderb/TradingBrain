@@ -1,0 +1,157 @@
+"""IO Contract — rigid interface between Shell and Strategy Module.
+
+These types define EXACTLY what the Strategy receives and what it must return.
+The Shell enforces risk limits on all Signals before execution.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+import pandas as pd
+
+
+# --- Enums ---
+
+class Action(Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    CLOSE = "CLOSE"
+
+
+class Intent(Enum):
+    DAY = "DAY"
+    SWING = "SWING"
+    POSITION = "POSITION"
+
+
+class OrderType(Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+# --- Input Types (Shell -> Strategy) ---
+
+@dataclass(frozen=True)
+class OpenPosition:
+    symbol: str
+    side: str               # "long" or "short"
+    qty: float
+    avg_entry: float
+    current_price: float
+    unrealized_pnl: float
+    unrealized_pnl_pct: float
+    intent: Intent
+    stop_loss: Optional[float]
+    take_profit: Optional[float]
+    opened_at: datetime
+
+
+@dataclass(frozen=True)
+class ClosedTrade:
+    symbol: str
+    side: str
+    qty: float
+    entry_price: float
+    exit_price: float
+    pnl: float
+    pnl_pct: float
+    fees: float
+    intent: Intent
+    opened_at: datetime
+    closed_at: datetime
+
+
+@dataclass(frozen=True)
+class SymbolData:
+    symbol: str
+    current_price: float
+    candles_5m: pd.DataFrame   # Last 30 days of 5-min candles
+    candles_1h: pd.DataFrame   # Last 1 year of 1-hour candles
+    candles_1d: pd.DataFrame   # Last 7 years of daily candles
+    spread: float
+    volume_24h: float
+
+
+@dataclass(frozen=True)
+class Portfolio:
+    cash: float
+    total_value: float
+    positions: list[OpenPosition]
+    recent_trades: list[ClosedTrade]  # Last 100
+    daily_pnl: float
+    total_pnl: float
+    fees_today: float
+
+
+@dataclass(frozen=True)
+class RiskLimits:
+    max_trade_pct: float
+    default_trade_pct: float
+    max_positions: int
+    max_daily_loss_pct: float
+    max_drawdown_pct: float
+
+
+# --- Output Types (Strategy -> Shell) ---
+
+@dataclass
+class Signal:
+    symbol: str
+    action: Action
+    size_pct: float                      # 0.0-1.0 of portfolio
+    order_type: OrderType = OrderType.MARKET
+    limit_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    intent: Intent = Intent.DAY
+    confidence: float = 0.5
+    reasoning: str = ""
+
+
+# --- Strategy Interface ---
+
+class StrategyBase:
+    """Base class that defines the IO contract for strategy modules.
+
+    Strategies MUST implement: initialize(), analyze()
+    Strategies SHOULD implement: on_fill(), on_position_closed(), get_state(), load_state()
+    Strategies MAY override: scan_interval_minutes
+    """
+
+    def initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None:
+        """Called once on startup. Store risk limits and symbol list."""
+        raise NotImplementedError
+
+    def analyze(
+        self,
+        markets: dict[str, SymbolData],
+        portfolio: Portfolio,
+        timestamp: datetime,
+    ) -> list[Signal]:
+        """Called every scan interval. Return trading signals (may be empty)."""
+        raise NotImplementedError
+
+    def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent) -> None:
+        """Called when an order is filled. Update internal state."""
+        pass
+
+    def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float) -> None:
+        """Called when a position is fully closed. Record outcome."""
+        pass
+
+    def get_state(self) -> dict:
+        """Serialize internal state for persistence across restarts."""
+        return {}
+
+    def load_state(self, state: dict) -> None:
+        """Restore internal state after restart."""
+        pass
+
+    @property
+    def scan_interval_minutes(self) -> int:
+        """How often analyze() should be called. Default 5 minutes."""
+        return 5

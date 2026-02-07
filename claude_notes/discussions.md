@@ -287,7 +287,8 @@ User proposed scrapping the three-brain architecture entirely in favor of a fund
 - Systemd service on VPS with auto-restart on crash
 - Full details in architecture.md
 
-## All Design Decisions FINALIZED — Ready to Build
-- New branch from current repo
-- Reuse: Kraken client, risk management patterns, Telegram scaffolding
-- Complete rewrite of architecture around IO-container pattern
+## All Design Decisions FINALIZED — Built and Tested
+- v2 implementation COMPLETE on `v2-io-container` branch
+- 18/18 integration tests passing
+- All components built per architecture.md spec
+- Ready for paper trading with user's .env credentials

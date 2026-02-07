@@ -1,79 +1,89 @@
-"""Outbound Telegram notifications.
+"""Telegram Notifications — proactive alerts to the user.
 
-Sends alerts for trades, stop triggers, daily summaries, and system events.
+Sends notifications for:
+- Trade executed (entry/exit)
+- Stop-loss / take-profit hit
+- Daily P&L summary
+- Weekly performance report
+- Strategy changes
+- Rollback alerts
+- System errors
 """
 
 from __future__ import annotations
 
-from telegram import Bot
+import structlog
+from telegram.ext import Application
 
-from src.core.config import Config
-from src.core.logging import get_logger
-
-log = get_logger("notifications")
+log = structlog.get_logger()
 
 
 class Notifier:
-    """Sends Telegram notifications for system events."""
+    """Sends proactive Telegram notifications."""
 
-    def __init__(self, config: Config) -> None:
-        self._config = config
-        self._bot: Bot | None = None
-        self._chat_id = config.telegram.chat_id
+    def __init__(self, chat_id: str, app: Application | None = None) -> None:
+        self._chat_id = chat_id
+        self._app = app
 
-        if config.telegram.enabled and config.telegram.bot_token:
-            self._bot = Bot(token=config.telegram.bot_token)
+    def set_app(self, app: Application) -> None:
+        self._app = app
 
-    async def send(self, message: str) -> None:
-        """Send a message to the configured chat."""
-        if not self._bot or not self._chat_id:
-            log.info("notification_skipped", msg=message[:50])
+    async def _send(self, text: str) -> None:
+        if not self._app or not self._chat_id:
+            log.debug("notifier.skip", reason="no app or chat_id")
             return
         try:
-            await self._bot.send_message(chat_id=self._chat_id, text=message)
+            await self._app.bot.send_message(chat_id=self._chat_id, text=text[:4096])
         except Exception as e:
-            log.error("notification_error", error=str(e))
+            log.error("notifier.send_failed", error=str(e))
 
-    async def trade_executed(self, result: object, signal: object) -> None:
-        await self.send(
-            f"Trade Executed\n"
-            f"{'BUY' if signal.direction == 'long' else 'SELL'} {signal.symbol}\n"
-            f"Price: ${result.filled_price:.2f}\n"
-            f"Signal: {signal.signal_type} (strength={signal.strength:.2f})\n"
-            f"Commission: ${result.commission:.4f}"
+    async def trade_executed(self, trade: dict) -> None:
+        action = trade.get("action", "?")
+        symbol = trade.get("symbol", "?")
+        qty = trade.get("qty", 0)
+        price = trade.get("price", 0)
+        fee = trade.get("fee", 0)
+        intent = trade.get("intent", "DAY")
+
+        lines = [
+            f"Trade: {action} {symbol}",
+            f"Qty: {qty:.6f} @ ${price:,.2f}",
+            f"Fee: ${fee:.4f}",
+            f"Intent: {intent}",
+        ]
+
+        pnl = trade.get("pnl")
+        if pnl is not None:
+            lines.append(f"P&L: ${pnl:+.2f} ({trade.get('pnl_pct', 0)*100:+.1f}%)")
+
+        await self._send("\n".join(lines))
+
+    async def stop_triggered(self, symbol: str, reason: str, price: float) -> None:
+        await self._send(f"Stop Triggered: {symbol}\nReason: {reason}\nPrice: ${price:,.2f}")
+
+    async def daily_summary(self, summary: str) -> None:
+        await self._send(summary)
+
+    async def weekly_report(self, report: str) -> None:
+        await self._send(report)
+
+    async def strategy_change(self, version: str, tier: int, changes: str) -> None:
+        tier_name = {1: "Tweak", 2: "Restructure", 3: "Overhaul"}.get(tier, "Unknown")
+        await self._send(
+            f"Strategy Change: {version}\n"
+            f"Type: {tier_name} (tier {tier})\n"
+            f"Changes: {changes[:500]}"
         )
 
-    async def stop_triggered(self, symbol: str, pnl: float) -> None:
-        icon = "+" if pnl >= 0 else ""
-        trigger_type = "Take Profit" if pnl >= 0 else "Stop Loss"
-        await self.send(f"{trigger_type}: {symbol}\nP&L: {icon}${pnl:.2f}")
+    async def rollback_alert(self, reason: str, version: str) -> None:
+        await self._send(f"ROLLBACK TRIGGERED\nReason: {reason}\nRolled back to: {version}")
 
-    async def daily_summary(self, status: dict) -> None:
-        await self.send(
-            f"Daily Summary\n\n"
-            f"Portfolio: ${status['portfolio_value']:.2f}\n"
-            f"Day P&L: ${status['daily_pnl']:.2f}\n"
-            f"Trades: {status['daily_trades']}\n"
-            f"Positions: {status['open_positions']}"
-        )
+    async def system_error(self, error: str) -> None:
+        await self._send(f"System Error: {error[:500]}")
 
-    async def evolution_complete(self, summary: dict) -> None:
-        analysis = summary.get("analysis", {})
-        changes = summary.get("changes", {})
-        n_changes = len(changes.get("adjustments", {})) if changes else 0
-        await self.send(
-            f"Brain Evolution Complete\n\n"
-            f"{analysis.get('overall_assessment', 'No assessment')}\n"
-            f"Parameter changes: {n_changes}"
-        )
-
-    async def error(self, context: str, error: str) -> None:
-        await self.send(f"ERROR [{context}]\n{error[:200]}")
-
-    async def fee_update(self, maker: float, taker: float, tier: str) -> None:
-        await self.send(
-            f"Fee Schedule Updated\n"
-            f"Maker: {maker}%\n"
-            f"Taker: {taker}%\n"
-            f"Tier: {tier}"
+    async def system_online(self, portfolio_value: float, positions: int) -> None:
+        await self._send(
+            f"System Online\n"
+            f"Portfolio: ${portfolio_value:.2f}\n"
+            f"Positions: {positions}"
         )

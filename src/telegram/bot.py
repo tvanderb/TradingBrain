@@ -1,66 +1,69 @@
-"""Telegram bot setup and lifecycle management."""
+"""Telegram Bot — setup and lifecycle management."""
 
 from __future__ import annotations
 
+import structlog
 from telegram.ext import Application, CommandHandler
 
-from src.core.config import Config
-from src.core.logging import get_logger
+from src.shell.config import TelegramConfig
 from src.telegram.commands import BotCommands
 
-log = get_logger("telegram")
+log = structlog.get_logger()
 
 
 class TelegramBot:
-    """Telegram bot for user interaction with the trading brain."""
+    """Manages the Telegram bot application lifecycle."""
 
-    def __init__(self, config: Config, commands: BotCommands) -> None:
+    def __init__(self, config: TelegramConfig, commands: BotCommands) -> None:
         self._config = config
         self._commands = commands
         self._app: Application | None = None
 
     async def start(self) -> None:
         """Initialize and start the Telegram bot."""
-        if not self._config.telegram.enabled:
-            log.info("telegram_disabled")
+        if not self._config.enabled or not self._config.bot_token:
+            log.info("telegram.disabled")
             return
 
-        token = self._config.telegram.bot_token
-        if not token:
-            log.warning("telegram_no_token", msg="Set TELEGRAM_BOT_TOKEN in .env")
-            return
+        self._app = (
+            Application.builder()
+            .token(self._config.bot_token)
+            .build()
+        )
 
-        self._app = Application.builder().token(token).build()
-        self._register_handlers()
+        # Register command handlers
+        handlers = {
+            "start": self._commands.cmd_start,
+            "status": self._commands.cmd_status,
+            "positions": self._commands.cmd_positions,
+            "trades": self._commands.cmd_trades,
+            "report": self._commands.cmd_report,
+            "risk": self._commands.cmd_risk,
+            "performance": self._commands.cmd_performance,
+            "strategy": self._commands.cmd_strategy,
+            "tokens": self._commands.cmd_tokens,
+            "ask": self._commands.cmd_ask,
+            "pause": self._commands.cmd_pause,
+            "resume": self._commands.cmd_resume,
+            "kill": self._commands.cmd_kill,
+        }
+
+        for name, handler in handlers.items():
+            self._app.add_handler(CommandHandler(name, handler))
 
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
-
-        log.info("telegram_started")
-
-    def _register_handlers(self) -> None:
-        assert self._app is not None
-        c = self._commands
-
-        self._app.add_handler(CommandHandler("start", c.cmd_start))
-        self._app.add_handler(CommandHandler("status", c.cmd_status))
-        self._app.add_handler(CommandHandler("positions", c.cmd_positions))
-        self._app.add_handler(CommandHandler("trades", c.cmd_trades))
-        self._app.add_handler(CommandHandler("performance", c.cmd_performance))
-        self._app.add_handler(CommandHandler("ask", c.cmd_ask))
-        self._app.add_handler(CommandHandler("pause", c.cmd_pause))
-        self._app.add_handler(CommandHandler("resume", c.cmd_resume))
-        self._app.add_handler(CommandHandler("risk", c.cmd_risk))
-        self._app.add_handler(CommandHandler("evolution", c.cmd_evolution))
-        self._app.add_handler(CommandHandler("tokens", c.cmd_tokens))
-        self._app.add_handler(CommandHandler("signals", c.cmd_signals))
-        self._app.add_handler(CommandHandler("report", c.cmd_report))
-        self._app.add_handler(CommandHandler("kill", c.cmd_kill))
+        log.info("telegram.started")
 
     async def stop(self) -> None:
-        if self._app and self._app.updater:
+        """Gracefully stop the bot."""
+        if self._app:
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
-            log.info("telegram_stopped")
+            log.info("telegram.stopped")
+
+    @property
+    def app(self) -> Application | None:
+        return self._app

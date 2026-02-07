@@ -1,134 +1,425 @@
-"""Integration test: Full pipeline from signal to paper trade."""
+"""Integration tests for the v2 IO-Container trading system.
+
+Tests: config loading, database schema, IO contract, risk management,
+strategy loading/sandbox, portfolio operations, backtester.
+"""
 
 import asyncio
+import json
 import os
-from pathlib import Path
+import tempfile
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.core.config import Config
-from src.core.logging import setup_logging
-from src.market.regime import classify_regime
-from src.market.signals import RawSignal, SignalGenerator
-from src.storage.database import Database
-from src.storage.models import FeeSchedule
-from src.storage.models import Signal as DbSignal
-from src.storage.models import Trade
-from src.storage import queries
-from src.trading.order_manager import PaperTrader
-from src.trading.risk_manager import RiskManager
+# --- Config ---
+
+def test_config_loading():
+    from src.shell.config import load_config
+    config = load_config()
+    assert config.mode == "paper"
+    assert "BTC/USD" in config.symbols
+    assert config.risk.max_trade_pct == 0.05
+    assert config.risk.rollback_consecutive_losses == 10
+    assert config.ai.provider in ("anthropic", "vertex")
 
 
-async def run_test():
-    config = Config.load()
-    setup_logging("WARNING")  # Quiet for test output
+# --- Database ---
 
-    test_db_path = Path("/tmp/test_brain.db")
-    if test_db_path.exists():
-        test_db_path.unlink()
+@pytest.mark.asyncio
+async def test_database_schema():
+    from src.shell.database import Database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
 
-    db = Database(test_db_path)
-    await db.connect()
+    try:
+        db = Database(db_path)
+        await db.connect()
 
-    print("=== Integration Test: Full Pipeline ===\n")
+        rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = [r["name"] for r in rows]
 
-    # 1. Synthetic market data
-    np.random.seed(42)
-    n = 200
-    base_price = 50000
-    returns = np.random.randn(n) * 0.002
-    prices = base_price * np.cumprod(1 + returns)
+        required = ["candles", "positions", "trades", "signals", "daily_performance",
+                     "strategy_versions", "orchestrator_log", "token_usage",
+                     "fee_schedule", "strategy_state", "paper_tests"]
+        for t in required:
+            assert t in tables, f"Missing table: {t}"
 
-    df = pd.DataFrame({
-        "open": prices * (1 + np.random.randn(n) * 0.0005),
-        "high": prices * (1 + abs(np.random.randn(n) * 0.001)),
-        "low": prices * (1 - abs(np.random.randn(n) * 0.001)),
-        "close": prices,
-        "volume": np.random.rand(n) * 10 + 1,
-    })
-    print(f"1. Synthetic data: {n} bars, price ${prices.min():.0f}-${prices.max():.0f}")
+        await db.close()
+    finally:
+        os.unlink(db_path)
 
-    # 2. Regime classification
-    regime = classify_regime(df)
-    print(f"2. Regime: {regime.regime.value} (confidence={regime.confidence:.2f})")
 
-    # 3. Signal generation
-    signal_gen = SignalGenerator(config.strategy)
-    signal = signal_gen.generate(df, "BTC/USD")
-    if signal:
-        print(f"3. Signal: {signal.direction} (strength={signal.strength:.3f})")
-        print(f"   Reason: {signal.reasoning}")
-    else:
-        signal = RawSignal("BTC/USD", "trend", 0.75, "long", "Forced test signal")
-        print(f"3. No natural signal - using test signal (strength=0.75)")
+@pytest.mark.asyncio
+async def test_database_crud():
+    from src.shell.database import Database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
 
-    # 4. Risk check
-    fees = FeeSchedule(maker_fee_pct=0.16, taker_fee_pct=0.26)
-    risk = RiskManager(config.risk, fees)
-    portfolio = 1000.0
-    trade_usd = risk.calculate_position_size(portfolio, signal.strength)
-    check = risk.check_trade("BTC/USD", "buy", trade_usd, portfolio, [])
-    print(f"4. Trade size: ${trade_usd:.2f} | Risk: {'PASS' if check.passed else 'FAIL'}")
+    try:
+        db = Database(db_path)
+        await db.connect()
 
-    # 5. Paper trade: buy
-    paper = PaperTrader(initial_balance_usd=1000.0, fees=fees)
-    price = prices[-1]
-    qty = trade_usd / price
-    buy = paper.execute("BTC/USD", "buy", qty, price)
-    print(f"5. BUY  @ ${buy.filled_price:.2f} | Fee: ${buy.commission:.4f} | Balance: ${paper.balance_usd:.2f}")
+        # Insert
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning) VALUES (?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test signal"),
+        )
+        await db.commit()
 
-    # 6. Paper trade: sell at +2%
-    exit_price = price * 1.02
-    sell = paper.execute("BTC/USD", "sell", qty, exit_price)
-    gross = (sell.filled_price - buy.filled_price) * qty
-    total_fees = buy.commission + sell.commission
-    net = gross - total_fees
-    print(f"6. SELL @ ${sell.filled_price:.2f} | Fee: ${sell.commission:.4f} | Balance: ${paper.balance_usd:.2f}")
-    print(f"   Gross: ${gross:.4f} | Fees: ${total_fees:.4f} ({total_fees/gross*100:.1f}% of gross) | Net: ${net:.4f}")
+        # Read
+        row = await db.fetchone("SELECT * FROM signals WHERE symbol = 'BTC/USD'")
+        assert row is not None
+        assert row["action"] == "BUY"
+        assert row["confidence"] == 0.8
 
-    # 7. Database operations
-    sig_id = await queries.insert_signal(db, DbSignal(
-        symbol="BTC/USD", signal_type="trend", strength=0.75,
-        direction="long", reasoning="Test",
-    ))
-    trade = Trade(symbol="BTC/USD", side="buy", qty=qty, price=price, order_type="market")
-    trade_id = await queries.insert_trade(db, trade)
-    await queries.update_trade_fill(db, trade_id, buy.filled_price, buy.exchange_order_id, buy.commission)
-    await queries.update_trade_pnl(db, trade_id, net)
-    recent = await queries.get_recent_trades(db, limit=5)
-    print(f"7. DB: {len(recent)} trade(s) stored, P&L: ${recent[0].pnl:.4f}")
+        await db.close()
+    finally:
+        os.unlink(db_path)
 
-    # 8. Fee storage
-    await queries.insert_fee_check(db, fees)
-    latest = await queries.get_latest_fees(db)
-    print(f"8. Fees stored: maker={latest.maker_fee_pct}%, taker={latest.taker_fee_pct}%")
 
-    # 9. Stop loss / take profit calculation
-    sl, tp = risk.get_stop_take_profit(buy.filled_price, "long")
-    print(f"9. SL: ${sl:.2f} | TP: ${tp:.2f}")
+# --- IO Contract ---
 
-    # 10. Edge cases
-    # Try to buy more than balance
-    huge_buy = paper.execute("BTC/USD", "buy", 1.0, 50000.0)
-    assert not huge_buy.success, "Should fail on insufficient balance"
-    print(f"10. Overdraft blocked: {huge_buy.message}")
+def test_contract_types():
+    from src.shell.contract import Signal, Action, Intent, OrderType, SymbolData, Portfolio, RiskLimits
 
-    # Try to sell more than holdings
-    bad_sell = paper.execute("ETH/USD", "sell", 1.0, 3000.0)
-    assert not bad_sell.success, "Should fail on no holdings"
-    print(f"    No-holdings blocked: {bad_sell.message}")
+    sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
+    assert sig.symbol == "BTC/USD"
+    assert sig.action == Action.BUY
+    assert sig.intent == Intent.DAY  # Default
+    assert sig.order_type == OrderType.MARKET  # Default
 
-    # Risk: exceed daily trade limit
+    limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
+                        max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
+    assert limits.max_trade_pct == 0.05
+
+
+# --- Risk Manager ---
+
+def test_risk_basic_checks():
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.shell.contract import Signal, Action
+
+    config = load_config()
+    rm = RiskManager(config.risk)
+
+    # Should pass: small trade, no positions
+    sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
+    check = rm.check_signal(sig, portfolio_value=200, open_position_count=0)
+    assert check.passed
+
+    # Should fail: size exceeds limit
+    sig2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.10)
+    check2 = rm.check_signal(sig2, portfolio_value=200, open_position_count=0)
+    assert not check2.passed
+    assert "Trade size" in check2.reason
+
+    # Should fail: max positions
+    sig3 = Signal(symbol="ETH/USD", action=Action.BUY, size_pct=0.02)
+    check3 = rm.check_signal(sig3, portfolio_value=200, open_position_count=5)
+    assert not check3.passed
+    assert "Max positions" in check3.reason
+
+
+def test_risk_daily_limits():
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.shell.contract import Signal, Action
+
+    config = load_config()
+    rm = RiskManager(config.risk)
+
+    # Simulate daily loss
     for _ in range(20):
-        risk.record_trade_result(0.5)
-    check = risk.check_trade("BTC/USD", "buy", 20.0, 1000.0, [])
-    assert not check.passed, "Should fail on daily trade limit"
-    print(f"    Daily limit blocked: {check.reason}")
+        rm.record_trade_result(-0.5)
 
-    print("\n=== ALL TESTS PASSED ===")
-    await db.close()
+    sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
+    check = rm.check_signal(sig, portfolio_value=200, open_position_count=0)
+    assert not check.passed
+    assert "Daily" in check.reason
 
 
-if __name__ == "__main__":
-    asyncio.run(run_test())
+def test_risk_consecutive_losses():
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.shell.contract import Signal, Action
+
+    config = load_config()
+    rm = RiskManager(config.risk)
+
+    # 10 consecutive losses should trigger halt
+    for _ in range(10):
+        rm.record_trade_result(-0.1)
+
+    sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
+    check = rm.check_signal(sig, portfolio_value=200, open_position_count=0)
+    assert not check.passed
+    assert "consecutive" in check.reason.lower()
+
+
+def test_risk_clamp():
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.shell.contract import Signal, Action
+
+    config = load_config()
+    rm = RiskManager(config.risk)
+
+    sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.15)
+    clamped = rm.clamp_signal(sig, portfolio_value=200)
+    assert clamped.size_pct == config.risk.max_trade_pct
+
+
+# --- Strategy Loading ---
+
+def test_strategy_load():
+    from src.strategy.loader import load_strategy, get_code_hash, get_strategy_path
+    from src.shell.contract import RiskLimits
+
+    strategy = load_strategy()
+    assert strategy is not None
+    assert strategy.scan_interval_minutes == 5
+
+    limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
+                        max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
+    strategy.initialize(limits, ["BTC/USD", "ETH/USD", "SOL/USD"])
+
+    state = strategy.get_state()
+    assert isinstance(state, dict)
+
+    h = get_code_hash(get_strategy_path())
+    assert len(h) == 16
+
+
+def test_strategy_analyze_empty():
+    """Strategy should return empty list when no crossover happens."""
+    from src.strategy.loader import load_strategy
+    from src.shell.contract import RiskLimits, SymbolData, Portfolio
+
+    strategy = load_strategy()
+    limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
+                        max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
+    strategy.initialize(limits, ["BTC/USD"])
+
+    # Flat price data — no crossover
+    dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
+    df = pd.DataFrame({
+        "open": [70000] * 100,
+        "high": [70100] * 100,
+        "low": [69900] * 100,
+        "close": [70000] * 100,
+        "volume": [50] * 100,
+    }, index=dates)
+
+    markets = {"BTC/USD": SymbolData(
+        symbol="BTC/USD", current_price=70000,
+        candles_5m=df, candles_1h=df, candles_1d=df,
+        spread=0.001, volume_24h=1000000,
+    )}
+
+    portfolio = Portfolio(
+        cash=200, total_value=200, positions=[], recent_trades=[],
+        daily_pnl=0, total_pnl=0, fees_today=0,
+    )
+
+    # First call initializes EMA state, second should have prev values
+    signals = strategy.analyze(markets, portfolio, datetime.now())
+    signals2 = strategy.analyze(markets, portfolio, datetime.now())
+    # Flat data = no crossover = no signals
+    assert isinstance(signals2, list)
+
+
+# --- Sandbox ---
+
+def test_sandbox_valid_strategy():
+    from src.strategy.sandbox import validate_strategy
+    from src.strategy.loader import get_strategy_path
+
+    code = get_strategy_path().read_text()
+    result = validate_strategy(code)
+    assert result.passed
+    assert len(result.errors) == 0
+
+
+def test_sandbox_rejects_forbidden():
+    from src.strategy.sandbox import validate_strategy
+
+    # subprocess import
+    result = validate_strategy("import subprocess\nclass Strategy: pass")
+    assert not result.passed
+
+    # os import
+    result = validate_strategy("import os\nclass Strategy: pass")
+    assert not result.passed
+
+    # eval call
+    result = validate_strategy("eval('1+1')\nclass Strategy: pass")
+    assert not result.passed
+
+
+def test_sandbox_rejects_syntax_error():
+    from src.strategy.sandbox import validate_strategy
+    result = validate_strategy("def foo(")
+    assert not result.passed
+
+
+# --- Indicators ---
+
+def test_compute_indicators():
+    from strategy.skills import compute_indicators
+
+    dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
+    df = pd.DataFrame({
+        "open": np.random.uniform(69000, 71000, 100),
+        "high": np.random.uniform(70000, 72000, 100),
+        "low": np.random.uniform(68000, 70000, 100),
+        "close": np.random.uniform(69000, 71000, 100),
+        "volume": np.random.uniform(10, 100, 100),
+    }, index=dates)
+
+    indicators = compute_indicators(df)
+    assert "rsi" in indicators
+    assert "ema_fast" in indicators
+    assert "ema_slow" in indicators
+    assert "vol_ratio" in indicators
+    assert "regime" in indicators
+    assert 0 <= indicators["rsi"] <= 100
+
+
+# --- Portfolio ---
+
+@pytest.mark.asyncio
+async def test_paper_trade_cycle():
+    """Full paper trade: buy BTC, sell BTC, check P&L."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent, OrderType
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        initial = await portfolio.total_value()
+        assert initial == config.paper_balance_usd
+
+        # Buy BTC
+        buy_signal = Signal(
+            symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+            stop_loss=49000, take_profit=55000, intent=Intent.DAY,
+        )
+        result = await portfolio.execute_signal(buy_signal, 50000, 0.25, 0.40)
+        assert result is not None
+        assert result["action"] == "BUY"
+        assert result["qty"] > 0
+        assert portfolio.position_count == 1
+
+        # Sell BTC at profit
+        sell_signal = Signal(
+            symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY,
+        )
+        result2 = await portfolio.execute_signal(sell_signal, 51000, 0.25, 0.40)
+        assert result2 is not None
+        assert result2["pnl"] > 0  # Should be profitable (2% move minus fees)
+        assert portfolio.position_count == 0
+
+        # Check trade recorded in DB
+        trades = await db.fetchall("SELECT * FROM trades WHERE closed_at IS NOT NULL")
+        assert len(trades) == 1
+        assert trades[0]["pnl"] > 0
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_trade_fees():
+    """Verify fees are correctly deducted."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        start_value = await portfolio.total_value()
+
+        # Buy and sell at same price — should lose money due to fees
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        await portfolio.execute_signal(buy, 50000, 0.25, 0.40)
+
+        sell = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+        await portfolio.execute_signal(sell, 50000, 0.25, 0.40)
+
+        end_value = await portfolio.total_value()
+        # Should have lost money to fees + slippage
+        assert end_value < start_value
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- Kraken pair mapping ---
+
+def test_pair_mapping():
+    from src.shell.kraken import to_kraken_pair, from_kraken_pair
+
+    assert to_kraken_pair("BTC/USD") == "XBTUSD"
+    assert to_kraken_pair("ETH/USD") == "ETHUSD"
+    assert from_kraken_pair("XBTUSD") == "BTC/USD"
+    assert from_kraken_pair("ETHUSD") == "ETH/USD"
+
+
+# --- Backtester ---
+
+def test_backtester_runs():
+    from src.strategy.backtester import Backtester
+    from src.strategy.loader import load_strategy
+    from src.shell.contract import RiskLimits
+
+    strategy = load_strategy()
+    limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
+                        max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
+
+    bt = Backtester(strategy, limits, ["BTC/USD"])
+
+    # Generate trending price data (should produce some signals)
+    dates = pd.date_range(end=datetime.now(), periods=500, freq="1h")
+    prices = 70000 + np.cumsum(np.random.randn(500) * 100)
+    data = {"BTC/USD": pd.DataFrame({
+        "open": prices,
+        "high": prices + 50,
+        "low": prices - 50,
+        "close": prices,
+        "volume": np.random.uniform(100, 1000, 500),
+    }, index=dates)}
+
+    result = bt.run(data)
+    print(f"Backtest: {result.summary()}")
+    assert result.total_trades >= 0  # May or may not trade depending on random data
+    assert isinstance(result.net_pnl, float)

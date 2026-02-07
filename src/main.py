@@ -1,276 +1,558 @@
-"""Trading Brain - Main entry point.
+"""Trading Brain v2 — IO-Container Architecture
 
-Initializes all components and runs the async event loop
-that coordinates the three brains, Telegram bot, and market data.
+Main entry point. Wires all components, manages lifecycle, runs the scan loop.
+
+Startup: load config -> connect DB -> load strategy -> connect Kraken -> start Telegram -> start scheduler
+Shutdown: stop scheduler -> save strategy state -> cancel orders -> stop WS -> stop Telegram -> close DB
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import sys
+from datetime import datetime, timedelta
 
+import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
-from src.brains.analyst import AnalystBrain
-from src.brains.executive import ExecutiveBrain
-from src.brains.executor import ExecutorBrain
-from src.core.config import Config
-from src.core.logging import get_logger, setup_logging
-from src.core.tokens import TokenTracker
-from src.evolution.performance import compute_daily_snapshot
-from src.market.data_feed import DataFeed
-from src.market.regime import classify_regime
-from src.market.signals import SignalGenerator, compute_indicators
-from src.storage import queries
-from src.storage.database import Database
+from src.shell.config import load_config, Config
+from src.shell.contract import Action, Intent, OrderType, RiskLimits, Signal, SymbolData, Portfolio
+from src.shell.database import Database
+from src.shell.data_store import DataStore
+from src.shell.kraken import KrakenREST, KrakenWebSocket
+from src.shell.portfolio import PortfolioTracker
+from src.shell.risk import RiskManager
+from src.orchestrator.ai_client import AIClient
+from src.orchestrator.orchestrator import Orchestrator
+from src.orchestrator.reporter import Reporter
+from src.strategy.loader import load_strategy, get_strategy_path, get_code_hash
 from src.telegram.bot import TelegramBot
 from src.telegram.commands import BotCommands
 from src.telegram.notifications import Notifier
+from src.utils.logging import setup_logging
 
-log = get_logger("main")
+log = structlog.get_logger()
 
 
-class TradingBrainApp:
-    """Top-level application that wires all components together."""
+class TradingBrain:
+    """Main application — orchestrates all components."""
 
     def __init__(self) -> None:
-        self._shutdown_event = asyncio.Event()
+        self._config: Config | None = None
+        self._db: Database | None = None
+        self._kraken: KrakenREST | None = None
+        self._ws: KrakenWebSocket | None = None
+        self._portfolio: PortfolioTracker | None = None
+        self._risk: RiskManager | None = None
+        self._strategy = None
+        self._ai: AIClient | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._reporter: Reporter | None = None
+        self._data_store: DataStore | None = None
+        self._telegram: TelegramBot | None = None
+        self._notifier: Notifier | None = None
         self._scheduler: AsyncIOScheduler | None = None
+        self._scan_state: dict = {}
+        self._commands: BotCommands | None = None
+        self._running = False
 
     async def start(self) -> None:
-        """Initialize and run all subsystems."""
-        # Load config
-        config = Config.load()
-        setup_logging(config.log_level)
+        """Full startup sequence."""
+        log.info("brain.starting")
 
-        log.info("starting", mode=config.mode, symbols=config.markets.crypto_symbols)
+        # 1. Config
+        self._config = load_config()
+        setup_logging(self._config.log_level)
+        log.info("config.loaded", mode=self._config.mode, symbols=self._config.symbols)
 
-        # Connect database
-        db = Database()
-        await db.connect()
+        # 2. Database
+        self._db = Database(self._config.db_path)
+        await self._db.connect()
 
-        # Core infrastructure
-        token_tracker = TokenTracker(db)
-        notifier = Notifier(config)
-        data_feed = DataFeed(config)
-        signal_gen = SignalGenerator(config.strategy)
+        # 3. Shell components
+        self._kraken = KrakenREST(self._config.kraken)
+        self._risk = RiskManager(self._config.risk)
+        self._portfolio = PortfolioTracker(self._config, self._db, self._kraken)
+        self._data_store = DataStore(self._db, self._config.data)
+        await self._portfolio.initialize()
 
-        # Initialize brains
-        executor = ExecutorBrain(config, db, data_feed)
-        analyst = AnalystBrain(config, db, token_tracker)
-        executive = ExecutiveBrain(config, db, token_tracker)
+        # 4. Strategy
+        try:
+            self._strategy = load_strategy()
+            risk_limits = RiskLimits(
+                max_trade_pct=self._config.risk.max_trade_pct,
+                default_trade_pct=self._config.risk.default_trade_pct,
+                max_positions=self._config.risk.max_positions,
+                max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
+                max_drawdown_pct=self._config.risk.max_drawdown_pct,
+            )
+            self._strategy.initialize(risk_limits, self._config.symbols)
 
-        # Wire up notification callbacks
-        executor.on_trade_executed = notifier.trade_executed
-        executor.on_stop_triggered = notifier.stop_triggered
-        executive.on_evolution_complete = notifier.evolution_complete
+            # Restore state
+            state_row = await self._db.fetchone(
+                "SELECT state_json FROM strategy_state ORDER BY saved_at DESC LIMIT 1"
+            )
+            if state_row:
+                self._strategy.load_state(json.loads(state_row["state_json"]))
+                log.info("strategy.state_restored")
+        except Exception as e:
+            log.error("strategy.load_failed", error=str(e))
+            raise
 
-        # Start brains
-        await executor.start()
-        await analyst.start()
-        await executive.start()
-
-        # Telegram bot
-        # Shared scan state: updated by scan loop, read by /report command
-        scan_state: dict = {}
-
-        commands = BotCommands(config, db, executor, analyst, executive, token_tracker,
-                               scan_state=scan_state)
-        telegram = TelegramBot(config, commands)
-
-        # Scheduler
-        self._scheduler = AsyncIOScheduler()
-
-        # Analyst scan: every N minutes, generate signals and validate
-        async def analyst_scan() -> None:
-            log.info("scan_started")
-            import numpy as np
-            from datetime import datetime as dt
-            scan_state["last_scan_time"] = dt.now().strftime("%H:%M:%S")
-
-            for symbol in config.markets.crypto_symbols:
-                try:
-                    df = await data_feed.load_historical(symbol, interval=5)
-                    if df.empty:
-                        log.info("scan_no_data", symbol=symbol)
-                        continue
-
-                    # Compute indicators and regime for /report
-                    df_ind = compute_indicators(df.copy())
-                    regime = classify_regime(df)
-                    last = df_ind.iloc[-1]
-                    price = float(last["close"])
-
-                    # Store scan results for /report command
-                    scan_state[symbol] = {
-                        "price": round(price, 2),
-                        "rsi": round(float(last["rsi"]), 1) if not np.isnan(last["rsi"]) else None,
-                        "bb_pct": round(float(last["bb_pct"]), 2) if not np.isnan(last["bb_pct"]) else None,
-                        "ema_fast": round(float(last["ema_fast"]), 2) if not np.isnan(last["ema_fast"]) else None,
-                        "ema_slow": round(float(last["ema_slow"]), 2) if not np.isnan(last["ema_slow"]) else None,
-                        "macd_hist": round(float(last["macd_hist"]), 4) if not np.isnan(last["macd_hist"]) else None,
-                        "vol_ratio": round(float(last["vol_ratio"]), 2) if not np.isnan(last["vol_ratio"]) else None,
-                        "regime": regime.regime.value,
-                        "regime_desc": regime.description,
-                        "regime_confidence": round(regime.confidence, 2),
-                        "signal_direction": None,
-                        "signal_strength": None,
-                        "signal_type": None,
-                    }
-
-                    # Generate technical signal
-                    raw_signal = signal_gen.generate(df, symbol)
-                    if raw_signal is None:
-                        log.info("scan_no_signal", symbol=symbol, price=round(price, 2))
-                        continue
-
-                    # Store signal info in scan state
-                    scan_state[symbol]["signal_direction"] = raw_signal.direction
-                    scan_state[symbol]["signal_strength"] = round(raw_signal.strength, 3)
-                    scan_state[symbol]["signal_type"] = raw_signal.signal_type
-
-                    log.info("scan_signal", symbol=symbol, direction=raw_signal.direction,
-                             strength=round(raw_signal.strength, 3), type=raw_signal.signal_type)
-
-                    # Check if worth analyzing with AI
-                    if not await analyst.should_analyze(raw_signal):
-                        log.info("scan_below_threshold", symbol=symbol, strength=round(raw_signal.strength, 3))
-                        continue
-
-                    # AI validation
-                    result = await analyst.validate_signal(raw_signal, regime)
-
-                    if result.valid and result.confidence > 0.5:
-                        await executor.execute_signal(raw_signal, ai_validated=True)
-                    else:
-                        log.info("scan_ai_rejected", symbol=symbol, valid=result.valid,
-                                 confidence=round(result.confidence, 2))
-
-                except Exception as e:
-                    log.error("scan_error", symbol=symbol, error=str(e))
-                    await notifier.error(f"scan_{symbol}", str(e))
-            log.info("scan_complete")
-
-        # Position monitoring
-        async def monitor_positions() -> None:
+        # 5. AI client
+        self._ai = AIClient(self._config.ai, self._db)
+        if self._config.ai.anthropic_api_key or self._config.ai.vertex_project_id:
             try:
-                await executor.monitor_positions()
+                await self._ai.initialize()
             except Exception as e:
-                log.error("monitor_error", error=str(e))
+                log.warning("ai.init_failed", error=str(e))
+
+        # 6. Reporter & Orchestrator
+        self._reporter = Reporter(self._db)
+        self._orchestrator = Orchestrator(
+            self._config, self._db, self._ai, self._reporter, self._data_store
+        )
+
+        # 7. Telegram
+        self._notifier = Notifier(self._config.telegram.chat_id)
+        self._commands = BotCommands(
+            config=self._config,
+            db=self._db,
+            scan_state=self._scan_state,
+            portfolio_tracker=self._portfolio,
+            risk_manager=self._risk,
+            ai_client=self._ai,
+            reporter=self._reporter,
+        )
+        self._telegram = TelegramBot(self._config.telegram, self._commands)
+        await self._telegram.start()
+        if self._telegram.app:
+            self._notifier.set_app(self._telegram.app)
+
+        # 8. WebSocket
+        self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
+
+        # 9. Scheduler
+        self._scheduler = AsyncIOScheduler()
+        self._setup_jobs()
+        self._scheduler.start()
+
+        # 10. Portfolio peak tracking
+        portfolio_value = await self._portfolio.total_value()
+        self._risk.update_portfolio_peak(portfolio_value)
+
+        # 11. Notify
+        await self._notifier.system_online(portfolio_value, self._portfolio.position_count)
+
+        self._running = True
+        log.info("brain.started", portfolio=f"${portfolio_value:.2f}",
+                 positions=self._portfolio.position_count, mode=self._config.mode)
+
+        # Run WebSocket in background
+        asyncio.create_task(self._ws.connect())
+
+        # Keep alive
+        while self._running:
+            await asyncio.sleep(1)
+
+            # Check kill switch
+            if self._scan_state.get("kill_requested"):
+                await self._emergency_stop()
+                self._scan_state["kill_requested"] = False
+
+    def _setup_jobs(self) -> None:
+        """Configure all scheduled jobs."""
+        scan_interval = self._strategy.scan_interval_minutes if self._strategy else 5
+
+        # Strategy scan
+        self._scheduler.add_job(
+            self._scan_loop, IntervalTrigger(minutes=scan_interval),
+            id="scan", name="Strategy Scan",
+            next_run_time=datetime.now() + timedelta(seconds=10),
+        )
+
+        # Position monitor (stop-loss / take-profit)
+        self._scheduler.add_job(
+            self._position_monitor, IntervalTrigger(seconds=30),
+            id="position_monitor", name="Position Monitor",
+        )
 
         # Fee check
-        async def check_fees() -> None:
-            try:
-                fees = await data_feed.check_fees()
-                executor.update_fees(fees)
-                await queries.insert_fee_check(db, fees)
-                await notifier.fee_update(
-                    fees.maker_fee_pct, fees.taker_fee_pct, fees.fee_tier or ""
-                )
-                log.info(
-                    "fee_check_complete",
-                    maker=fees.maker_fee_pct,
-                    taker=fees.taker_fee_pct,
-                )
-            except Exception as e:
-                log.error("fee_check_error", error=str(e))
-
-        # Daily performance snapshot
-        async def daily_snapshot() -> None:
-            try:
-                prices = data_feed.latest_prices
-                portfolio_value = executor.order_manager.get_portfolio_value(prices)
-                costs = await token_tracker.get_daily_cost_summary()
-                total_cost = sum(costs.values())
-                await compute_daily_snapshot(
-                    db,
-                    portfolio_value=portfolio_value,
-                    token_cost=total_cost,
-                )
-                status = executor.get_status()
-                await notifier.daily_summary(status)
-                executor.risk_manager.reset_daily()
-            except Exception as e:
-                log.error("snapshot_error", error=str(e))
-
-        # Daily evolution
-        async def daily_evolution() -> None:
-            try:
-                await executive.daily_evolution_cycle()
-            except Exception as e:
-                log.error("evolution_error", error=str(e))
-                await notifier.error("evolution", str(e))
-
-        # Schedule jobs (run first scan immediately via next_run_time)
-        from datetime import datetime
         self._scheduler.add_job(
-            analyst_scan, "interval", minutes=config.analyst.scan_interval_minutes,
-            next_run_time=datetime.now(),
-        )
-        self._scheduler.add_job(monitor_positions, "interval", seconds=30)
-        self._scheduler.add_job(
-            check_fees, "interval", hours=config.fees.check_interval_hours
-        )
-        self._scheduler.add_job(
-            daily_snapshot, "cron", hour=23, minute=55
-        )  # End of day
-        self._scheduler.add_job(
-            daily_evolution,
-            "cron",
-            hour=config.executive.evolution_hour,
-            minute=config.executive.evolution_minute,
+            self._check_fees, IntervalTrigger(hours=self._config.fees.check_interval_hours),
+            id="fee_check", name="Fee Check",
+            next_run_time=datetime.now() + timedelta(minutes=1),
         )
 
-        self._scheduler.start()
-        log.info("scheduler_started", jobs=len(self._scheduler.get_jobs()))
+        # Daily P&L snapshot
+        self._scheduler.add_job(
+            self._daily_snapshot, CronTrigger(hour=23, minute=55),
+            id="daily_snapshot", name="Daily Snapshot",
+        )
 
-        # Run initial fee check
-        asyncio.create_task(check_fees())
+        # Daily risk reset
+        self._scheduler.add_job(
+            self._daily_reset, CronTrigger(hour=0, minute=0),
+            id="daily_reset", name="Daily Reset",
+        )
 
-        log.info("system_online", mode=config.mode)
+        # Nightly orchestration
+        self._scheduler.add_job(
+            self._nightly_orchestration,
+            CronTrigger(hour=self._config.orchestrator.start_hour, minute=0),
+            id="orchestration", name="Nightly Orchestration",
+        )
 
-        # Start long-running tasks
+        # Weekly report
+        self._scheduler.add_job(
+            self._weekly_report, CronTrigger(day_of_week="sun", hour=20, minute=0),
+            id="weekly_report", name="Weekly Report",
+        )
+
+        log.info("scheduler.configured", scan_interval=scan_interval)
+
+    async def _scan_loop(self) -> None:
+        """Main scan loop — fetch data, run strategy, execute signals."""
+        if self._commands and self._commands.is_paused:
+            return
+        if self._risk and self._risk.is_halted:
+            return
+
         try:
-            await asyncio.gather(
-                telegram.start(),
-                data_feed.stream(),
-                self._shutdown_event.wait(),
-            )
-        finally:
-            # Graceful shutdown
-            log.info("shutting_down")
-            data_feed.stop()
-            if self._scheduler:
-                self._scheduler.shutdown(wait=False)
-            await telegram.stop()
-            await executor.stop()
-            await data_feed._rest.close()
-            await db.close()
+            prices = {}
+            markets = {}
+            scan_symbols = {}
 
-    def request_shutdown(self) -> None:
-        self._shutdown_event.set()
+            for symbol in self._config.symbols:
+                try:
+                    ticker = await self._kraken.get_ticker(symbol)
+                    price = float(ticker["c"][0])  # Last trade price
+                    prices[symbol] = price
+
+                    # Fetch recent candles for strategy
+                    df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)
+
+                    # If we don't have enough stored data, fetch from Kraken
+                    if len(df_5m) < 30:
+                        df_5m = await self._kraken.get_ohlc(symbol, interval=5)
+                        if not df_5m.empty:
+                            await self._data_store.store_candles(symbol, "5m", df_5m)
+
+                    df_1h = await self._data_store.get_candles(symbol, "1h", limit=8760)
+                    df_1d = await self._data_store.get_candles(symbol, "1d", limit=2555)
+
+                    spread = await self._kraken.get_spread(symbol)
+                    vol_24h = float(ticker.get("v", [0, 0])[1])
+
+                    markets[symbol] = SymbolData(
+                        symbol=symbol,
+                        current_price=price,
+                        candles_5m=df_5m,
+                        candles_1h=df_1h if not df_1h.empty else df_5m,
+                        candles_1d=df_1d if not df_1d.empty else df_5m,
+                        spread=spread,
+                        volume_24h=vol_24h,
+                    )
+
+                    # Compute indicators for scan_state (used by /report)
+                    from strategy.skills import compute_indicators
+                    indicators = compute_indicators(df_5m) if len(df_5m) >= 30 else {}
+
+                    scan_symbols[symbol] = {
+                        "price": price,
+                        "spread": spread,
+                        "vol_ratio": indicators.get("vol_ratio", 0),
+                        "rsi": indicators.get("rsi", 0),
+                        "ema_fast": indicators.get("ema_fast", 0),
+                        "ema_slow": indicators.get("ema_slow", 0),
+                        "regime": indicators.get("regime", "unknown"),
+                    }
+
+                except Exception as e:
+                    log.warning("scan.symbol_error", symbol=symbol, error=str(e))
+
+            if not markets:
+                return
+
+            # Build portfolio snapshot
+            portfolio = await self._portfolio.get_portfolio(prices)
+            portfolio_value = portfolio.total_value
+
+            # Run strategy
+            signals = self._strategy.analyze(markets, portfolio, datetime.now())
+
+            # Process signals
+            for signal in signals:
+                # Risk check
+                check = self._risk.check_signal(
+                    signal, portfolio_value, self._portfolio.position_count,
+                    self._portfolio.get_position_value(signal.symbol),
+                )
+
+                if not check.passed:
+                    log.info("scan.signal_rejected", symbol=signal.symbol, reason=check.reason)
+                    await self._db.execute(
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
+                         signal.intent.value, signal.reasoning, check.reason),
+                    )
+                    continue
+
+                # Clamp to risk limits
+                signal = self._risk.clamp_signal(signal, portfolio_value)
+
+                # Execute
+                price = prices.get(signal.symbol, 0)
+                result = await self._portfolio.execute_signal(
+                    signal, price,
+                    self._config.kraken.maker_fee_pct,
+                    self._config.kraken.taker_fee_pct,
+                )
+
+                if result:
+                    # Record signal
+                    await self._db.execute(
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                        (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
+                         signal.intent.value, signal.reasoning),
+                    )
+
+                    # Track P&L
+                    if result.get("pnl") is not None:
+                        self._risk.record_trade_result(result["pnl"])
+                        self._strategy.on_position_closed(
+                            result["symbol"], result["pnl"], result.get("pnl_pct", 0)
+                        )
+
+                    if signal.action == Action.BUY:
+                        self._strategy.on_fill(
+                            signal.symbol, Action.BUY, result["qty"], result["price"], signal.intent
+                        )
+
+                    # Notify
+                    await self._notifier.trade_executed(result)
+
+                    # Check rollback triggers
+                    new_value = await self._portfolio.total_value()
+                    rollback = self._risk.check_rollback_triggers(
+                        new_value, self._portfolio.daily_start_value
+                    )
+                    if not rollback.passed:
+                        await self._notifier.rollback_alert(rollback.reason, "previous")
+                        log.warning("scan.rollback_triggered", reason=rollback.reason)
+
+                    # Update portfolio peak
+                    self._risk.update_portfolio_peak(new_value)
+
+                    # Update scan_state with signal info
+                    if signal.symbol in scan_symbols:
+                        scan_symbols[signal.symbol]["signal"] = {
+                            "action": signal.action.value,
+                            "confidence": signal.confidence,
+                            "reasoning": signal.reasoning,
+                        }
+
+            await self._db.commit()
+
+            # Update scan state
+            self._scan_state["symbols"] = scan_symbols
+            self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
+
+            # Save strategy state periodically
+            state = self._strategy.get_state()
+            await self._db.execute(
+                "INSERT INTO strategy_state (state_json) VALUES (?)",
+                (json.dumps(state, default=str),),
+            )
+            await self._db.commit()
+
+        except Exception as e:
+            log.error("scan.failed", error=str(e))
+
+    async def _position_monitor(self) -> None:
+        """Check stop-loss and take-profit on open positions."""
+        if not self._ws:
+            return
+
+        prices = self._ws.prices
+        if not prices:
+            # Fallback: get prices via REST
+            for symbol in self._config.symbols:
+                try:
+                    ticker = await self._kraken.get_ticker(symbol)
+                    prices[symbol] = float(ticker["c"][0])
+                except Exception:
+                    pass
+
+        triggered = await self._portfolio.update_prices(prices)
+        for t in triggered:
+            symbol = t["symbol"]
+            reason = t["reason"]
+            price = t["price"]
+
+            signal = Signal(
+                symbol=symbol, action=Action.CLOSE, size_pct=1.0,
+                intent=Intent.DAY, confidence=1.0,
+                reasoning=f"{reason} triggered at ${price:.2f}",
+            )
+            result = await self._portfolio.execute_signal(
+                signal, price,
+                self._config.kraken.maker_fee_pct,
+                self._config.kraken.taker_fee_pct,
+            )
+            if result:
+                self._risk.record_trade_result(result.get("pnl", 0))
+                await self._notifier.stop_triggered(symbol, reason, price)
+                await self._notifier.trade_executed(result)
+
+    async def _check_fees(self) -> None:
+        """Update fee schedule from Kraken."""
+        try:
+            if self._config.kraken.api_key:
+                maker, taker = await self._kraken.get_fee_schedule(self._config.symbols[0])
+                self._config.kraken.maker_fee_pct = maker
+                self._config.kraken.taker_fee_pct = taker
+                await self._db.execute(
+                    "INSERT INTO fee_schedule (maker_fee_pct, taker_fee_pct) VALUES (?, ?)",
+                    (maker, taker),
+                )
+                await self._db.commit()
+                log.info("fees.updated", maker=maker, taker=taker)
+        except Exception as e:
+            log.warning("fees.check_failed", error=str(e))
+
+    async def _daily_snapshot(self) -> None:
+        await self._portfolio.snapshot_daily()
+
+    async def _daily_reset(self) -> None:
+        self._risk.reset_daily()
+        self._portfolio.reset_daily()
+        self._ai.reset_daily_tokens()
+
+    async def _nightly_orchestration(self) -> None:
+        """Run the nightly AI review cycle."""
+        try:
+            report = await self._orchestrator.run_nightly_cycle()
+
+            # Reload strategy if it was changed
+            new_hash = get_code_hash(get_strategy_path())
+            if self._scan_state.get("strategy_hash") != new_hash:
+                self._strategy = load_strategy()
+                risk_limits = RiskLimits(
+                    max_trade_pct=self._config.risk.max_trade_pct,
+                    default_trade_pct=self._config.risk.default_trade_pct,
+                    max_positions=self._config.risk.max_positions,
+                    max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
+                    max_drawdown_pct=self._config.risk.max_drawdown_pct,
+                )
+                self._strategy.initialize(risk_limits, self._config.symbols)
+                self._scan_state["strategy_hash"] = new_hash
+                log.info("strategy.reloaded_after_orchestration")
+
+            await self._notifier.daily_summary(report)
+        except Exception as e:
+            log.error("orchestration.failed", error=str(e))
+            await self._notifier.system_error(f"Orchestration failed: {e}")
+
+    async def _weekly_report(self) -> None:
+        try:
+            report = await self._reporter.weekly_report()
+            await self._notifier.weekly_report(report)
+        except Exception as e:
+            log.error("weekly_report.failed", error=str(e))
+
+    async def _emergency_stop(self) -> None:
+        """Close all positions immediately."""
+        log.warning("brain.emergency_stop")
+        positions = await self._db.fetchall("SELECT * FROM positions")
+        for pos in positions:
+            try:
+                ticker = await self._kraken.get_ticker(pos["symbol"])
+                price = float(ticker["c"][0])
+                signal = Signal(
+                    symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
+                    intent=Intent.DAY, confidence=1.0, reasoning="Emergency stop",
+                )
+                await self._portfolio.execute_signal(
+                    signal, price,
+                    self._config.kraken.maker_fee_pct,
+                    self._config.kraken.taker_fee_pct,
+                )
+            except Exception as e:
+                log.error("emergency.close_failed", symbol=pos["symbol"], error=str(e))
+
+    async def stop(self) -> None:
+        """Graceful shutdown sequence."""
+        log.info("brain.stopping")
+        self._running = False
+
+        # 1. Stop scheduler
+        if self._scheduler:
+            self._scheduler.shutdown(wait=False)
+
+        # 2. Save strategy state
+        if self._strategy:
+            state = self._strategy.get_state()
+            await self._db.execute(
+                "INSERT INTO strategy_state (state_json) VALUES (?)",
+                (json.dumps(state, default=str),),
+            )
+            await self._db.commit()
+            log.info("strategy.state_saved")
+
+        # 3. Cancel unfilled orders (live mode)
+        if not self._config.is_paper() and self._kraken:
+            try:
+                await self._kraken.cancel_all_orders()
+            except Exception as e:
+                log.warning("shutdown.cancel_orders_failed", error=str(e))
+
+        # 4. Stop WebSocket
+        if self._ws:
+            await self._ws.stop()
+
+        # 5. Stop Telegram
+        if self._telegram:
+            await self._telegram.stop()
+
+        # 6. Close Kraken REST
+        if self._kraken:
+            await self._kraken.close()
+
+        # 7. Close database
+        if self._db:
+            await self._db.close()
+
+        log.info("brain.stopped")
+
+
+async def main() -> None:
+    brain = TradingBrain()
+
+    # Handle SIGTERM/SIGINT for graceful shutdown
+    loop = asyncio.get_event_loop()
+
+    def signal_handler():
+        asyncio.create_task(brain.stop())
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    try:
+        await brain.start()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await brain.stop()
 
 
 def run() -> None:
-    """Entry point for the trading-brain command."""
-    app = TradingBrainApp()
-
-    loop = asyncio.new_event_loop()
-
-    def handle_signal(sig: int, frame: object) -> None:
-        log.info("signal_received", signal=sig)
-        app.request_shutdown()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    try:
-        loop.run_until_complete(app.start())
-    except KeyboardInterrupt:
-        app.request_shutdown()
-    finally:
-        loop.close()
+    """Entry point for pyproject.toml script."""
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
