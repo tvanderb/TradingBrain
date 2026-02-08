@@ -59,6 +59,11 @@ while running:
 **Mapping**: `BTC/USD` -> `XBTUSD`, `ETH/USD` -> `ETHUSD`, `SOL/USD` -> `SOLUSD`
 **Note**: WebSocket v2 uses standard format (`BTC/USD`), REST uses Kraken format (`XBTUSD`)
 
+## Multiple Instance Prevention
+**Problem**: Running `python3 -m src.main` multiple times (e.g. during testing) spawns duplicate bots. All instances poll the same Telegram token, causing `Conflict: terminated by other getUpdates request` errors and event loop starvation (missed 14/18 scheduled scans in 1.5 hours).
+**Fix**: PID lockfile at `data/brain.pid`. On startup, checks if PID is alive with `os.kill(pid, 0)`. Uses `ProcessLookupError` + `PermissionError` exceptions (NOT `ProcessNotFoundError` — that doesn't exist in Python). Auto-cleaned via `atexit` and explicit cleanup in `finally` block.
+**Note**: `pkill -f` may not terminate processes — use `kill -9 <pid>` if needed. After force-killing, also delete `brain.db-wal` and `brain.db-shm` (stale WAL files cause `disk I/O error`).
+
 ## Shell Escaping in Inline Python
 **Problem**: Running Python one-liners with `$` in f-strings gets eaten by bash substitution
 **Fix**: Use standalone `.py` test files instead of inline scripts

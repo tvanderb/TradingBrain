@@ -200,3 +200,31 @@ tests/test_integration.py      — 18 tests covering all components
 - System ready to run in paper mode
 - Need user's .env file (Kraken key, Anthropic key, Telegram token)
 - System can start without API keys (will just fail on Kraken/AI calls gracefully)
+
+## Session 4 (2026-02-07, continued)
+
+### Context
+Continuing from session 3. System was running in paper mode but had issues.
+
+### Issues Found & Fixed
+1. **Multiple instances running simultaneously**: 4 Python processes were running the trading brain at once (spawned during prior session's testing). This caused:
+   - `telegram.error.Conflict: terminated by other getUpdates request` — multiple bots polling same token
+   - Event loop starvation — only 4/18 expected scans completed in 1.5 hours (big gaps: 65 min)
+   - Fix: `kill -9` all 4 PIDs, cleaned stale WAL/SHM database files
+
+2. **Added PID lockfile safeguard** (`src/main.py`):
+   - `data/brain.pid` lockfile written on startup, checked with `os.kill(pid, 0)`
+   - Blocks second instance with clear error message
+   - Auto-cleaned on exit via `atexit` + explicit cleanup in `finally`
+   - Fixed `ProcessNotFoundError` → `ProcessLookupError` (correct Python exception name)
+   - Also catches `PermissionError` for edge case where process exists but owned by another user
+
+3. **Stale DB files**: brain.db-wal and brain.db-shm left by force-killed processes caused `sqlite3.OperationalError: disk I/O error` on next startup. Deleted them manually.
+
+### Current Status
+- Single clean instance running (PID lockfile prevents duplicates)
+- Scans completing on schedule every 5 minutes
+- Telegram connected without conflicts
+- Fee check confirmed: 0.25% maker / 0.40% taker
+- Strategy generating 0 signals (expected — EMA crossover needs trend to form)
+- No git commit since session 3 — all changes uncommitted on v2-io-container branch

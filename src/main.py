@@ -9,10 +9,13 @@ Shutdown: stop scheduler -> save strategy state -> cancel orders -> stop WS -> s
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
+import os
 import signal
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -222,6 +225,7 @@ class TradingBrain:
         if self._risk and self._risk.is_halted:
             return
 
+        log.info("scan.start")
         try:
             prices = {}
             markets = {}
@@ -361,6 +365,7 @@ class TradingBrain:
             # Update scan state
             self._scan_state["symbols"] = scan_symbols
             self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
+            log.info("scan.complete", symbols=len(scan_symbols), signals=len(signals))
 
             # Save strategy state periodically
             state = self._strategy.get_state()
@@ -371,7 +376,8 @@ class TradingBrain:
             await self._db.commit()
 
         except Exception as e:
-            log.error("scan.failed", error=str(e))
+            import traceback
+            log.error("scan.failed", error=str(e), traceback=traceback.format_exc())
 
     async def _position_monitor(self) -> None:
         """Check stop-loss and take-profit on open positions."""
@@ -530,7 +536,38 @@ class TradingBrain:
         log.info("brain.stopped")
 
 
+LOCK_FILE = Path(__file__).resolve().parent.parent / "data" / "brain.pid"
+
+
+def _acquire_lock() -> None:
+    """Ensure only one instance runs. Write PID to lockfile."""
+    if LOCK_FILE.exists():
+        old_pid = int(LOCK_FILE.read_text().strip())
+        # Check if the old process is still alive
+        try:
+            os.kill(old_pid, 0)  # signal 0 = just check existence
+            print(f"ERROR: Another instance is running (PID {old_pid}). Exiting.", file=sys.stderr)
+            sys.exit(1)
+        except (ProcessLookupError, PermissionError):
+            # Stale lockfile — previous process died without cleanup
+            log.warning("lockfile.stale", old_pid=old_pid)
+
+    LOCK_FILE.write_text(str(os.getpid()))
+    atexit.register(_release_lock)
+
+
+def _release_lock() -> None:
+    """Remove PID lockfile on exit."""
+    try:
+        if LOCK_FILE.exists() and LOCK_FILE.read_text().strip() == str(os.getpid()):
+            LOCK_FILE.unlink()
+    except OSError:
+        pass
+
+
 async def main() -> None:
+    _acquire_lock()
+
     brain = TradingBrain()
 
     # Handle SIGTERM/SIGINT for graceful shutdown
@@ -548,6 +585,7 @@ async def main() -> None:
         pass
     finally:
         await brain.stop()
+        _release_lock()
 
 
 def run() -> None:
