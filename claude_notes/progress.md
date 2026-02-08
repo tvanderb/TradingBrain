@@ -221,10 +221,25 @@ Continuing from session 3. System was running in paper mode but had issues.
 
 3. **Stale DB files**: brain.db-wal and brain.db-shm left by force-killed processes caused `sqlite3.OperationalError: disk I/O error` on next startup. Deleted them manually.
 
+### Orchestrator Fixes
+- Opus model ID updated: `claude-opus-4-5-20250514` → `claude-opus-4-6` (in config, defaults, cost table)
+- Backtester wired into orchestrator pipeline (was completely missing — went straight from review to deploy)
+- Fixed `paper_balance` → `paper_balance_usd` config field reference
+
+### Statistics Shell Design (Major Feature — Not Yet Built)
+- Full collaborative design discussion with user (see discussions.md)
+- Three-layer input architecture: truth benchmarks (rigid) + statistics module (flexible) + user constraints (rigid)
+- Statistics module: read-only DB access, orchestrator rewrites, Opus reviews for mathematical correctness
+- Truth benchmarks: simple verifiable metrics the orchestrator can compare against its analysis
+- Orchestrator self-awareness: all inputs labeled by category, explicit prioritized goals
+- New data collection: scan_results table, regime tagging on trades/signals
+- 8-step integration plan drafted (see roadmap.md Phase 0)
+- All decisions recorded in decisions.md, architecture in architecture.md
+
 ### Current Status
 - Single clean instance running (PID lockfile prevents duplicates)
 - Scans completing on schedule every 5 minutes
 - Telegram connected without conflicts
 - Fee check confirmed: 0.25% maker / 0.40% taker
 - Strategy generating 0 signals (expected — EMA crossover needs trend to form)
-- No git commit since session 3 — all changes uncommitted on v2-io-container branch
+- **Next**: Build statistics shell (Phase 0) before first orchestration cycle

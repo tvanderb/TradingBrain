@@ -153,9 +153,12 @@
 ### Before Unattended Paper Trading (Now)
 - [x] PID lockfile prevents multiple instances
 - [x] WebSocket reconnection with backoff
-- [ ] **Shift orchestration window** or keep laptop awake — otherwise AI never evolves
-- [ ] **Test Telegram commands from phone** — confirm bot responds to /status, /report, /positions
-- [ ] **Commit all code to git** — nothing committed since v2 build
+- [x] **Test Telegram commands from phone** — confirm bot responds to /status, /report, /positions
+- [x] **Commit all code to git** — nothing committed since v2 build
+- [ ] **Statistics shell** — full implementation (see integration plan below)
+- [ ] **Scan results collection** — store indicator state every scan
+- [ ] **Regime tagging** — tag market regime on trades and signals
+- [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks
 
 ### Before Going Live (Month 2-3)
 - [ ] **Order fill tracking** — poll Kraken for fill status after placing orders
@@ -175,6 +178,104 @@
 ---
 
 ## Future Implementation Roadmap
+
+### Phase 0: Statistics Shell & Orchestrator Upgrade (Build Next)
+**Goal**: Give the orchestrator situational awareness, hard-computed statistics, and clear goals before it runs its first cycle.
+
+**This must be built before unattended paper trading.** Without it, the orchestrator will make decisions based on incomplete context and potentially miscalculated statistics.
+
+#### Implementation Steps (in dependency order)
+
+**Step 1: Database Schema Additions**
+Files: `src/shell/database.py`
+- Add `scan_results` table (price, indicators, regime, signal info per scan per symbol)
+- Add `regime` column to `trades` table
+- Add `regime` column to `signals` table
+- Add indexes for efficient querying by timestamp and symbol
+
+**Step 2: Scan Results Collection**
+Files: `src/main.py` (scan loop)
+- After each scan, write indicator state to `scan_results` for every symbol
+- Record: price, ema_fast, ema_slow, rsi, volume_ratio, regime, spread
+- Record whether a signal was generated and its action/confidence
+- Tag regime on any signals generated
+- Tag regime on any trades executed
+
+**Step 3: Truth Benchmarks**
+Files: `src/shell/truth.py` (new)
+- Rigid shell component, orchestrator CANNOT modify
+- Computes from raw DB data:
+  - net_pnl, trade_count, win_count, loss_count, win_rate
+  - total_fees, portfolio_value, max_drawdown, consecutive_losses
+  - system_uptime, total_scans, total_signals, signal_act_rate
+  - operational context: scans since startup, scan success rate, data freshness
+- Returns structured dict
+- All calculations trivially verifiable — no complex statistics
+
+**Step 4: Statistics Module Infrastructure**
+Files: `src/statistics/__init__.py`, `src/statistics/loader.py`, `src/statistics/sandbox.py`
+- Loader: dynamic import of `statistics/active/analysis.py` (same pattern as strategy loader)
+- Sandbox: validate code safety + verify no DB writes, no network, no filesystem writes
+  - Different rules from strategy sandbox: allows read-only DB, allows scipy/statistics imports
+- Deploy: archive old version, write new code, verify it loads
+- ReadOnlyDB wrapper: wraps aiosqlite connection, only allows SELECT queries
+
+**Step 5: Initial Statistics Module**
+Files: `statistics/active/analysis.py` (new)
+- Hand-written starting point (like strategy v001)
+- Reasonable initial set of calculations:
+  - Performance by symbol (win rate, expectancy, avg P&L per symbol)
+  - Performance by regime (if enough data)
+  - Signal analysis (generated vs acted, confidence vs outcome)
+  - Scan analysis (signal proximity — how close to triggering)
+  - Fee impact (fees as % of gross profit, break-even move required)
+  - Rolling metrics (7d, 30d if available)
+  - Data quality report (gaps, freshness, coverage)
+- The orchestrator will rewrite this over time as it learns what it needs
+
+**Step 6: Orchestrator Integration**
+Files: `src/orchestrator/orchestrator.py`
+- Update `_gather_context()`:
+  1. Run truth benchmarks → ground_truth dict
+  2. Run statistics module → analysis_report dict
+  3. Gather strategy context (code, doc, versions)
+  4. Gather operational context (system age, scan count, market state)
+- Update `ANALYSIS_SYSTEM` prompt:
+  - Label all inputs explicitly: "GROUND TRUTH (you cannot change this)", "YOUR ANALYSIS (you designed this, you can change it)", etc.
+  - Embed explicit goals with priorities
+  - Instruct orchestrator to cross-reference its analysis against truth benchmarks
+  - Instruct orchestrator to consider whether its analysis module needs improvement
+- Add statistics module evolution pipeline:
+  - Sonnet generates → Opus reviews (mathematical correctness focus) → sandbox → deploy
+  - No paper testing required
+  - Add `STATS_REVIEW_SYSTEM` prompt emphasizing formula verification
+
+**Step 7: Statistics Module Evolution in Orchestrator**
+Files: `src/orchestrator/orchestrator.py`
+- After main analysis decision, orchestrator can also decide: "I want to change what I measure"
+- Decision options expand: NO_CHANGE / STRATEGY_TWEAK / STRATEGY_RESTRUCTURE / STRATEGY_OVERHAUL / ANALYSIS_UPDATE
+- ANALYSIS_UPDATE: generates new statistics module code, reviews, deploys
+- Must include reason: "I need to see performance by holding duration" or "I want to add correlation analysis"
+
+**Step 8: Tests**
+Files: `tests/test_integration.py` (extend)
+- Truth benchmarks produce correct values from known test data
+- Statistics module loads and returns dict
+- Statistics sandbox rejects writes, allows reads
+- ReadOnlyDB wrapper blocks INSERT/UPDATE/DELETE
+- Scan results are stored correctly
+- Regime is tagged on trades and signals
+
+#### Integration Verification
+After all steps:
+- [ ] Existing 18 tests still pass
+- [ ] New tests pass
+- [ ] Paper trading scan loop stores scan results
+- [ ] Truth benchmarks compute from DB correctly
+- [ ] Statistics module loads and runs against DB
+- [ ] Orchestrator receives labeled inputs
+- [ ] Orchestrator can decide to change statistics module
+- [ ] System doesn't slow down perceptibly (scan loop adds ~1ms for DB write)
 
 ### Phase 1: Paper Validation (Weeks 1-4)
 **Goal**: Prove the system works end-to-end. First trades. First orchestration cycles.

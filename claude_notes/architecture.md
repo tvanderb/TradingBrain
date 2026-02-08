@@ -198,6 +198,154 @@ trading-brain/
 | Total per orchestration night | — | When making changes | $0.75-2.25 |
 | Total per month | — | ~$22-45 (budgeted at 150% of base estimate) | |
 
+## Statistics Shell
+
+### Overview
+A second flexible module alongside the strategy module. The orchestrator designs and rewrites the statistics module to compute whatever analytical report it needs for decision-making. Runs before each orchestration cycle.
+
+### Architecture Diagram
+```
+┌─────────────────────────────────────────────────────────┐
+│                    SHELL (Rigid)                         │
+│                                                         │
+│  ┌──────────────────────────────────────────────┐       │
+│  │         TRUTH BENCHMARKS (rigid)              │       │
+│  │  Actual P&L, win rate, fees, drawdown,        │       │
+│  │  trade count, portfolio value, system stats    │       │
+│  │  (orchestrator CANNOT modify)                 │       │
+│  └──────────────────┬───────────────────────────┘       │
+│                     │                                    │
+│  ┌──────────────────▼───────────────────────────┐       │
+│  │         STATISTICS MODULE (flexible)          │       │
+│  │    statistics/active/analysis.py              │       │
+│  │    IN:  read-only DB connection + schema      │       │
+│  │    OUT: dict of computed metrics              │       │
+│  │    (orchestrator CAN rewrite this)            │       │
+│  └──────────────────┬───────────────────────────┘       │
+│                     │                                    │
+│  ┌──────────────────▼───────────────────────────┐       │
+│  │              ORCHESTRATOR                     │       │
+│  │  Receives labeled inputs:                     │       │
+│  │  1. Ground Truth (rigid benchmarks)           │       │
+│  │  2. Its Own Analysis (statistics module)       │       │
+│  │  3. Its Own Strategy (strategy code)          │       │
+│  │  4. User Constraints (risk limits, config)    │       │
+│  │                                               │       │
+│  │  Can change: strategy, statistics module,     │       │
+│  │              strategy document                │       │
+│  │  Cannot change: truth, risk limits, shell     │       │
+│  └───────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Truth Benchmarks (src/shell/truth.py)
+Rigid shell component. Simple metrics computed directly from raw data. Cannot be modified by orchestrator.
+
+| Metric | Computation | Purpose |
+|--------|-------------|---------|
+| net_pnl | SUM(trades.pnl) | Ground truth P&L |
+| trade_count | COUNT(trades) | Activity level |
+| win_count / loss_count | COUNT WHERE pnl > 0 / <= 0 | Win/loss split |
+| win_rate | wins / total | Success rate |
+| total_fees | SUM(trades.fees) | Fee drag |
+| portfolio_value | cash + SUM(positions * price) | Current state |
+| max_drawdown | Peak-to-trough from snapshots | Risk realized |
+| consecutive_losses | Current streak from recent trades | Danger indicator |
+| system_uptime | Now - first scan timestamp | Operational context |
+| total_scans | COUNT(scan_results) | Activity level |
+| total_signals | COUNT(signals) | Signal rate |
+| signal_act_rate | Acted / Total signals | Execution rate |
+
+### Statistics Module IO Contract
+
+```python
+class AnalysisBase(ABC):
+    """Base class for the statistics module."""
+
+    def analyze(self, db: ReadOnlyDB, schema: dict) -> dict:
+        """Run analysis and return structured report.
+
+        Args:
+            db: Read-only database connection (SELECT only)
+            schema: Dict describing all tables, columns, and types
+
+        Returns:
+            Dict of computed metrics. Structure is up to the module.
+        """
+        ...
+```
+
+### Statistics Module Sandbox Rules
+| Rule | Strategy Module | Statistics Module |
+|------|----------------|-------------------|
+| Read DB | Forbidden | Allowed (read-only) |
+| Write DB | Forbidden | Forbidden |
+| Network | Forbidden | Forbidden |
+| File I/O | Forbidden | Forbidden |
+| subprocess/os/eval | Forbidden | Forbidden |
+| pandas/numpy | Allowed | Allowed |
+| scipy/statistics | Not needed | Allowed |
+| ta (indicators) | Allowed | Allowed |
+
+### Orchestrator Goals (embedded in system prompt)
+**Primary**: Positive expectancy after fees
+**Secondary**: Win rate > 45%, Sharpe > 0.3, positive monthly P&L
+**Meta**: Conservative changes, build understanding, improve observability, maintain institutional memory
+
+### Updated Orchestrator Nightly Flow
+```
+1. Run truth benchmarks          → ground_truth dict
+2. Run statistics module         → analysis_report dict
+3. Gather strategy context       → code, doc, version history
+4. Gather operational context    → system age, scan count, current market state
+5. Label all inputs explicitly   → "GROUND TRUTH", "YOUR ANALYSIS", etc.
+6. Opus analysis                 → decision + reasoning
+7. If strategy change needed     → Sonnet generates → Opus reviews → backtest → deploy
+8. If statistics module change   → Sonnet generates → Opus reviews (math focus) → deploy
+9. Update strategy document
+10. Data maintenance
+11. Send report via Telegram
+```
+
+### Database Schema Additions
+
+```sql
+-- Scan results: captures every scan's indicator state
+CREATE TABLE scan_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price REAL NOT NULL,
+    ema_fast REAL,
+    ema_slow REAL,
+    rsi REAL,
+    volume_ratio REAL,
+    regime TEXT,
+    spread REAL,
+    signal_generated INTEGER DEFAULT 0,
+    signal_action TEXT,
+    signal_confidence REAL,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_scan_results_ts ON scan_results(timestamp);
+CREATE INDEX idx_scan_results_symbol ON scan_results(symbol);
+```
+
+Additional columns on existing tables:
+- `trades`: add `regime TEXT` — market regime at time of trade
+- `signals`: add `regime TEXT` — market regime at time of signal
+
+### Statistics Module File Structure
+```
+statistics/
+├── active/
+│   └── analysis.py        # Currently running analysis module
+├── archive/               # Previous versions
+└── skills/                # Reusable statistical functions (optional, future)
+```
+
 ## API Provider Abstraction
 
 ```toml

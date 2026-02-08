@@ -114,3 +114,47 @@
 - EMA 9/21 crossover, RSI 14 filter, volume 1.2x confirmation
 - Day trading intent, 2% stop-loss, 4% take-profit
 - All 3 symbols from day one, agent can adjust
+
+## Statistics Shell (Session 4, 2026-02-08)
+
+### Decision: Statistics Module — Second Flexible Module
+- **What**: A second flexible module alongside the strategy, following the same IO-container pattern
+- **Why**: LLMs are bad at math. Giving the orchestrator pre-computed hard statistics prevents systematic miscalculation. Letting it design its own analysis report gives it flexibility to see what matters.
+- **Architecture**: Same as strategy module — orchestrator rewrites, sandbox validates, Opus reviews
+- **Key difference from strategy**: No paper testing needed, but code review must verify mathematical correctness
+
+### Decision: Read-Only DB Access for Statistics Module
+- **What**: Statistics module receives a read-only database connection instead of pre-loaded DataFrames
+- **Why**: User raised efficiency concern — loading ALL data every night is wasteful and gets worse over time. Module should query exactly what it needs.
+- **Tradeoff**: Module has I/O capability (read-only), harder to sandbox than pure computation. But read-only is safe for data integrity, and queries are reviewed by Opus.
+
+### Decision: Truth Benchmarks — Rigid Shell Component
+- **What**: Simple metrics (P&L, win rate, fees, drawdown) computed by rigid code orchestrator CANNOT modify
+- **Why**: User insight — bad statistics are as dangerous as bad trades. If the statistics module has a bug, the orchestrator needs ground truth to compare against.
+- **Design**: Trivially verifiable from raw data. If statistics module contradicts truth benchmarks, orchestrator knows its analysis is wrong.
+
+### Decision: Orchestrator Self-Awareness
+- **What**: All orchestrator inputs are explicitly labeled by category (ground truth / its analysis / its strategy / user constraints)
+- **Why**: Orchestrator must understand what it can change vs what it should trust. Without this, it might try to "fix" truth benchmark numbers by changing the statistics module instead of fixing the strategy.
+
+### Decision: Explicit Orchestrator Goals
+- **What**: Clear, prioritized goals embedded in the orchestrator's system prompt
+- **Why**: Without explicit goals, the orchestrator optimizes for whatever seems locally reasonable. Could lead to random changes, over-trading, or analysis paralysis.
+- **Primary**: Positive expectancy after fees
+- **Secondary**: Win rate > 45%, Sharpe > 0.3, positive monthly P&L
+- **Meta**: Conservative, build understanding, improve observability, institutional memory
+
+### Decision: Statistics Module Code Review — Mathematical Focus
+- **What**: Opus code review for statistics module must verify mathematical correctness, not just code safety
+- **Why**: User emphasized "we can't have miscalculations." A syntactically valid function that computes expectancy wrong is more dangerous than one that crashes.
+- **Review prompt**: Must check formulas against standard definitions, verify edge cases (division by zero, empty data), confirm statistical validity
+
+### Decision: Scan Results Collection
+- **What**: New `scan_results` table storing indicator state every scan
+- **Why**: Without scan history, statistics module can only analyze trades. Can't answer "how close were we to a signal?" or "what regime were we in when we traded?"
+- **Data**: price, EMA values, RSI, volume ratio, regime, spread, whether signal generated
+- **Impact**: ~864 rows/day (3 symbols × 288 scans), trivial for SQLite
+
+### Decision: Regime Tagging on Trades and Signals
+- **What**: Add `regime` column to trades and signals tables
+- **Why**: Enables "performance by market condition" analysis — critical for strategy evaluation

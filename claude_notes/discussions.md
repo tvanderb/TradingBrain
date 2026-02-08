@@ -287,8 +287,111 @@ User proposed scrapping the three-brain architecture entirely in favor of a fund
 - Systemd service on VPS with auto-restart on crash
 - Full details in architecture.md
 
-## All Design Decisions FINALIZED — Built and Tested
+## All v2 Core Design Decisions FINALIZED — Built and Tested
 - v2 implementation COMPLETE on `v2-io-container` branch
 - 18/18 integration tests passing
 - All components built per architecture.md spec
 - Ready for paper trading with user's .env credentials
+
+---
+
+## Statistics Shell & Orchestrator Awareness (Session 4, 2026-02-08)
+
+### The Problem
+The orchestrator receives performance summaries and raw trade data, then Opus has to reason about both "what happened" and "what the numbers mean." LLMs are bad at math. If Opus miscalculates expectancy or misinterprets a distribution, it makes systematically wrong decisions — potentially for weeks. This is more dangerous than a single bad trade.
+
+Additionally, the orchestrator lacks situational awareness:
+- Doesn't know how long the system has been running
+- Can't see how close signals came to triggering (scan history not stored)
+- Doesn't know the market regime when trades happened
+- Can't distinguish between "no signals because strategy is broken" and "no signals because market is ranging"
+
+### User's Core Insight
+The orchestrator shouldn't perform its own statistical analysis on raw data. It should receive hard-computed statistics from rigid code, AND have the ability to design what statistics it receives — like designing its own dashboard.
+
+But these statistics are NOT safe just because they're read-only. **Miscalculated statistics can cause major losses** by leading the orchestrator to systematically wrong conclusions. A bug that inflates expectancy could prevent a necessary rollback while the portfolio bleeds.
+
+### Solution: Three-Layer Input Architecture
+
+**Layer 1: Truth Benchmarks (rigid shell, orchestrator CANNOT change)**
+Simple, trivially verifiable metrics computed from raw data:
+- Actual net P&L, trade count, win/loss count, win rate
+- Actual fees paid, actual portfolio value
+- Actual max drawdown, consecutive loss streak
+- System operational stats (uptime, total scans, scan success rate)
+
+These are the "weighing scale." If the statistics module contradicts these, the orchestrator knows its analysis is wrong, not reality.
+
+**Layer 2: Statistics Module (flexible, orchestrator CAN rewrite)**
+A single Python file (like the strategy module) that the orchestrator designs and rewrites:
+- Receives: read-only database connection + schema documentation
+- Returns: dict of computed metrics (structured report)
+- Can query exactly the data it needs (efficient, no unnecessary data loading)
+- Pure computation — no writes, no network, no file I/O
+- Sandbox validated, Opus code-reviewed with emphasis on mathematical correctness
+- No paper testing required, but review must verify the math
+
+**Layer 3: User Constraints (rigid, orchestrator CANNOT change)**
+- Risk limits, config settings, symbol selection
+- Token budget, orchestration window
+
+### Orchestrator Self-Awareness
+The orchestrator must understand its own architecture — what it receives and what each input means:
+1. **Ground Truth** (rigid) — truth benchmarks, raw trade records, portfolio state, market prices
+2. **Its Own Analysis** (flexible, it can change) — statistics module output, strategy document
+3. **Its Own Strategy** (flexible, it can change, paper-tested) — active strategy code, version history
+4. **User Constraints** (rigid, it cannot change) — risk limits, config
+
+This labeling must be explicit in the orchestrator's system prompt so it reasons correctly about what to trust vs what to question.
+
+### Orchestrator Goals — Explicit and Prioritized
+**Primary goal**: Achieve positive expectancy after fees.
+**Secondary goals** (priority order):
+1. Win rate above 45% sustained
+2. Sharpe ratio above 0.3
+3. Positive monthly net P&L
+
+**Meta-goals** (how it operates):
+- Be conservative — when uncertain, don't change
+- Build understanding before acting — accumulate data, observe conditions
+- Improve its own observability — evolve the statistics module
+- Maintain institutional memory via strategy document
+- Recognize context — "3 days running with 0 trades" ≠ "3 months with 0 trades"
+
+### Statistics Module vs Strategy Module
+
+| Aspect | Strategy Module | Statistics Module |
+|--------|----------------|-------------------|
+| **Produces** | Trading signals | Analysis report |
+| **IO Contract IN** | SymbolData, Portfolio, RiskLimits | Read-only DB connection + schema |
+| **IO Contract OUT** | list[Signal] | dict of computed metrics |
+| **DB Access** | None | Read-only |
+| **Network** | None | None |
+| **Orchestrator rewrites** | Yes | Yes |
+| **Sandbox** | Yes (AST, no I/O) | Yes (no writes, no network) |
+| **Code review** | Safety + correctness | Safety + mathematical correctness |
+| **Paper test** | Yes (1-7 days by tier) | No (can't execute trades) |
+| **Danger if wrong** | Bad trades (direct loss) | Bad analysis (systematic wrong decisions) |
+
+### Data Collection Gaps Identified
+Current system does NOT store enough data for meaningful statistical analysis:
+
+| Missing Data | Why It Matters | Solution |
+|---|---|---|
+| Scan results | Can't see indicator values over time, can't measure "how close to signal" | New `scan_results` table |
+| Regime at trade time | Can't compute "win rate by market regime" | Tag regime on trades + signals |
+| Intraday portfolio values | Only daily snapshots, can't compute intraday drawdown | More granular snapshots or compute from trades |
+| Spread at trade time | Can't analyze actual vs simulated execution costs | Store spread in trade records |
+
+### Read-Only DB Access Decision
+User raised concern about efficiency: loading ALL data as DataFrames every night is wasteful and gets worse over time. Decision: give the statistics module a read-only database connection with schema understanding. It writes its own queries, pulls exactly what it needs.
+
+This is more efficient, more flexible, and still safe (read-only connection cannot modify data). The sandbox rules differ from strategy: statistics module CAN read from DB, CANNOT write/network/filesystem.
+
+### Key User Statements
+- "these statistics, if miscalculated or misinterpreted can cause major losses and damage long-term critical understanding"
+- "the orchestrator must be able to compare what is computed to closer-to-truth data"
+- "we can't have miscalculations"
+- "the orchestrator must understand what is providing it input, what is hard truths and what it can and is supposed to change"
+- "it should probably have clear goals"
+- "should the orchestrator be able to choose what data it's looking to use to avoid unnecessary IO and memory usage?"
