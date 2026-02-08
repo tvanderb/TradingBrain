@@ -17,7 +17,7 @@ symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
 [ai]
 provider = "anthropic"       # "anthropic" or "vertex"
 sonnet_model = "claude-sonnet-4-5-20250929"
-opus_model = "claude-opus-4-5-20250514"
+opus_model = "claude-opus-4-6"
 daily_token_limit = 150000   # Combined budget
 
 [ai.vertex]

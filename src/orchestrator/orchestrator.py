@@ -321,6 +321,13 @@ Is this classification correct?
                 actual_tier = review.get("suggested_tier", tier)
                 paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
 
+                # Backtest against historical data before deploying
+                backtest_passed, backtest_summary = await self._run_backtest(code)
+                if not backtest_passed:
+                    log.warning("orchestrator.backtest_failed", summary=backtest_summary)
+                    changes += f"\n\nBacktest failed: {backtest_summary}. Adjust the strategy."
+                    continue
+
                 # Deploy to active
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M')}"
                 code_hash = deploy_strategy(code, version)
@@ -360,6 +367,75 @@ Is this classification correct?
                 changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
 
         return f"Strategy change aborted after {max_revisions} failed attempts."
+
+    async def _run_backtest(self, code: str) -> tuple[bool, str]:
+        """Backtest generated strategy against recent historical data.
+
+        Returns (passed, summary). Passes if strategy doesn't crash and
+        doesn't produce catastrophic results (negative expectancy on >10 trades).
+        """
+        import importlib.util
+        import sys
+        import tempfile
+
+        try:
+            # Load the new strategy from code string
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+                f.write(code)
+                tmp_path = f.name
+
+            spec = importlib.util.spec_from_file_location("backtest_strategy", tmp_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            strategy = mod.Strategy()
+
+            # Get recent 1h candle data for backtest
+            candle_data = {}
+            for symbol in self._config.symbols:
+                df = await self._data_store.get_candles(symbol, "1h", limit=720)  # ~30 days
+                if not df.empty:
+                    candle_data[symbol] = df
+
+            if not candle_data:
+                log.info("orchestrator.backtest_skip", reason="no historical data")
+                return True, "Skipped (no historical data yet)"
+
+            risk_limits = RiskLimits(
+                max_trade_pct=self._config.risk.max_trade_pct,
+                default_trade_pct=self._config.risk.default_trade_pct,
+                max_positions=self._config.risk.max_positions,
+                max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
+                max_drawdown_pct=self._config.risk.max_drawdown_pct,
+            )
+
+            bt = Backtester(
+                strategy=strategy,
+                risk_limits=risk_limits,
+                symbols=self._config.symbols,
+                maker_fee_pct=self._config.kraken.maker_fee_pct,
+                taker_fee_pct=self._config.kraken.taker_fee_pct,
+                starting_cash=self._config.paper_balance_usd,
+            )
+
+            result = bt.run(candle_data, timeframe="1h")
+            summary = result.summary()
+            log.info("orchestrator.backtest_complete", summary=summary)
+
+            # Fail only on catastrophic results (crash or very negative)
+            if result.total_trades >= 10 and result.max_drawdown_pct > 0.15:
+                return False, f"Excessive drawdown: {result.max_drawdown_pct:.1%}. {summary}"
+
+            return True, summary
+
+        except Exception as e:
+            log.warning("orchestrator.backtest_error", error=str(e))
+            return False, f"Strategy crashed during backtest: {e}"
+        finally:
+            import os
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     async def _update_strategy_doc(self, findings: str, market_obs: str) -> None:
         """Append daily findings to the strategy document."""

@@ -17,7 +17,7 @@ log = structlog.get_logger()
 
 # Cost per million tokens (approximate, as of 2025)
 MODEL_COSTS = {
-    "claude-opus-4-5-20250514": {"input": 15.0, "output": 75.0},
+    "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
 }
 

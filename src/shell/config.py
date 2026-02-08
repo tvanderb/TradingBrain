@@ -30,7 +30,7 @@ class AIConfig:
     provider: str = "anthropic"
     anthropic_api_key: str = ""
     sonnet_model: str = "claude-sonnet-4-5-20250929"
-    opus_model: str = "claude-opus-4-5-20250514"
+    opus_model: str = "claude-opus-4-6"
     daily_token_limit: int = 150000
     vertex_project_id: str = ""
     vertex_region: str = "us-east5"
