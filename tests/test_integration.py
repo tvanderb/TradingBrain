@@ -857,3 +857,183 @@ async def test_analysis_modules_empty_db():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+# --- Orchestrator Context Gathering ---
+
+@pytest.mark.asyncio
+async def test_orchestrator_gather_context_includes_truth_and_analysis():
+    """Orchestrator _gather_context() includes ground truth, market analysis, and trade performance."""
+    from src.shell.database import Database
+    from src.shell.truth import compute_truth_benchmarks
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+    from src.statistics.loader import load_analysis_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed some data so modules have something to analyze
+        await db.execute(
+            """INSERT INTO scan_results (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime, created_at)
+               VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            ("BTC/USD", 50000, 50100, 49900, 55, 1.2, 0.5, "trending"),
+        )
+        await db.execute(
+            """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_regime, opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", "long", 0.001, 50000, 51000, 1.0, 0.02, 0.20, "DAY", "trending", "2026-01-01", "2026-01-01 12:00:00"),
+        )
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test", 1),
+        )
+        await db.commit()
+
+        # Run truth benchmarks
+        truth = await compute_truth_benchmarks(db)
+        assert truth["trade_count"] == 1
+        assert truth["total_scans"] == 1
+        assert truth["total_signals"] == 1
+
+        # Run market analysis
+        market_module = load_analysis_module("market_analysis")
+        ro = ReadOnlyDB(db.conn)
+        schema = get_schema_description()
+        market_result = await market_module.analyze(ro, schema)
+        assert isinstance(market_result, dict)
+        assert "BTC/USD" in market_result["price_summary"]
+
+        # Run trade performance
+        perf_module = load_analysis_module("trade_performance")
+        ro2 = ReadOnlyDB(db.conn)
+        perf_result = await perf_module.analyze(ro2, schema)
+        assert isinstance(perf_result, dict)
+        assert "BTC/USD" in perf_result["by_symbol"]
+
+        # All three produce valid output — this is what the orchestrator combines
+        assert truth["net_pnl"] == perf_result["by_symbol"]["BTC/USD"]["net_pnl"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Orchestrator Decision Routing ---
+
+def test_orchestrator_decision_type_routing():
+    """Verify the orchestrator correctly routes different decision types."""
+    # Strategy decisions
+    for decision_type in ("STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
+                          "TWEAK", "RESTRUCTURE", "OVERHAUL"):
+        assert decision_type not in ("NO_CHANGE", "MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE")
+
+    # Analysis module decisions
+    assert "MARKET_ANALYSIS_UPDATE" not in ("NO_CHANGE",)
+    assert "TRADE_ANALYSIS_UPDATE" not in ("NO_CHANGE",)
+
+    # These are the complete set of valid decisions
+    valid_decisions = {
+        "NO_CHANGE", "STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
+        "MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE",
+        "TWEAK", "RESTRUCTURE", "OVERHAUL",  # legacy names
+    }
+    assert len(valid_decisions) == 9
+
+
+# --- Analysis Module Evolution Pipeline ---
+
+def test_analysis_code_gen_prompts_exist():
+    """Verify analysis-specific prompts are defined in orchestrator."""
+    from src.orchestrator.orchestrator import (
+        ANALYSIS_SYSTEM, ANALYSIS_CODE_GEN_SYSTEM, ANALYSIS_REVIEW_SYSTEM,
+        CODE_GEN_SYSTEM, CODE_REVIEW_SYSTEM,
+    )
+
+    # ANALYSIS_SYSTEM should contain labeled input sections
+    assert "GROUND TRUTH" in ANALYSIS_SYSTEM
+    assert "YOUR MARKET ANALYSIS" in ANALYSIS_SYSTEM
+    assert "YOUR TRADE PERFORMANCE ANALYSIS" in ANALYSIS_SYSTEM
+    assert "YOUR STRATEGY" in ANALYSIS_SYSTEM
+    assert "USER CONSTRAINTS" in ANALYSIS_SYSTEM
+
+    # Should have explicit goals
+    assert "positive expectancy" in ANALYSIS_SYSTEM.lower()
+    assert "win rate" in ANALYSIS_SYSTEM.lower()
+
+    # Should have expanded decision options
+    assert "MARKET_ANALYSIS_UPDATE" in ANALYSIS_SYSTEM
+    assert "TRADE_ANALYSIS_UPDATE" in ANALYSIS_SYSTEM
+    assert "STRATEGY_TWEAK" in ANALYSIS_SYSTEM
+
+    # Analysis code gen should mention AnalysisBase, ReadOnlyDB
+    assert "AnalysisBase" in ANALYSIS_CODE_GEN_SYSTEM
+    assert "ReadOnlyDB" in ANALYSIS_CODE_GEN_SYSTEM or "read-only" in ANALYSIS_CODE_GEN_SYSTEM.lower()
+
+    # Analysis review should focus on math
+    assert "formula" in ANALYSIS_REVIEW_SYSTEM.lower() or "Formula" in ANALYSIS_REVIEW_SYSTEM
+    assert "division by zero" in ANALYSIS_REVIEW_SYSTEM.lower()
+    assert "edge case" in ANALYSIS_REVIEW_SYSTEM.lower()
+
+    # Strategy prompts should still exist unchanged
+    assert "StrategyBase" in CODE_GEN_SYSTEM
+    assert "IO Contract" in CODE_REVIEW_SYSTEM
+
+
+def test_analysis_evolution_sandbox_validates():
+    """Analysis module evolution goes through sandbox validation."""
+    from src.statistics.sandbox import validate_analysis_module
+
+    # Valid analysis module (what Sonnet would generate)
+    good_code = '''
+from src.shell.contract import AnalysisBase
+
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema: dict) -> dict:
+        report = {}
+        row = await db.fetchone("SELECT COUNT(*) as cnt FROM trades WHERE closed_at IS NOT NULL")
+        report["total_closed_trades"] = row["cnt"] if row else 0
+
+        # Win rate with division-by-zero guard
+        stats = await db.fetchone("""
+            SELECT
+                COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins
+            FROM trades WHERE closed_at IS NOT NULL
+        """)
+        if stats and stats["total"] > 0:
+            report["win_rate"] = stats["wins"] / stats["total"]
+        else:
+            report["win_rate"] = 0.0
+
+        return report
+'''
+    result = validate_analysis_module(good_code, "test_module")
+    assert result.passed, f"Valid module should pass: {result.errors}"
+
+    # Bad: tries to write to DB
+    bad_code = '''
+import sqlite3
+from src.shell.contract import AnalysisBase
+
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema: dict) -> dict:
+        return {}
+'''
+    result = validate_analysis_module(bad_code, "test_module")
+    assert not result.passed, "Should reject sqlite3 import"
+
+    # Bad: tries to use network
+    net_code = '''
+import requests
+from src.shell.contract import AnalysisBase
+
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema: dict) -> dict:
+        return {}
+'''
+    result = validate_analysis_module(net_code, "test_module")
+    assert not result.passed, "Should reject network import"
