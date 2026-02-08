@@ -12,11 +12,13 @@
 | Metric | Paper Phase Target | Live Phase Target |
 |--------|-------------------|-------------------|
 | Expectancy | > 0 (any positive) | > 0.5% per trade |
-| Win Rate | > 45% | > 50% |
-| Sharpe Ratio | > 0.3 | > 0.5 |
-| Max Drawdown | < 10% | < 8% |
+| Profit Factor | > 1.2 | > 1.5 |
+| Avg Win / Avg Loss | > 2.0 | > 2.5 |
+| Max Drawdown | < 12% | < 10% |
 | Monthly P&L | Positive 2 of 3 months | Consistently positive |
 | Strategy Evolution | At least 3 iterations | Stabilizing, fewer changes |
+
+*Note: Win rate and Sharpe ratio are tracked as informational metrics but not optimized for. A 30% win rate with 3:1 reward-to-risk is more profitable than 60% win rate with 0.5:1. Sortino ratio preferred over Sharpe (doesn't penalize upside volatility).*
 
 ### What This System Is
 - A mini autonomous crypto hedge fund operating 24/7

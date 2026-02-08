@@ -1,27 +1,31 @@
 # RISK LIMITS — NEVER modified by AI agent
 # Only humans should edit this file
 # Shell enforces these as hard limits on ALL signals
+#
+# Philosophy: Favor low-frequency, high-conviction trades. Tolerate losing
+# streaks (drawdown is the real safety net). Give the system room to swing
+# on fat pitches rather than forcing steady small-edge trades.
 
 [position]
-max_position_pct = 0.10   # Max 10% of portfolio per position
+max_position_pct = 0.15   # Max 15% of portfolio per position (bigger conviction bets)
 max_positions = 5          # Max 5 concurrent positions
 max_leverage = 1.0         # No leverage
 
 [daily]
-max_daily_loss_pct = 0.03  # Stop trading after 3% daily loss
+max_daily_loss_pct = 0.06  # Stop trading after 6% daily loss (room for 2 bad trades)
 max_daily_trades = 20      # Max trades per day
 
 [per_trade]
-max_trade_pct = 0.05       # Max 5% of portfolio per trade
-default_trade_pct = 0.02   # Default 2% per trade
+max_trade_pct = 0.07       # Max 7% of portfolio per trade (bigger conviction bets)
+default_trade_pct = 0.03   # Default 3% per trade
 default_stop_loss_pct = 0.02
-default_take_profit_pct = 0.04
+default_take_profit_pct = 0.06
 
 [emergency]
 kill_switch = false
-max_drawdown_pct = 0.10
+max_drawdown_pct = 0.12    # 12% max drawdown ($24 on $200 — the real safety net)
 
 [rollback]
 # Shell-enforced automatic rollback triggers
-max_daily_loss_pct = 0.05       # 5% portfolio drop in a day -> halt + rollback
-max_consecutive_losses = 10      # 10 consecutive losses -> pause + review
+max_daily_loss_pct = 0.08       # 8% portfolio drop in a day -> halt + rollback
+max_consecutive_losses = 999     # Disabled — drawdown is the safety net, not streak length

@@ -21,8 +21,8 @@ def test_config_loading():
     config = load_config()
     assert config.mode == "paper"
     assert "BTC/USD" in config.symbols
-    assert config.risk.max_trade_pct == 0.05
-    assert config.risk.rollback_consecutive_losses == 10
+    assert config.risk.max_trade_pct == 0.07
+    assert config.risk.rollback_consecutive_losses == 999
     assert config.ai.provider in ("anthropic", "vertex")
 
 
@@ -142,7 +142,8 @@ def test_risk_daily_limits():
     assert "Daily" in check.reason
 
 
-def test_risk_consecutive_losses():
+def test_risk_consecutive_losses_disabled():
+    """Consecutive loss halt is disabled (set to 999). Drawdown is the safety net."""
     from src.shell.config import load_config
     from src.shell.risk import RiskManager
     from src.shell.contract import Signal, Action
@@ -150,14 +151,13 @@ def test_risk_consecutive_losses():
     config = load_config()
     rm = RiskManager(config.risk)
 
-    # 10 consecutive losses should trigger halt
+    # 10 consecutive losses should NOT trigger halt (threshold is 999)
     for _ in range(10):
         rm.record_trade_result(-0.1)
 
     sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
     check = rm.check_signal(sig, portfolio_value=200, open_position_count=0)
-    assert not check.passed
-    assert "consecutive" in check.reason.lower()
+    assert check.passed, f"10 consecutive losses should not halt (threshold=999): {check.reason}"
 
 
 def test_risk_clamp():
@@ -962,7 +962,8 @@ def test_analysis_code_gen_prompts_exist():
 
     # Should have explicit goals
     assert "positive expectancy" in ANALYSIS_SYSTEM.lower()
-    assert "win rate" in ANALYSIS_SYSTEM.lower()
+    assert "profit factor" in ANALYSIS_SYSTEM.lower()
+    assert "3x" in ANALYSIS_SYSTEM  # fee-awareness: expected move > 3x fees
 
     # Should have expanded decision options
     assert "MARKET_ANALYSIS_UPDATE" in ANALYSIS_SYSTEM

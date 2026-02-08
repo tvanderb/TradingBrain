@@ -69,9 +69,14 @@ You receive FIVE categories of information. Pay attention to their labels:
 **Primary**: Achieve positive expectancy after fees. Every trade must clear the ~0.65-0.80% round-trip fee wall.
 
 **Secondary**:
-- Win rate > 45%
-- Sharpe ratio > 0.3
+- Profit factor > 1.2 (gross wins / gross losses — the system makes more than it loses)
+- Average win / average loss ratio > 2.0 (when you win, win big relative to losses)
 - Net positive P&L over any 30-day rolling window
+
+**Informational** (track but don't optimize for directly):
+- Win rate (a 30% win rate is fine if avg_win/avg_loss is 3:1)
+- Sharpe ratio (noisy on small samples, penalizes upside volatility)
+- Sortino ratio (better than Sharpe — only penalizes downside)
 
 **Meta-goals** (how you should operate):
 - Be conservative — don't change what's working
@@ -79,6 +84,7 @@ You receive FIVE categories of information. Pay attention to their labels:
 - Improve observability — if you can't answer a question about performance, update your analysis modules
 - Maintain institutional memory — always document findings in the strategy document
 - Think long-term — a small consistent edge compounds; wild swings in approach don't
+- **Fewer trades, bigger moves** — every trade must overcome ~0.65-0.80% round-trip fees. Only take setups where the expected move is at least 3x the round-trip cost (~2% minimum expected move). Trade quality always beats trade quantity.
 
 ## Cross-referencing
 
@@ -446,11 +452,13 @@ class Orchestrator:
 ---
 
 ## USER CONSTRAINTS (risk limits, goals — you cannot change these)
-- Round-trip fees: ~0.65-0.80% (0.25% maker, 0.40% taker)
-- Max trade size: 5% of portfolio
-- Max daily loss: 3% of portfolio
-- Max drawdown: 10%
+- Round-trip fees: ~0.65-0.80% (0.25% maker, 0.40% taker) — minimum ~2% move to profit
+- Max trade size: 7% of portfolio (bigger conviction bets)
+- Max position size: 15% of portfolio
+- Max daily loss: 6% of portfolio (hard halt)
+- Max drawdown: 12% (the real safety net — system halts if hit)
 - Max positions: 5
+- Consecutive loss halt: disabled (drawdown protects, not streak length)
 - Token budget: {context['token_usage'].get('used', 0)} / {context['token_usage'].get('daily_limit', 0)} tokens used today (${context['token_usage'].get('total_cost', 0):.4f})
 
 ---

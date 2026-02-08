@@ -170,3 +170,12 @@
 ### Decision: Regime Tagging on Trades and Signals
 - **What**: Add `strategy_regime` column to trades and signals tables
 - **Why**: Records what the strategy believed the regime was at decision time — useful as a fact about the decision process, not a fact about the market. Analysis modules can compare this against their own regime assessment.
+
+### Decision: Aggressive Tilt — Low-Frequency High-Conviction Goals (Session 6)
+- **What**: Replaced win rate and Sharpe ratio targets with profit factor and avg_win/avg_loss ratio. Loosened risk limits to give system room for asymmetric payoff strategies. Added fee-awareness meta-goal.
+- **Why**: The fee wall (0.65-0.80% round-trip) means the system needs 1.5-2% moves to profit. This naturally favors fewer, bigger trades over frequent small-edge trades. A trend-following strategy can be very profitable at 30% win rate if wins are 3x larger than losses. The old 45% win rate target would push the orchestrator toward high-frequency approaches that get eaten by fees.
+- **Changes**:
+  - **Goals**: Win rate >45% → profit factor >1.2 + avg_win/avg_loss >2.0. Sharpe >0.3 → informational only. Added fee-awareness: expected move must be >3x round-trip fees.
+  - **Risk limits**: max_trade_pct 5%→7%, max_position_pct 10%→15%, max_daily_loss 3%→6%, max_drawdown 10%→12%, consecutive_losses 10→disabled (999), rollback_daily_loss 5%→8%, default_trade_pct 2%→3%, default_take_profit 4%→6%.
+  - **Philosophy**: Lower the floor on what's acceptable while learning (profit factor 1.2, drawdown 12%), raise the bar on what constitutes a good trade (2.0 reward-to-risk, 3x fees). Drawdown is the real safety net, not streak length.
+- **Risk**: Wider limits mean the system can lose more before halting ($24 vs $20 on $200). Acceptable because: still survivable, and over-constraining early prevents the system from finding its edge.

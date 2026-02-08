@@ -67,19 +67,19 @@ class FeeConfig:
 
 @dataclass
 class RiskConfig:
-    max_position_pct: float = 0.10
+    max_position_pct: float = 0.15
     max_positions: int = 5
     max_leverage: float = 1.0
-    max_daily_loss_pct: float = 0.03
+    max_daily_loss_pct: float = 0.06
     max_daily_trades: int = 20
-    max_trade_pct: float = 0.05
-    default_trade_pct: float = 0.02
+    max_trade_pct: float = 0.07
+    default_trade_pct: float = 0.03
     default_stop_loss_pct: float = 0.02
-    default_take_profit_pct: float = 0.04
+    default_take_profit_pct: float = 0.06
     kill_switch: bool = False
-    max_drawdown_pct: float = 0.10
-    rollback_daily_loss_pct: float = 0.05
-    rollback_consecutive_losses: int = 10
+    max_drawdown_pct: float = 0.12
+    rollback_daily_loss_pct: float = 0.08
+    rollback_consecutive_losses: int = 999
 
 
 @dataclass
