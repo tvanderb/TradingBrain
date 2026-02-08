@@ -40,7 +40,7 @@
 |-----------|:---:|:---:|:---:|
 | IO Contract (types, interfaces) | ~150 | 2 | Working |
 | Config system (TOML + .env) | ~120 | 1 | Working |
-| Database (11 tables, async SQLite) | ~200 | 2 | Working |
+| Database (12 tables, async SQLite) | ~220 | 2 | Working |
 | Kraken REST client (orders, OHLC, fees) | ~190 | 1 | Working |
 | Kraken WebSocket v2 (ticker, OHLC) | ~85 | - | Working (reconnects on drop) |
 | Risk manager (9 checks, rollback) | ~140 | 4 | Working |
@@ -159,6 +159,9 @@
 - [ ] **Scan results collection** — store indicator state + strategy_regime every scan
 - [ ] **Regime tagging** — tag strategy_regime on trades and signals (what strategy thought, not ground truth)
 - [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks, two analysis reports
+
+### Before First Orchestration Cycle
+- [ ] **Orchestrator thought spool** — store full AI responses (Opus analysis, Sonnet code gen, review feedback) in a browsable format (DB table or files). Currently buried in structlog JSON. User needs to see what the orchestrator is thinking and why it made decisions. Design TBD.
 
 ### Before Going Live (Month 2-3)
 - [ ] **Order fill tracking** — poll Kraken for fill status after placing orders

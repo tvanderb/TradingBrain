@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS trades (
     fees REAL DEFAULT 0,
     intent TEXT NOT NULL DEFAULT 'DAY',
     strategy_version TEXT,
+    strategy_regime TEXT,               -- what the strategy thought the regime was at trade time
     opened_at TEXT DEFAULT (datetime('now')),
     closed_at TEXT,
     notes TEXT
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS signals (
     intent TEXT,
     reasoning TEXT,
     strategy_version TEXT,
+    strategy_regime TEXT,               -- what the strategy thought the regime was at signal time
     acted_on INTEGER DEFAULT 0,
     rejected_reason TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -162,13 +164,41 @@ CREATE TABLE IF NOT EXISTS paper_tests (
     completed_at TEXT
 );
 
+-- Scan results: raw indicator values (truth) + strategy's regime classification (interpretation)
+CREATE TABLE IF NOT EXISTS scan_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price REAL NOT NULL,
+    ema_fast REAL,
+    ema_slow REAL,
+    rsi REAL,
+    volume_ratio REAL,
+    spread REAL,
+    strategy_regime TEXT,               -- what the strategy classified (fact about decision, not truth)
+    signal_generated INTEGER DEFAULT 0,
+    signal_action TEXT,
+    signal_confidence REAL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol, closed_at);
 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
 CREATE INDEX IF NOT EXISTS idx_daily_perf_date ON daily_performance(date);
 CREATE INDEX IF NOT EXISTS idx_token_usage_date ON token_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_scan_results_ts ON scan_results(timestamp);
+CREATE INDEX IF NOT EXISTS idx_scan_results_symbol ON scan_results(symbol, timestamp);
 """
+
+# Migrations for existing databases (columns added after initial schema)
+MIGRATIONS = [
+    # Add strategy_regime to trades (if column doesn't exist yet)
+    ("trades", "strategy_regime", "ALTER TABLE trades ADD COLUMN strategy_regime TEXT"),
+    # Add strategy_regime to signals (if column doesn't exist yet)
+    ("signals", "strategy_regime", "ALTER TABLE signals ADD COLUMN strategy_regime TEXT"),
+]
 
 
 class Database:
@@ -182,8 +212,19 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        await self._run_migrations()
         await self._conn.commit()
         log.info("database.connected", path=self._path)
+
+    async def _run_migrations(self) -> None:
+        """Apply column additions to existing databases."""
+        for table, column, sql in MIGRATIONS:
+            # Check if column already exists
+            cursor = await self._conn.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if column not in columns:
+                await self._conn.execute(sql)
+                log.info("database.migration", table=table, column=column)
 
     async def close(self) -> None:
         if self._conn:

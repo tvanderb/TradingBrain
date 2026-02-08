@@ -231,8 +231,9 @@ Both are backed by **Truth Benchmarks** — rigid shell-computed ground truth th
 │  ┌──────────────────▼────────────┐  ┌────────────────────┐   │
 │  │  MARKET ANALYSIS (flexible)   │  │ TRADE PERF (flex)  │   │
 │  │  statistics/active/           │  │ statistics/active/  │   │
-│  │    market_analysis.py         │  │   trade_perf.py     │   │
-│  │  IN:  read-only DB + schema   │  │ IN:  read-only DB   │   │
+│  │    market_analysis.py         │  │ trade_performance.py│   │
+│  │  IN:  read-only DB + schema   │  │ IN: read-only DB     │   │
+│  │                               │  │     + schema         │
 │  │  OUT: market report dict      │  │ OUT: perf report    │   │
 │  │  "What is the market doing?"  │  │ "How are we doing?" │   │
 │  └──────────────────┬────────────┘  └──────┬─────────────┘   │
@@ -281,7 +282,7 @@ Both modules share the same base interface:
 class AnalysisBase(ABC):
     """Base class for analysis modules (market + trade performance)."""
 
-    def analyze(self, db: ReadOnlyDB, schema: dict) -> dict:
+    async def analyze(self, db: ReadOnlyDB, schema: dict) -> dict:
         """Run analysis and return structured report.
 
         Args:
@@ -356,7 +357,7 @@ Analyzes: trades, signals, portfolio snapshots
 ### Database Schema Additions
 
 ```sql
--- Scan results: captures every scan's indicator state (raw values, not interpretations)
+-- Scan results: raw indicator values (truth) + strategy's regime classification (interpretation)
 CREATE TABLE scan_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -367,16 +368,15 @@ CREATE TABLE scan_results (
     rsi REAL,
     volume_ratio REAL,
     spread REAL,
-    strategy_regime TEXT,          -- what the strategy classified (fact about decision)
+    strategy_regime TEXT,          -- what the strategy classified (fact about decision, not truth)
     signal_generated INTEGER DEFAULT 0,
     signal_action TEXT,
     signal_confidence REAL,
-    notes TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE INDEX idx_scan_results_ts ON scan_results(timestamp);
-CREATE INDEX idx_scan_results_symbol ON scan_results(symbol);
+CREATE INDEX idx_scan_results_symbol ON scan_results(symbol, timestamp);
 ```
 
 Additional columns on existing tables:
