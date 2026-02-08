@@ -691,3 +691,169 @@ from src.shell.contract import AnalysisBase
 '''
     errors = check_analysis_imports(code)
     assert len(errors) == 0, f"Should allow these imports: {errors}"
+
+
+# --- Analysis Modules (load + run) ---
+
+@pytest.mark.asyncio
+async def test_market_analysis_module():
+    """Market analysis module loads, runs against seeded DB, returns dict."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+    from src.statistics.loader import load_analysis_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed scan results
+        for i in range(20):
+            await db.execute(
+                """INSERT INTO scan_results
+                   (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
+                (f"2026-01-01 {10+i//6:02d}:{(i%6)*10:02d}:00", "BTC/USD",
+                 50000 + i * 50, 50100 + i * 10, 49900 + i * 10,
+                 45 + i, 1.1 + i * 0.05, 0.5, "trending",
+                 f"-{20-i} minutes"),
+            )
+        await db.commit()
+
+        # Load and run
+        module = load_analysis_module("market_analysis")
+        ro = ReadOnlyDB(db.conn)
+        result = await module.analyze(ro, get_schema_description())
+
+        assert isinstance(result, dict)
+        assert "price_summary" in result
+        assert "indicator_stats_24h" in result
+        assert "signal_proximity" in result
+        assert "data_quality" in result
+        assert result["data_quality"]["total_scans"] == 20
+
+        # BTC/USD should be in price summary
+        assert "BTC/USD" in result["price_summary"]
+        btc = result["price_summary"]["BTC/USD"]
+        assert btc["current_price"] > 0
+        assert btc["ema_alignment"] in ("bullish", "bearish")
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_trade_performance_module():
+    """Trade performance module loads, runs against seeded DB, returns dict."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+    from src.statistics.loader import load_analysis_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed trades
+        trades = [
+            ("BTC/USD", "long", 0.001, 50000, 51000, 1.0, 0.02, 0.20, "DAY", "trending", "2026-01-01", "2026-01-01 12:00:00"),
+            ("BTC/USD", "long", 0.001, 50000, 49000, -1.0, -0.02, 0.20, "DAY", "ranging", "2026-01-02", "2026-01-02 12:00:00"),
+            ("ETH/USD", "long", 0.01, 3000, 3200, 2.0, 0.067, 0.12, "SWING", "trending", "2026-01-03", "2026-01-05 12:00:00"),
+        ]
+        for t in trades:
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+                   fees, intent, strategy_regime, opened_at, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                t,
+            )
+
+        # Seed signals
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test", 1),
+        )
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.6, "DAY", "test", 0, "max_positions"),
+        )
+
+        # Seed fee schedule
+        await db.execute(
+            "INSERT INTO fee_schedule (maker_fee_pct, taker_fee_pct) VALUES (?, ?)",
+            (0.25, 0.40),
+        )
+        await db.commit()
+
+        # Load and run
+        module = load_analysis_module("trade_performance")
+        ro = ReadOnlyDB(db.conn)
+        result = await module.analyze(ro, get_schema_description())
+
+        assert isinstance(result, dict)
+        assert "by_symbol" in result
+        assert "by_regime" in result
+        assert "signals" in result
+        assert "fee_impact" in result
+        assert "holding_duration" in result
+        assert "rolling_7d" in result
+        assert "rolling_30d" in result
+
+        # BTC/USD: 2 trades, 1 win, 1 loss
+        assert "BTC/USD" in result["by_symbol"]
+        btc = result["by_symbol"]["BTC/USD"]
+        assert btc["trades"] == 2
+        assert btc["wins"] == 1
+        assert btc["win_rate"] == 0.5
+
+        # Signals: 2 total, 1 acted
+        assert result["signals"]["total"] == 2
+        assert result["signals"]["acted"] == 1
+        assert result["signals"]["act_rate"] == 0.5
+
+        # Fee impact
+        assert result["fee_impact"]["total_fees_paid"] > 0
+        assert result["fee_impact"]["round_trip_fee_pct"] > 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_analysis_modules_empty_db():
+    """Both analysis modules handle empty database gracefully."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+    from src.statistics.loader import load_analysis_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        ro = ReadOnlyDB(db.conn)
+        schema = get_schema_description()
+
+        # Market analysis on empty DB
+        market = load_analysis_module("market_analysis")
+        market_result = await market.analyze(ro, schema)
+        assert isinstance(market_result, dict)
+        assert market_result["data_quality"]["total_scans"] == 0
+
+        # Trade performance on empty DB
+        perf = load_analysis_module("trade_performance")
+        perf_result = await perf.analyze(ro, schema)
+        assert isinstance(perf_result, dict)
+        assert perf_result["signals"]["total"] == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
