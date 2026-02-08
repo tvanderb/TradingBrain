@@ -43,7 +43,7 @@ async def test_database_schema():
 
         required = ["candles", "positions", "trades", "signals", "daily_performance",
                      "strategy_versions", "orchestrator_log", "token_usage",
-                     "fee_schedule", "strategy_state", "paper_tests"]
+                     "fee_schedule", "strategy_state", "paper_tests", "scan_results"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -423,3 +423,114 @@ def test_backtester_runs():
     print(f"Backtest: {result.summary()}")
     assert result.total_trades >= 0  # May or may not trade depending on random data
     assert isinstance(result.net_pnl, float)
+
+
+# --- Truth Benchmarks ---
+
+@pytest.mark.asyncio
+async def test_truth_benchmarks():
+    """Truth benchmarks compute correct values from known seed data."""
+    from src.shell.database import Database
+    from src.shell.truth import compute_truth_benchmarks
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed known trade data: 3 wins, then 2 losses (order matters for consecutive_losses)
+        trades = [
+            ("BTC/USD", "long", 0.001, 50000, 51000, 1.0, 0.02, 0.20, "DAY", "trending", "2026-01-01", "2026-01-01 10:00:00"),
+            ("BTC/USD", "long", 0.001, 50000, 50500, 0.5, 0.01, 0.20, "DAY", "trending", "2026-01-02", "2026-01-02 10:00:00"),
+            ("ETH/USD", "long", 0.01, 3000, 3100, 1.0, 0.033, 0.12, "DAY", "ranging", "2026-01-03", "2026-01-03 10:00:00"),
+            ("BTC/USD", "long", 0.001, 50000, 49500, -0.5, -0.01, 0.20, "DAY", "trending", "2026-01-04", "2026-01-04 10:00:00"),
+            ("ETH/USD", "long", 0.01, 3000, 2900, -1.0, -0.033, 0.12, "DAY", "ranging", "2026-01-05", "2026-01-05 10:00:00"),
+        ]
+        for t in trades:
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+                   fees, intent, strategy_regime, opened_at, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                t,
+            )
+
+        # Seed signals: 4 total, 3 acted on
+        for i in range(4):
+            acted = 1 if i < 3 else 0
+            await db.execute(
+                "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test", acted),
+            )
+
+        # Seed scan results
+        for i in range(10):
+            await db.execute(
+                """INSERT INTO scan_results (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
+                   VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("BTC/USD", 50000 + i * 100, 50100, 49900, 55, 1.2, 0.5, "trending"),
+            )
+
+        await db.commit()
+
+        # Run truth benchmarks
+        truth = await compute_truth_benchmarks(db)
+
+        # Verify trade metrics
+        assert truth["trade_count"] == 5
+        assert truth["win_count"] == 3
+        assert truth["loss_count"] == 2
+        assert truth["win_rate"] == pytest.approx(0.6)
+        assert truth["net_pnl"] == pytest.approx(1.0)  # 1.0 + 0.5 + 1.0 - 0.5 - 1.0
+        assert truth["total_fees"] == pytest.approx(0.84)  # 0.20*3 + 0.12*2
+
+        # Verify signal metrics
+        assert truth["total_signals"] == 4
+        assert truth["acted_signals"] == 3
+        assert truth["signal_act_rate"] == pytest.approx(0.75)
+
+        # Verify scan metrics
+        assert truth["total_scans"] == 10
+
+        # Verify consecutive losses (last 2 trades are losses)
+        assert truth["consecutive_losses"] == 2
+
+        # Verify expectancy: (0.6 * avg_win) + (0.4 * avg_loss)
+        avg_win = (1.0 + 0.5 + 1.0) / 3  # ~0.833
+        avg_loss = (-0.5 + -1.0) / 2  # -0.75
+        expected_expectancy = (0.6 * avg_win) + (0.4 * avg_loss)
+        assert truth["expectancy"] == pytest.approx(expected_expectancy, abs=0.01)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_truth_benchmarks_empty_db():
+    """Truth benchmarks handle empty database gracefully."""
+    from src.shell.database import Database
+    from src.shell.truth import compute_truth_benchmarks
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        truth = await compute_truth_benchmarks(db)
+
+        assert truth["trade_count"] == 0
+        assert truth["win_rate"] == 0.0
+        assert truth["net_pnl"] == 0.0
+        assert truth["expectancy"] == 0.0
+        assert truth["consecutive_losses"] == 0
+        assert truth["total_signals"] == 0
+        assert truth["total_scans"] == 0
+        assert truth["max_drawdown_pct"] == 0.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
