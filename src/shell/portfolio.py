@@ -142,16 +142,17 @@ class PortfolioTracker:
         )
 
     async def execute_signal(
-        self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float
+        self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
+        strategy_regime: str | None = None,
     ) -> dict | None:
         """Execute a signal. Returns trade info dict or None if failed."""
 
         if signal.action == Action.BUY:
             return await self._execute_buy(signal, current_price, maker_fee, taker_fee)
         elif signal.action == Action.SELL:
-            return await self._execute_sell(signal, current_price, maker_fee, taker_fee)
+            return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime)
         elif signal.action == Action.CLOSE:
-            return await self._execute_close(signal, current_price, maker_fee, taker_fee)
+            return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime)
         return None
 
     async def _execute_buy(
@@ -237,7 +238,8 @@ class PortfolioTracker:
         }
 
     async def _execute_sell(
-        self, signal: Signal, price: float, maker_fee: float, taker_fee: float
+        self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
+        strategy_regime: str | None = None,
     ) -> dict | None:
         """Partial sell of a position."""
         pos = self._positions.get(signal.symbol)
@@ -249,10 +251,11 @@ class PortfolioTracker:
         sell_value = portfolio_value * signal.size_pct
         qty_to_sell = min(sell_value / price, pos["qty"])
 
-        return await self._close_qty(signal.symbol, qty_to_sell, price, maker_fee, taker_fee, signal)
+        return await self._close_qty(signal.symbol, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime)
 
     async def _execute_close(
-        self, signal: Signal, price: float, maker_fee: float, taker_fee: float
+        self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
+        strategy_regime: str | None = None,
     ) -> dict | None:
         """Close entire position."""
         pos = self._positions.get(signal.symbol)
@@ -260,11 +263,12 @@ class PortfolioTracker:
             log.warning("portfolio.no_position_to_close", symbol=signal.symbol)
             return None
 
-        return await self._close_qty(signal.symbol, pos["qty"], price, maker_fee, taker_fee, signal)
+        return await self._close_qty(signal.symbol, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime)
 
     async def _close_qty(
         self, symbol: str, qty: float, price: float,
         maker_fee: float, taker_fee: float, signal: Signal,
+        strategy_regime: str | None = None,
     ) -> dict | None:
         pos = self._positions[symbol]
 
@@ -292,10 +296,10 @@ class PortfolioTracker:
         now = datetime.now().isoformat()
         await self._db.execute(
             """INSERT INTO trades
-               (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, opened_at, closed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
-             fee, pos.get("intent", "DAY"), None, pos.get("opened_at", now), now),
+             fee, pos.get("intent", "DAY"), None, strategy_regime, pos.get("opened_at", now), now),
         )
 
         # Update or remove position

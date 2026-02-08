@@ -276,6 +276,17 @@ class TradingBrain:
                         "regime": indicators.get("regime", "unknown"),
                     }
 
+                    # Store scan results (raw indicator values + strategy's regime interpretation)
+                    await self._db.execute(
+                        """INSERT INTO scan_results
+                           (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (datetime.now().isoformat(), symbol, price,
+                         indicators.get("ema_fast"), indicators.get("ema_slow"),
+                         indicators.get("rsi"), indicators.get("vol_ratio"),
+                         spread, indicators.get("regime")),
+                    )
+
                 except Exception as e:
                     log.warning("scan.symbol_error", symbol=symbol, error=str(e))
 
@@ -299,10 +310,11 @@ class TradingBrain:
 
                 if not check.passed:
                     log.info("scan.signal_rejected", symbol=signal.symbol, reason=check.reason)
+                    regime = scan_symbols.get(signal.symbol, {}).get("regime")
                     await self._db.execute(
-                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, check.reason),
+                         signal.intent.value, signal.reasoning, regime, check.reason),
                     )
                     continue
 
@@ -311,18 +323,20 @@ class TradingBrain:
 
                 # Execute
                 price = prices.get(signal.symbol, 0)
+                regime = scan_symbols.get(signal.symbol, {}).get("regime")
                 result = await self._portfolio.execute_signal(
                     signal, price,
                     self._config.kraken.maker_fee_pct,
                     self._config.kraken.taker_fee_pct,
+                    strategy_regime=regime,
                 )
 
                 if result:
                     # Record signal
                     await self._db.execute(
-                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning),
+                         signal.intent.value, signal.reasoning, regime),
                     )
 
                     # Track P&L
@@ -359,6 +373,16 @@ class TradingBrain:
                             "confidence": signal.confidence,
                             "reasoning": signal.reasoning,
                         }
+
+            # Update scan_results with signal info for symbols that generated signals
+            for signal in signals:
+                sym_data = scan_symbols.get(signal.symbol, {})
+                if sym_data:
+                    await self._db.execute(
+                        """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
+                           WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
+                        (signal.action.value, signal.confidence, signal.symbol, signal.symbol),
+                    )
 
             await self._db.commit()
 
@@ -405,10 +429,13 @@ class TradingBrain:
                 intent=Intent.DAY, confidence=1.0,
                 reasoning=f"{reason} triggered at ${price:.2f}",
             )
+            # Use most recent scan's regime for this symbol
+            regime = self._scan_state.get("symbols", {}).get(symbol, {}).get("regime")
             result = await self._portfolio.execute_signal(
                 signal, price,
                 self._config.kraken.maker_fee_pct,
                 self._config.kraken.taker_fee_pct,
+                strategy_regime=regime,
             )
             if result:
                 self._risk.record_trade_result(result.get("pnl", 0))
