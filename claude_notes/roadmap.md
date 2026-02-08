@@ -261,10 +261,13 @@ Files: `statistics/active/trade_performance.py` (new)
 Files: `src/orchestrator/orchestrator.py`
 - Update `_gather_context()`:
   1. Run truth benchmarks → ground_truth dict
-  2. Run market analysis module → market_report dict
-  3. Run trade performance module → performance_report dict
+  2. Run market analysis module → market_report dict (independent, DB only)
+  3. Run trade performance module → performance_report dict (independent, DB only)
   4. Gather strategy context (code, doc, versions)
   5. Gather operational context (system age, scan count, market state)
+  - Note: Steps 2 & 3 run independently — neither module sees the other's output
+  - The orchestrator cross-references both reports (correlating market conditions with trade outcomes)
+  - Modules compute hard numbers accurately; the AI reasons across them
 - Update `ANALYSIS_SYSTEM` prompt with labeled inputs:
   - "GROUND TRUTH (rigid shell, you cannot change this, use to verify your analysis)"
   - "YOUR MARKET ANALYSIS (you designed this module, you can rewrite it)"

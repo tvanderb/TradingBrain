@@ -214,7 +214,7 @@ Both are backed by **Truth Benchmarks** — rigid shell-computed ground truth th
 - **Independent evolution**: Orchestrator can change market analysis without risking trade performance calculations, and vice versa
 - **Fault isolation**: If one module crashes, the other still delivers its report
 - **Cleaner review**: Opus reviews one focused domain per module
-- **Cross-referencing**: Both have read-only DB access, so either can query any table. The DB is the shared layer — no need for modules to call each other.
+- **Cross-referencing**: Both modules run independently — neither sees the other's output. The orchestrator receives both reports and performs cross-referencing (e.g., correlating market conditions with trade outcomes). This is what LLMs are good at. The modules focus on computing hard numbers accurately — what LLMs are bad at.
 
 ### Architecture Diagram
 ```

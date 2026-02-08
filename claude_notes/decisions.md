@@ -158,7 +158,8 @@
 ### Decision: Two Analysis Modules (Not One)
 - **What**: Separate market analysis and trade performance into two independent modules
 - **Why**: Different analytical domains (exchange data vs execution quality), different value timelines (market analysis useful from day one, trade performance needs trades), independent evolution, fault isolation
-- **Cross-referencing**: Both have read-only DB access — either can query any table. The DB is the shared layer. No need for modules to call each other.
+- **Cross-referencing**: Modules run independently, neither sees the other's output. The orchestrator (Opus) receives both reports and cross-references them — correlating market conditions with trade outcomes. Modules compute hard numbers; AI reasons across them.
+- **Why not sequential (market → trade performance)**: Coupling — if market analysis changes output keys or crashes, trade performance breaks. Keeping them independent maximizes fault isolation.
 - **Infrastructure**: Shared loader, shared sandbox, shared ReadOnlyDB wrapper. Not double the infrastructure — same infrastructure applied twice.
 
 ### Decision: Regime is NOT Truth
