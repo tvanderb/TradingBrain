@@ -395,3 +395,40 @@ This is more efficient, more flexible, and still safe (read-only connection cann
 - "the orchestrator must understand what is providing it input, what is hard truths and what it can and is supposed to change"
 - "it should probably have clear goals"
 - "should the orchestrator be able to choose what data it's looking to use to avoid unnecessary IO and memory usage?"
+
+### Regime Classification is NOT Truth (Continued Discussion)
+User questioned whether regime classification is reliable ground truth. Answer: no. Regime is a heuristic interpretation — different algorithms classify the same market differently. Raw indicator values (price, EMA, RSI, volume) ARE truth. Regime labels are analysis.
+
+Decision: Store raw values in scan_results. Tag the strategy's regime classification on trades as `strategy_regime` — a fact about what the strategy *thought*, not what the market *was*. Analysis modules derive their own regime views from raw data.
+
+### Two Analysis Modules vs One (Continued Discussion)
+User asked whether historical exchange data analysis should be a separate module from trade performance analysis. After weighing pros/cons:
+
+**Chose: Two separate modules (Option B)**
+
+Key arguments for separation:
+- Market analysis is valuable from day one (rich candle data). Trade performance needs trades.
+- Different domains, different evolution velocities
+- Fault isolation — one crash doesn't kill both reports
+- Cleaner code review per domain
+- Cross-referencing solved by shared DB access — both modules can query any table
+
+Key arguments against (accepted as tradeoffs):
+- More files/complexity — mitigated by shared infrastructure (one loader, one sandbox)
+- Cross-referencing slightly less natural — mitigated by read-only DB access for both
+- Larger orchestrator decision space — accepted, orchestrator is capable
+
+### Orchestrator Must Understand Its Own Architecture
+User emphasized: the orchestrator needs to understand what provides its inputs, what is hard truth, and what it can change. This must be explicit in the system prompt with clear labeling:
+1. GROUND TRUTH (rigid benchmarks — cannot change)
+2. YOUR MARKET ANALYSIS (designed by orchestrator — can change)
+3. YOUR TRADE ANALYSIS (designed by orchestrator — can change)
+4. YOUR STRATEGY (designed by orchestrator — can change, paper-tested)
+5. USER CONSTRAINTS (risk limits, config — cannot change)
+
+The orchestrator should also have explicit goals (not just vibes) so it knows what it's optimizing for.
+
+### Additional User Insight: Analysis Modules Can Cause Losses
+User corrected the characterization of analysis modules as "read-only, can't lose money." Miscalculated statistics can cause major losses by leading the orchestrator to systematically wrong decisions. The truth benchmarks exist specifically so the orchestrator can detect disconnect between its own analysis and reality.
+
+Code review for analysis modules must verify mathematical correctness, not just code safety. This is as important as reviewing the trading strategy.

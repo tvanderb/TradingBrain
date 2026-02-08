@@ -155,10 +155,10 @@
 - [x] WebSocket reconnection with backoff
 - [x] **Test Telegram commands from phone** — confirm bot responds to /status, /report, /positions
 - [x] **Commit all code to git** — nothing committed since v2 build
-- [ ] **Statistics shell** — full implementation (see integration plan below)
-- [ ] **Scan results collection** — store indicator state every scan
-- [ ] **Regime tagging** — tag market regime on trades and signals
-- [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks
+- [ ] **Statistics shell** — truth benchmarks + two analysis modules (see Phase 0 below)
+- [ ] **Scan results collection** — store indicator state + strategy_regime every scan
+- [ ] **Regime tagging** — tag strategy_regime on trades and signals (what strategy thought, not ground truth)
+- [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks, two analysis reports
 
 ### Before Going Live (Month 2-3)
 - [ ] **Order fill tracking** — poll Kraken for fill status after placing orders
@@ -184,22 +184,30 @@
 
 **This must be built before unattended paper trading.** Without it, the orchestrator will make decisions based on incomplete context and potentially miscalculated statistics.
 
+**Architecture**: Two flexible analysis modules + one rigid truth benchmarks layer:
+- **Truth Benchmarks** (rigid shell) — simple verifiable metrics, orchestrator cannot modify
+- **Market Analysis Module** (flexible) — analyzes exchange data, indicators, regimes, scan patterns
+- **Trade Performance Module** (flexible) — analyzes trade execution quality, strategy effectiveness, fees
+
+Both flexible modules follow the same IO-container pattern as the strategy: orchestrator rewrites, Opus reviews for mathematical correctness, sandbox validates, deploy. No paper testing needed (read-only).
+
 #### Implementation Steps (in dependency order)
 
 **Step 1: Database Schema Additions**
 Files: `src/shell/database.py`
-- Add `scan_results` table (price, indicators, regime, signal info per scan per symbol)
-- Add `regime` column to `trades` table
-- Add `regime` column to `signals` table
+- Add `scan_results` table: symbol, timestamp, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime, signal_generated (bool), signal_action, signal_confidence
+- Add `strategy_regime` column to `trades` table
+- Add `strategy_regime` column to `signals` table
 - Add indexes for efficient querying by timestamp and symbol
+- Note: column is `strategy_regime` (not `regime`) — it records what the strategy *thought*, not ground truth
 
 **Step 2: Scan Results Collection**
 Files: `src/main.py` (scan loop)
 - After each scan, write indicator state to `scan_results` for every symbol
-- Record: price, ema_fast, ema_slow, rsi, volume_ratio, regime, spread
+- Record: price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime
 - Record whether a signal was generated and its action/confidence
-- Tag regime on any signals generated
-- Tag regime on any trades executed
+- Tag `strategy_regime` on any signals generated
+- Tag `strategy_regime` on any trades executed
 
 **Step 3: Truth Benchmarks**
 Files: `src/shell/truth.py` (new)
@@ -212,69 +220,95 @@ Files: `src/shell/truth.py` (new)
 - Returns structured dict
 - All calculations trivially verifiable — no complex statistics
 
-**Step 4: Statistics Module Infrastructure**
+**Step 4: Analysis Module Infrastructure (Shared)**
 Files: `src/statistics/__init__.py`, `src/statistics/loader.py`, `src/statistics/sandbox.py`
-- Loader: dynamic import of `statistics/active/analysis.py` (same pattern as strategy loader)
+- Loader: dynamic import from `statistics/active/market_analysis.py` and `statistics/active/trade_performance.py`
+  - Same pattern as strategy loader, but handles two modules
+  - Each module extends `AnalysisBase` (from IO contract) with `async def analyze(db, schema) -> dict`
 - Sandbox: validate code safety + verify no DB writes, no network, no filesystem writes
-  - Different rules from strategy sandbox: allows read-only DB, allows scipy/statistics imports
-- Deploy: archive old version, write new code, verify it loads
+  - Different rules from strategy sandbox: allows read-only DB access, allows scipy/statistics imports
+  - Must verify mathematical correctness (Opus review prompt focuses on formulas, edge cases, division-by-zero)
+- Deploy: archive old version, write new code, verify it loads (per-module, independent)
 - ReadOnlyDB wrapper: wraps aiosqlite connection, only allows SELECT queries
+  - Blocks INSERT, UPDATE, DELETE, DROP, ALTER, CREATE at the query level
 
-**Step 5: Initial Statistics Module**
-Files: `statistics/active/analysis.py` (new)
+**Step 5: Initial Market Analysis Module**
+Files: `statistics/active/market_analysis.py` (new)
 - Hand-written starting point (like strategy v001)
-- Reasonable initial set of calculations:
-  - Performance by symbol (win rate, expectancy, avg P&L per symbol)
-  - Performance by regime (if enough data)
-  - Signal analysis (generated vs acted, confidence vs outcome)
-  - Scan analysis (signal proximity — how close to triggering)
-  - Fee impact (fees as % of gross profit, break-even move required)
-  - Rolling metrics (7d, 30d if available)
+- Analyzes exchange/indicator data:
+  - Price action summary (current price, 24h change, 7d change per symbol)
+  - Indicator distributions (how often RSI is overbought/oversold, EMA alignment frequency)
+  - Volatility analysis (ATR, standard deviation, range width)
+  - Volume patterns (time-of-day patterns, relative volume trends)
+  - Scan signal proximity (how close indicators are to triggering signals)
   - Data quality report (gaps, freshness, coverage)
-- The orchestrator will rewrite this over time as it learns what it needs
+- Orchestrator rewrites this over time as it learns what market context it needs
 
-**Step 6: Orchestrator Integration**
+**Step 6: Initial Trade Performance Module**
+Files: `statistics/active/trade_performance.py` (new)
+- Hand-written starting point
+- Analyzes trade execution and strategy effectiveness:
+  - Performance by symbol (win rate, expectancy, avg P&L per symbol)
+  - Performance by strategy_regime (if enough data)
+  - Signal analysis (generated vs acted, confidence vs outcome)
+  - Fee impact (fees as % of gross profit, break-even move required)
+  - Holding duration analysis (time in trade vs outcome)
+  - Rolling metrics (7d, 30d if available)
+  - Risk utilization (how close to limits, position sizing effectiveness)
+- Orchestrator rewrites this over time as it learns what performance metrics matter
+
+**Step 7: Orchestrator Integration**
 Files: `src/orchestrator/orchestrator.py`
 - Update `_gather_context()`:
   1. Run truth benchmarks → ground_truth dict
-  2. Run statistics module → analysis_report dict
-  3. Gather strategy context (code, doc, versions)
-  4. Gather operational context (system age, scan count, market state)
-- Update `ANALYSIS_SYSTEM` prompt:
-  - Label all inputs explicitly: "GROUND TRUTH (you cannot change this)", "YOUR ANALYSIS (you designed this, you can change it)", etc.
-  - Embed explicit goals with priorities
-  - Instruct orchestrator to cross-reference its analysis against truth benchmarks
-  - Instruct orchestrator to consider whether its analysis module needs improvement
-- Add statistics module evolution pipeline:
+  2. Run market analysis module → market_report dict
+  3. Run trade performance module → performance_report dict
+  4. Gather strategy context (code, doc, versions)
+  5. Gather operational context (system age, scan count, market state)
+- Update `ANALYSIS_SYSTEM` prompt with labeled inputs:
+  - "GROUND TRUTH (rigid shell, you cannot change this, use to verify your analysis)"
+  - "YOUR MARKET ANALYSIS (you designed this module, you can rewrite it)"
+  - "YOUR TRADE PERFORMANCE ANALYSIS (you designed this module, you can rewrite it)"
+  - "YOUR STRATEGY (you designed this, you can rewrite it)"
+  - "USER CONSTRAINTS (risk limits, goals — you cannot change these)"
+- Embed explicit goals with priorities:
+  - Primary: Positive expectancy after fees
+  - Secondary: Win rate > 45%, Sharpe > 0.3, positive monthly P&L
+  - Meta: Be conservative, build understanding, improve observability, maintain institutional memory
+- Instruct orchestrator to cross-reference its analysis against truth benchmarks
+- Add analysis module evolution pipeline:
   - Sonnet generates → Opus reviews (mathematical correctness focus) → sandbox → deploy
   - No paper testing required
-  - Add `STATS_REVIEW_SYSTEM` prompt emphasizing formula verification
+  - Add `ANALYSIS_REVIEW_SYSTEM` prompt: verify formulas against standard definitions, check edge cases (division by zero, empty data), confirm statistical validity
 
-**Step 7: Statistics Module Evolution in Orchestrator**
+**Step 8: Analysis Module Evolution in Orchestrator**
 Files: `src/orchestrator/orchestrator.py`
 - After main analysis decision, orchestrator can also decide: "I want to change what I measure"
-- Decision options expand: NO_CHANGE / STRATEGY_TWEAK / STRATEGY_RESTRUCTURE / STRATEGY_OVERHAUL / ANALYSIS_UPDATE
-- ANALYSIS_UPDATE: generates new statistics module code, reviews, deploys
+- Decision options expand: NO_CHANGE / STRATEGY_TWEAK / STRATEGY_RESTRUCTURE / STRATEGY_OVERHAUL / MARKET_ANALYSIS_UPDATE / TRADE_ANALYSIS_UPDATE
+- Each analysis update: generates new module code, Opus reviews for math, sandbox validates, deploys
 - Must include reason: "I need to see performance by holding duration" or "I want to add correlation analysis"
+- Both modules evolve independently — orchestrator can update one without touching the other
 
-**Step 8: Tests**
+**Step 9: Tests**
 Files: `tests/test_integration.py` (extend)
 - Truth benchmarks produce correct values from known test data
-- Statistics module loads and returns dict
-- Statistics sandbox rejects writes, allows reads
-- ReadOnlyDB wrapper blocks INSERT/UPDATE/DELETE
-- Scan results are stored correctly
-- Regime is tagged on trades and signals
+- Market analysis module loads, receives ReadOnlyDB, returns dict
+- Trade performance module loads, receives ReadOnlyDB, returns dict
+- Analysis sandbox rejects writes, allows reads
+- ReadOnlyDB wrapper blocks INSERT/UPDATE/DELETE/DROP/ALTER/CREATE
+- Scan results are stored correctly with `strategy_regime` (not `regime`)
+- `strategy_regime` is tagged on trades and signals
 
 #### Integration Verification
 After all steps:
 - [ ] Existing 18 tests still pass
-- [ ] New tests pass
-- [ ] Paper trading scan loop stores scan results
+- [ ] New tests pass (truth benchmarks, both analysis modules, sandbox, ReadOnlyDB)
+- [ ] Paper trading scan loop stores scan results with strategy_regime
 - [ ] Truth benchmarks compute from DB correctly
-- [ ] Statistics module loads and runs against DB
-- [ ] Orchestrator receives labeled inputs
-- [ ] Orchestrator can decide to change statistics module
+- [ ] Market analysis module loads and runs against DB
+- [ ] Trade performance module loads and runs against DB
+- [ ] Orchestrator receives all inputs with explicit category labels
+- [ ] Orchestrator can decide to change either analysis module independently
 - [ ] System doesn't slow down perceptibly (scan loop adds ~1ms for DB write)
 
 ### Phase 1: Paper Validation (Weeks 1-4)

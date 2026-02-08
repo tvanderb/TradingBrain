@@ -198,48 +198,63 @@ trading-brain/
 | Total per orchestration night | — | When making changes | $0.75-2.25 |
 | Total per month | — | ~$22-45 (budgeted at 150% of base estimate) | |
 
-## Statistics Shell
+## Statistics Shell (Two-Module Design)
 
 ### Overview
-A second flexible module alongside the strategy module. The orchestrator designs and rewrites the statistics module to compute whatever analytical report it needs for decision-making. Runs before each orchestration cycle.
+Two flexible analysis modules alongside the strategy module, following the same IO-container pattern. Each serves a distinct analytical purpose and evolves independently.
+
+1. **Market Analysis Module** — analyzes historical exchange data ("What game are we playing?")
+2. **Trade Performance Module** — analyzes trading results ("How well are we playing?")
+
+Both are backed by **Truth Benchmarks** — rigid shell-computed ground truth the orchestrator cannot modify.
+
+### Why Two Modules (Not One)
+- **Different domains**: Market structure (candles, volume, volatility) vs execution quality (trades, P&L, signals) are fundamentally different analytical tasks
+- **Different value timelines**: Market analysis is useful from day one (rich candle data exists). Trade performance needs trades to accumulate.
+- **Independent evolution**: Orchestrator can change market analysis without risking trade performance calculations, and vice versa
+- **Fault isolation**: If one module crashes, the other still delivers its report
+- **Cleaner review**: Opus reviews one focused domain per module
+- **Cross-referencing**: Both have read-only DB access, so either can query any table. The DB is the shared layer — no need for modules to call each other.
 
 ### Architecture Diagram
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    SHELL (Rigid)                         │
-│                                                         │
-│  ┌──────────────────────────────────────────────┐       │
-│  │         TRUTH BENCHMARKS (rigid)              │       │
-│  │  Actual P&L, win rate, fees, drawdown,        │       │
-│  │  trade count, portfolio value, system stats    │       │
-│  │  (orchestrator CANNOT modify)                 │       │
-│  └──────────────────┬───────────────────────────┘       │
-│                     │                                    │
-│  ┌──────────────────▼───────────────────────────┐       │
-│  │         STATISTICS MODULE (flexible)          │       │
-│  │    statistics/active/analysis.py              │       │
-│  │    IN:  read-only DB connection + schema      │       │
-│  │    OUT: dict of computed metrics              │       │
-│  │    (orchestrator CAN rewrite this)            │       │
-│  └──────────────────┬───────────────────────────┘       │
-│                     │                                    │
-│  ┌──────────────────▼───────────────────────────┐       │
-│  │              ORCHESTRATOR                     │       │
-│  │  Receives labeled inputs:                     │       │
-│  │  1. Ground Truth (rigid benchmarks)           │       │
-│  │  2. Its Own Analysis (statistics module)       │       │
-│  │  3. Its Own Strategy (strategy code)          │       │
-│  │  4. User Constraints (risk limits, config)    │       │
-│  │                                               │       │
-│  │  Can change: strategy, statistics module,     │       │
-│  │              strategy document                │       │
-│  │  Cannot change: truth, risk limits, shell     │       │
-│  └───────────────────────────────────────────────┘       │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    SHELL (Rigid)                              │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐        │
+│  │         TRUTH BENCHMARKS (rigid)                  │        │
+│  │  Actual P&L, win rate, fees, drawdown,            │        │
+│  │  trade count, portfolio value, system stats        │        │
+│  │  (orchestrator CANNOT modify)                     │        │
+│  └──────────────────┬───────────────────────────────┘        │
+│                     │                                         │
+│  ┌──────────────────▼────────────┐  ┌────────────────────┐   │
+│  │  MARKET ANALYSIS (flexible)   │  │ TRADE PERF (flex)  │   │
+│  │  statistics/active/           │  │ statistics/active/  │   │
+│  │    market_analysis.py         │  │   trade_perf.py     │   │
+│  │  IN:  read-only DB + schema   │  │ IN:  read-only DB   │   │
+│  │  OUT: market report dict      │  │ OUT: perf report    │   │
+│  │  "What is the market doing?"  │  │ "How are we doing?" │   │
+│  └──────────────────┬────────────┘  └──────┬─────────────┘   │
+│                     │                       │                  │
+│  ┌──────────────────▼───────────────────────▼──────────┐      │
+│  │              ORCHESTRATOR                            │      │
+│  │  Receives labeled inputs:                            │      │
+│  │  1. Ground Truth (rigid benchmarks)                  │      │
+│  │  2. Market Analysis (its analysis, it can change)    │      │
+│  │  3. Trade Performance (its analysis, it can change)  │      │
+│  │  4. Its Strategy (strategy code, it can change)      │      │
+│  │  5. User Constraints (risk limits, config)           │      │
+│  │                                                      │      │
+│  │  Can change: strategy, both analysis modules,        │      │
+│  │              strategy document                       │      │
+│  │  Cannot change: truth benchmarks, risk limits, shell │      │
+│  └──────────────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Truth Benchmarks (src/shell/truth.py)
-Rigid shell component. Simple metrics computed directly from raw data. Cannot be modified by orchestrator.
+Rigid shell component. Simple metrics computed directly from raw data. Cannot be modified by orchestrator. These are the "weighing scale" — if either analysis module contradicts truth, the orchestrator knows its analysis is wrong.
 
 | Metric | Computation | Purpose |
 |--------|-------------|---------|
@@ -256,11 +271,15 @@ Rigid shell component. Simple metrics computed directly from raw data. Cannot be
 | total_signals | COUNT(signals) | Signal rate |
 | signal_act_rate | Acted / Total signals | Execution rate |
 
-### Statistics Module IO Contract
+**Note on regime**: Regime classification is NOT truth — it's a heuristic interpretation. Raw indicator values (price, EMA, RSI, volume) are truth. Regime labels are analysis. The scan_results table stores raw values; the strategy's regime classification is tagged on trades as "what the strategy thought" (a fact about the decision, not about the market).
+
+### Analysis Module IO Contract
+
+Both modules share the same base interface:
 
 ```python
 class AnalysisBase(ABC):
-    """Base class for the statistics module."""
+    """Base class for analysis modules (market + trade performance)."""
 
     def analyze(self, db: ReadOnlyDB, schema: dict) -> dict:
         """Run analysis and return structured report.
@@ -275,8 +294,26 @@ class AnalysisBase(ABC):
         ...
 ```
 
-### Statistics Module Sandbox Rules
-| Rule | Strategy Module | Statistics Module |
+### Market Analysis Module — Focus Areas
+Analyzes: candles (5m/1h/1d), scan_results, price/volume structure
+- Current market conditions per symbol (volatility, trend strength, volume profile)
+- Regime classification (from raw indicators, may differ from strategy's classification)
+- Historical patterns (support/resistance levels, typical move sizes)
+- Cross-symbol correlation
+- Volatility analysis (historical vs current, expansion/contraction)
+- Data quality (gaps, coverage, freshness)
+
+### Trade Performance Module — Focus Areas
+Analyzes: trades, signals, portfolio snapshots
+- Performance by symbol, by intent (day/swing/position)
+- Signal quality (confidence vs outcome, generation vs execution rate)
+- Fee impact (fees as % of gross profit, break-even move required)
+- Rolling metrics (7d, 30d, 90d trends)
+- Drawdown analysis (duration, recovery time, depth)
+- Regime-tagged performance (using strategy's regime classification from scan_results)
+
+### Sandbox Rules (Same for Both Modules)
+| Rule | Strategy Module | Analysis Modules |
 |------|----------------|-------------------|
 | Read DB | Forbidden | Allowed (read-only) |
 | Write DB | Forbidden | Forbidden |
@@ -294,14 +331,23 @@ class AnalysisBase(ABC):
 
 ### Updated Orchestrator Nightly Flow
 ```
-1. Run truth benchmarks          → ground_truth dict
-2. Run statistics module         → analysis_report dict
-3. Gather strategy context       → code, doc, version history
-4. Gather operational context    → system age, scan count, current market state
-5. Label all inputs explicitly   → "GROUND TRUTH", "YOUR ANALYSIS", etc.
-6. Opus analysis                 → decision + reasoning
-7. If strategy change needed     → Sonnet generates → Opus reviews → backtest → deploy
-8. If statistics module change   → Sonnet generates → Opus reviews (math focus) → deploy
+1. Run truth benchmarks              → ground_truth dict
+2. Run market analysis module        → market_report dict
+3. Run trade performance module      → trade_report dict
+4. Gather strategy context           → code, doc, version history
+5. Gather operational context        → system age, scan count
+6. Label all inputs explicitly:
+     "GROUND TRUTH (rigid, you cannot change this)"
+     "YOUR MARKET ANALYSIS (you designed this, you can change it)"
+     "YOUR TRADE ANALYSIS (you designed this, you can change it)"
+     "YOUR STRATEGY (you designed this, you can change it, paper-tested)"
+     "USER CONSTRAINTS (you cannot change this)"
+7. Opus analysis                     → decisions + reasoning
+8. Possible decisions (zero or more per cycle):
+     - STRATEGY_TWEAK / RESTRUCTURE / OVERHAUL → generate → review → backtest → deploy
+     - UPDATE_MARKET_ANALYSIS → generate → review (math focus) → deploy
+     - UPDATE_TRADE_PERFORMANCE → generate → review (math focus) → deploy
+     - NO_CHANGE
 9. Update strategy document
 10. Data maintenance
 11. Send report via Telegram
@@ -310,7 +356,7 @@ class AnalysisBase(ABC):
 ### Database Schema Additions
 
 ```sql
--- Scan results: captures every scan's indicator state
+-- Scan results: captures every scan's indicator state (raw values, not interpretations)
 CREATE TABLE scan_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -320,8 +366,8 @@ CREATE TABLE scan_results (
     ema_slow REAL,
     rsi REAL,
     volume_ratio REAL,
-    regime TEXT,
     spread REAL,
+    strategy_regime TEXT,          -- what the strategy classified (fact about decision)
     signal_generated INTEGER DEFAULT 0,
     signal_action TEXT,
     signal_confidence REAL,
@@ -334,16 +380,22 @@ CREATE INDEX idx_scan_results_symbol ON scan_results(symbol);
 ```
 
 Additional columns on existing tables:
-- `trades`: add `regime TEXT` — market regime at time of trade
-- `signals`: add `regime TEXT` — market regime at time of signal
+- `trades`: add `strategy_regime TEXT` — what the strategy thought the regime was at trade time
+- `signals`: add `strategy_regime TEXT` — what the strategy thought at signal time
 
-### Statistics Module File Structure
+### File Structure
 ```
 statistics/
 ├── active/
-│   └── analysis.py        # Currently running analysis module
-├── archive/               # Previous versions
-└── skills/                # Reusable statistical functions (optional, future)
+│   ├── market_analysis.py      # Market/exchange data analysis (orchestrator rewrites)
+│   └── trade_performance.py    # Trade performance analysis (orchestrator rewrites)
+├── archive/                    # Previous versions of both modules
+│
+src/statistics/
+├── __init__.py
+├── loader.py                   # Shared loader for both modules
+├── sandbox.py                  # Shared sandbox validation
+└── readonly_db.py              # ReadOnlyDB wrapper (SELECT only)
 ```
 
 ## API Provider Abstraction

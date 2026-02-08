@@ -155,6 +155,17 @@
 - **Data**: price, EMA values, RSI, volume ratio, regime, spread, whether signal generated
 - **Impact**: ~864 rows/day (3 symbols × 288 scans), trivial for SQLite
 
+### Decision: Two Analysis Modules (Not One)
+- **What**: Separate market analysis and trade performance into two independent modules
+- **Why**: Different analytical domains (exchange data vs execution quality), different value timelines (market analysis useful from day one, trade performance needs trades), independent evolution, fault isolation
+- **Cross-referencing**: Both have read-only DB access — either can query any table. The DB is the shared layer. No need for modules to call each other.
+- **Infrastructure**: Shared loader, shared sandbox, shared ReadOnlyDB wrapper. Not double the infrastructure — same infrastructure applied twice.
+
+### Decision: Regime is NOT Truth
+- **What**: Raw indicator values (price, EMA, RSI, volume) are stored as truth in scan_results. Regime classification is stored as `strategy_regime` — what the strategy *thought*, not what the market *was*.
+- **Why**: User caught this — regime is a heuristic interpretation, not ground truth. Different algorithms classify the same market differently. The analysis modules should derive their own regime views from raw indicators, potentially disagreeing with the strategy's classification.
+- **Impact**: Renamed `regime` columns to `strategy_regime` to make the distinction explicit.
+
 ### Decision: Regime Tagging on Trades and Signals
-- **What**: Add `regime` column to trades and signals tables
-- **Why**: Enables "performance by market condition" analysis — critical for strategy evaluation
+- **What**: Add `strategy_regime` column to trades and signals tables
+- **Why**: Records what the strategy believed the regime was at decision time — useful as a fact about the decision process, not a fact about the market. Analysis modules can compare this against their own regime assessment.
