@@ -1,7 +1,7 @@
-"""IO Contract — rigid interface between Shell and Strategy Module.
+"""IO Contract — rigid interface between Shell and modules.
 
-These types define EXACTLY what the Strategy receives and what it must return.
-The Shell enforces risk limits on all Signals before execution.
+These types define EXACTLY what the Strategy and Analysis modules receive
+and what they must return. The Shell enforces all constraints.
 """
 
 from __future__ import annotations
@@ -155,3 +155,25 @@ class StrategyBase:
     def scan_interval_minutes(self) -> int:
         """How often analyze() should be called. Default 5 minutes."""
         return 5
+
+
+# --- Analysis Module Interface ---
+
+class AnalysisBase:
+    """Base class for analysis modules (market analysis + trade performance).
+
+    Analysis modules receive a read-only database connection and return
+    a dict of computed metrics. The orchestrator can rewrite these modules.
+    """
+
+    async def analyze(self, db, schema: dict) -> dict:
+        """Run analysis and return structured report.
+
+        Args:
+            db: ReadOnlyDB instance (SELECT only)
+            schema: Dict describing all tables, columns, and types
+
+        Returns:
+            Dict of computed metrics. Structure is up to the module.
+        """
+        raise NotImplementedError

@@ -534,3 +534,160 @@ async def test_truth_benchmarks_empty_db():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+# --- ReadOnlyDB ---
+
+@pytest.mark.asyncio
+async def test_readonly_db_allows_select():
+    """ReadOnlyDB allows SELECT queries."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert some data via the normal DB
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning) VALUES (?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test"),
+        )
+        await db.commit()
+
+        # ReadOnlyDB should be able to read it
+        ro = ReadOnlyDB(db.conn)
+        row = await ro.fetchone("SELECT COUNT(*) as cnt FROM signals")
+        assert row["cnt"] == 1
+
+        rows = await ro.fetchall("SELECT * FROM signals")
+        assert len(rows) == 1
+        assert rows[0]["symbol"] == "BTC/USD"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_readonly_db_blocks_writes():
+    """ReadOnlyDB blocks INSERT, UPDATE, DELETE, DROP, ALTER, CREATE."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        ro = ReadOnlyDB(db.conn)
+
+        blocked_queries = [
+            "INSERT INTO signals (symbol, action, size_pct) VALUES ('X', 'BUY', 0.01)",
+            "UPDATE signals SET symbol = 'X' WHERE id = 1",
+            "DELETE FROM signals WHERE id = 1",
+            "DROP TABLE signals",
+            "ALTER TABLE signals ADD COLUMN test TEXT",
+            "CREATE TABLE evil (id INTEGER)",
+            "  INSERT INTO signals (symbol, action, size_pct) VALUES ('X', 'BUY', 0.01)",
+        ]
+
+        for sql in blocked_queries:
+            try:
+                await ro.execute(sql)
+                assert False, f"Should have blocked: {sql}"
+            except ValueError as e:
+                assert "Write operation blocked" in str(e)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Analysis Sandbox ---
+
+def test_analysis_sandbox_valid():
+    """Analysis sandbox accepts valid analysis module code."""
+    from src.statistics.sandbox import validate_analysis_module
+
+    code = '''
+from src.shell.contract import AnalysisBase
+
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema):
+        row = await db.fetchone("SELECT COUNT(*) as cnt FROM trades")
+        return {"trade_count": row["cnt"] if row else 0}
+'''
+    result = validate_analysis_module(code, "test_module")
+    assert result.passed, f"Should pass: {result.errors}"
+
+
+def test_analysis_sandbox_rejects_forbidden():
+    """Analysis sandbox rejects forbidden imports."""
+    from src.statistics.sandbox import validate_analysis_module
+
+    # Network access
+    code_network = '''
+import requests
+from src.shell.contract import AnalysisBase
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema):
+        return {}
+'''
+    result = validate_analysis_module(code_network, "test_module")
+    assert not result.passed
+    assert any("requests" in e for e in result.errors)
+
+    # Subprocess
+    code_subprocess = '''
+import subprocess
+from src.shell.contract import AnalysisBase
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema):
+        return {}
+'''
+    result = validate_analysis_module(code_subprocess, "test_module")
+    assert not result.passed
+
+    # os module
+    code_os = '''
+import os
+from src.shell.contract import AnalysisBase
+class Analysis(AnalysisBase):
+    async def analyze(self, db, schema):
+        return {}
+'''
+    result = validate_analysis_module(code_os, "test_module")
+    assert not result.passed
+
+
+def test_analysis_sandbox_rejects_no_class():
+    """Analysis sandbox rejects code without Analysis class."""
+    from src.statistics.sandbox import validate_analysis_module
+
+    code = '''
+def analyze(db, schema):
+    return {}
+'''
+    result = validate_analysis_module(code, "test_module")
+    assert not result.passed
+    assert any("Analysis" in e for e in result.errors)
+
+
+def test_analysis_sandbox_allows_scipy():
+    """Analysis sandbox allows scipy/statistics imports (unlike strategy sandbox)."""
+    from src.statistics.sandbox import check_analysis_imports
+
+    code = '''
+import statistics
+import numpy as np
+import pandas as pd
+from src.shell.contract import AnalysisBase
+'''
+    errors = check_analysis_imports(code)
+    assert len(errors) == 0, f"Should allow these imports: {errors}"
