@@ -794,20 +794,20 @@ Changed from `get_candles(symbol, "1h", limit=720)` to `get_candles(symbol, "5m"
 
 ### 11. Rough/Unpolished Items (fix before VPS deployment)
 
-| # | Item | File(s) | Severity | Fix |
-|---|------|---------|----------|-----|
-| 1 | WebSocket silent failure at max retries | `src/shell/kraken.py` | Medium | Add Telegram alert when WS permanently fails |
-| 2 | strategy_state table bloat (288 rows/day, never pruned) | `src/main.py` | Low | Keep only last 10 states, prune on write |
+| # | Item | File(s) | Severity | Status |
+|---|------|---------|----------|--------|
+| 1 | ~~WebSocket silent failure at max retries~~ | `src/shell/kraken.py` | Medium | **FIXED** — `set_on_failure()` callback, Telegram alert |
+| 2 | ~~strategy_state table bloat~~ | `src/main.py` | Low | **FIXED** — Prune to last 10 on write |
 | 3 | Reporter lacks statistical rigor | `src/orchestrator/reporter.py` | Low | Acceptable — truth benchmarks + analysis modules handle real stats |
-| 4 | Position monitor 30s gap | `src/main.py` | Medium | Acceptable for paper. Live mode needs server-side stops (Kraken conditional orders). |
-| 5 | Import path fragility (`from strategy.skills`) | `src/main.py`, strategy | Low | Use absolute imports from project root |
-| 6 | Token budget not checked at cycle level | `src/orchestrator/orchestrator.py` | Low | Check remaining budget before starting code gen cycle |
+| 4 | Position monitor 30s gap | `src/main.py` | Medium | Acceptable for paper. Live mode needs server-side stops. |
+| 5 | ~~Import path fragility~~ | `src/main.py` | Low | **FIXED** — Top-level import |
+| 6 | ~~Token budget not checked at cycle level~~ | `src/orchestrator/orchestrator.py` | Low | **FIXED** — Check at cycle start (5000 token minimum) |
 | 7 | Orchestrator broad Exception handling | `src/orchestrator/orchestrator.py` | Low | Acceptable — logs the error, returns report string |
-| 8 | Data store aggregation untested | `src/shell/data_store.py` | Medium | Add integration test for 5m→1h→1d aggregation |
+| 8 | ~~Data store aggregation untested~~ | `src/shell/data_store.py` | Medium | **FIXED** — Integration test added |
 | 9 | PID lockfile stale after kill -9 | `src/main.py` | Low | Already handled (checks if PID alive) |
 | 10 | brain.db-wal/shm cleanup after crash | Manual | Low | Document in deployment guide |
-| 11 | Paper test entries never checked/completed | `src/orchestrator/orchestrator.py` | High | Addressed by paper test awareness decision |
-| 12 | Laptop sleep assumptions | Various | N/A | Resolved — system targets VPS, laptop is dev-only |
+| 11 | Paper test entries never checked/completed | `src/orchestrator/orchestrator.py` | High | Addressed by paper test awareness |
+| 12 | Laptop sleep assumptions | Various | N/A | Resolved — system targets VPS |
 
 ---
 
@@ -1061,7 +1061,7 @@ Current JSON response includes `strategy_doc_update` which forces nightly append
 
 ### Post-Implementation To-Do
 
-After ALL pending implementation changes are complete (observations table, paper test awareness, drought detector, version-partitioned performance, backtester fix, strategy evolution improvements, historical data bootstrap, strategy document strip, dynamic config values, rough/unpolished fixes):
+All implementation changes are now COMPLETE. Remaining prompt writing tasks:
 
 1. **Write Layer 2 prompt content** — describe the system AS IT ACTUALLY IS after implementation
 2. **Write Layer 1 prompt content** — translate the identity design into actual prompt text

@@ -1056,6 +1056,10 @@ async def test_orchestrator_thoughts_table():
         db = Database(db_path)
         await db.connect()
 
+        # Verify parent_version column exists in strategy_versions
+        row = await db.fetchone("SELECT sql FROM sqlite_master WHERE name = 'strategy_versions'")
+        assert "parent_version" in row["sql"], "Missing parent_version column"
+
         cycle_id = "20260201_020000"
 
         # Insert multiple thoughts for one cycle
@@ -1110,6 +1114,67 @@ async def test_orchestrator_thoughts_table():
         assert len(cycles) == 2
         assert cycles[0]["steps"] == 3  # first cycle
         assert cycles[1]["steps"] == 1  # second cycle
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Data Store Aggregation ---
+
+@pytest.mark.asyncio
+async def test_data_store_aggregation_5m_to_1h():
+    """DataStore correctly aggregates 5m candles into 1h candles."""
+    from src.shell.config import DataConfig
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Retention = 0 days forces all 5m data to be eligible for aggregation
+        config = DataConfig(candle_5m_retention_days=0)
+        store = DataStore(db, config)
+
+        # 12 five-minute candles = exactly 1 hour (10:00 to 10:55)
+        dates = pd.date_range("2026-01-01 10:00", periods=12, freq="5min")
+        df = pd.DataFrame({
+            "open": [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111],
+            "high": [105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116],
+            "low": [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106],
+            "close": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+            "volume": [10] * 12,
+        }, index=dates)
+
+        stored = await store.store_candles("BTC/USD", "5m", df)
+        assert stored == 12
+
+        # Verify 5m candles exist
+        count_before = await store.get_candle_count("BTC/USD", "5m")
+        assert count_before == 12
+
+        # Aggregate
+        aggregated = await store.aggregate_5m_to_1h()
+        assert aggregated > 0
+
+        # 1h candle should exist with correct OHLCV
+        hourly = await store.get_candles("BTC/USD", "1h")
+        assert len(hourly) == 1
+
+        row = hourly.iloc[0]
+        assert row["open"] == 100      # First candle's open
+        assert row["high"] == 116      # Max of all highs
+        assert row["low"] == 95        # Min of all lows
+        assert row["close"] == 112     # Last candle's close
+        assert row["volume"] == 120    # Sum of all volumes (10 * 12)
+
+        # 5m candles should be deleted (aggregated away)
+        count_after = await store.get_candle_count("BTC/USD", "5m")
+        assert count_after == 0
 
         await db.close()
     finally:

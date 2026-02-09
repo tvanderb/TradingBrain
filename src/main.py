@@ -37,6 +37,7 @@ from src.telegram.bot import TelegramBot
 from src.telegram.commands import BotCommands
 from src.telegram.notifications import Notifier
 from src.utils.logging import setup_logging
+from strategy.skills import compute_indicators
 
 log = structlog.get_logger()
 
@@ -82,6 +83,9 @@ class TradingBrain:
         self._portfolio = PortfolioTracker(self._config, self._db, self._kraken)
         self._data_store = DataStore(self._db, self._config.data)
         await self._portfolio.initialize()
+
+        # 3b. Bootstrap historical data if DB is sparse
+        await self._bootstrap_historical_data()
 
         # 4. Strategy
         try:
@@ -138,6 +142,7 @@ class TradingBrain:
 
         # 8. WebSocket
         self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
+        self._ws.set_on_failure(self._on_ws_failure)
 
         # 9. Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -218,6 +223,50 @@ class TradingBrain:
 
         log.info("scheduler.configured", scan_interval=scan_interval)
 
+    async def _bootstrap_historical_data(self) -> None:
+        """Fetch ~30 days of 5m candles from Kraken if DB is sparse.
+
+        Runs once on startup. Paginates the OHLC API (720 candles/request).
+        """
+        for symbol in self._config.symbols:
+            count = await self._data_store.get_candle_count(symbol, "5m")
+            if count >= 1000:
+                continue
+
+            log.info("bootstrap.fetching", symbol=symbol, existing=count)
+            since = int((datetime.now() - timedelta(days=30)).timestamp())
+            total = 0
+
+            while True:
+                try:
+                    df = await self._kraken.get_ohlc(symbol, interval=5, since=since)
+                except Exception as e:
+                    log.warning("bootstrap.fetch_failed", symbol=symbol, error=str(e))
+                    break
+
+                if df.empty:
+                    break
+
+                stored = await self._data_store.store_candles(symbol, "5m", df)
+                total += stored
+
+                # Use last candle timestamp for next page
+                last_ts = int(df.index[-1].timestamp())
+                if last_ts <= since:
+                    break  # No progress
+                since = last_ts
+
+                if len(df) < 720:
+                    break  # Last page
+
+                await asyncio.sleep(1)  # Rate limit
+
+            log.info("bootstrap.complete", symbol=symbol, candles=total)
+
+    async def _on_ws_failure(self) -> None:
+        """Called when WebSocket permanently fails after max retries."""
+        await self._notifier.websocket_failed()
+
     async def _scan_loop(self) -> None:
         """Main scan loop — fetch data, run strategy, execute signals."""
         if self._commands and self._commands.is_paused:
@@ -263,7 +312,6 @@ class TradingBrain:
                     )
 
                     # Compute indicators for scan_state (used by /report)
-                    from strategy.skills import compute_indicators
                     indicators = compute_indicators(df_5m) if len(df_5m) >= 30 else {}
 
                     scan_symbols[symbol] = {
@@ -391,11 +439,16 @@ class TradingBrain:
             self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
             log.info("scan.complete", symbols=len(scan_symbols), signals=len(signals))
 
-            # Save strategy state periodically
+            # Save strategy state periodically (keep last 10)
             state = self._strategy.get_state()
             await self._db.execute(
                 "INSERT INTO strategy_state (state_json) VALUES (?)",
                 (json.dumps(state, default=str),),
+            )
+            await self._db.execute(
+                """DELETE FROM strategy_state WHERE id NOT IN (
+                    SELECT id FROM strategy_state ORDER BY saved_at DESC LIMIT 10
+                )"""
             )
             await self._db.commit()
 

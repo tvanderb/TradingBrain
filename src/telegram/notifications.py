@@ -81,6 +81,12 @@ class Notifier:
     async def system_error(self, error: str) -> None:
         await self._send(f"System Error: {error[:500]}")
 
+    async def websocket_failed(self) -> None:
+        await self._send(
+            "WARNING: WebSocket permanently disconnected after max retries.\n"
+            "Live price feed is down. Position monitor using REST fallback."
+        )
+
     async def system_online(self, portfolio_value: float, positions: int) -> None:
         await self._send(
             f"System Online\n"

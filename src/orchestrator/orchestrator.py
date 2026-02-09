@@ -18,6 +18,7 @@ Runs daily during the 12-3am EST window:
 
 from __future__ import annotations
 
+import difflib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -283,6 +284,11 @@ class Orchestrator:
         log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
 
         try:
+            # 0. Check token budget
+            if self._ai.tokens_remaining < 5000:
+                log.warning("orchestrator.insufficient_budget", remaining=self._ai.tokens_remaining)
+                return "Orchestrator: Skipped — insufficient token budget remaining."
+
             # 1. Gather context
             context = await self._gather_context()
 
@@ -565,9 +571,39 @@ Analyze and decide. Respond in JSON format."""
         changes = decision.get("specific_changes", "")
         max_revisions = self._config.orchestrator.max_revisions
 
+        # Get parent version for lineage tracking
+        current_ver = await self._db.fetchone(
+            "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+        )
+        parent_version = current_ver["version"] if current_ver else None
+
         for attempt in range(max_revisions):
-            # Sonnet generates code
-            gen_prompt = f"""Generate a new trading strategy based on these requirements:
+            # Sonnet generates code — tier 1 gets targeted edit instructions
+            if tier == 1:
+                gen_prompt = f"""Make targeted changes to the existing trading strategy.
+
+## Change Request
+{changes}
+
+## IMPORTANT: This is a tier 1 tweak — make minimal, targeted changes only.
+- Modify ONLY the specific parameters, thresholds, or logic described above.
+- Keep everything else IDENTICAL to the current strategy.
+- Do NOT restructure, reorganize, or rewrite unrelated code.
+
+## Current Strategy (modify this)
+```python
+{context['strategy_code']}
+```
+
+## Strategy Document
+{context['strategy_doc']}
+
+## Performance Context
+{json.dumps(context['performance_7d'], indent=2, default=str)}
+
+Output the complete strategy.py file with your targeted changes applied."""
+            else:
+                gen_prompt = f"""Generate a new trading strategy based on these requirements:
 
 ## Change Request
 {changes}
@@ -605,9 +641,20 @@ Generate the complete strategy.py file."""
                 changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
                 continue
 
-            # Opus code review
-            review_prompt = f"""Review this trading strategy code for correctness and safety:
+            # Generate diff for reviewer context
+            old_lines = context['strategy_code'].splitlines(keepends=True)
+            new_lines = code.splitlines(keepends=True)
+            diff = ''.join(difflib.unified_diff(old_lines, new_lines, fromfile='current', tofile='proposed', n=3))
 
+            # Opus code review — includes diff for change context
+            review_prompt = f"""Review this trading strategy code for correctness and safety.
+
+## Changes from current strategy (diff)
+```diff
+{diff if diff else "(no textual diff — code may be identical)"}
+```
+
+## Full proposed code
 ```python
 {code}
 ```
@@ -647,12 +694,12 @@ Is this classification correct?
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M')}"
                 code_hash = deploy_strategy(code, version)
 
-                # Record in strategy index
+                # Record in strategy index with parent version lineage
                 await self._db.execute(
                     """INSERT INTO strategy_versions
-                       (version, code_hash, risk_tier, description, market_conditions, deployed_at)
-                       VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-                    (version, code_hash, actual_tier, changes[:500],
+                       (version, parent_version, code_hash, risk_tier, description, market_conditions, deployed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                    (version, parent_version, code_hash, actual_tier, changes[:500],
                      decision.get("market_observations", "")[:500]),
                 )
 
@@ -669,7 +716,7 @@ Is this classification correct?
                 await self._db.commit()
 
                 log.info("orchestrator.strategy_deployed", version=version,
-                         tier=actual_tier, paper_days=paper_days)
+                         tier=actual_tier, paper_days=paper_days, parent=parent_version)
 
                 return (
                     f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"

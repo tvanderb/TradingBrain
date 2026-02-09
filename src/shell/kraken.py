@@ -202,6 +202,11 @@ class KrakenWebSocket:
         self._prices: dict[str, float] = {}
         self._retry_count = 0
         self._max_retries = 5
+        self._on_failure: Callable[[], Coroutine] | None = None
+
+    def set_on_failure(self, callback: Callable[[], Coroutine]) -> None:
+        """Set callback for when WebSocket permanently fails after max retries."""
+        self._on_failure = callback
 
     @property
     def prices(self) -> dict[str, float]:
@@ -232,6 +237,8 @@ class KrakenWebSocket:
 
         if self._retry_count >= self._max_retries:
             log.error("websocket.max_retries", retries=self._max_retries)
+            if self._on_failure:
+                await self._on_failure()
 
     async def _subscribe(self, ws) -> None:
         pairs = [to_kraken_pair(s) for s in self._symbols]

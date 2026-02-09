@@ -451,16 +451,21 @@ claude_notes/discussions.md        — extensive design documentation (Sessions 
 
 ### Test Count: 34/34 passing (unchanged)
 
-### Remaining Implementation Before Prompt Writing
-- [ ] Historical data bootstrap on first startup
-- [ ] Strategy evolution (targeted edits, diff to reviewer, parent_version)
-- [ ] Rough/unpolished fixes (12 items)
+**Commit (Session 9)** — Bootstrap, strategy evolution, rough fixes:
+1. `src/main.py` — Historical data bootstrap (`_bootstrap_historical_data()`), WS failure callback, strategy_state pruning (keep last 10), top-level `compute_indicators` import
+2. `src/orchestrator/orchestrator.py` — Tier 1 targeted edit gen prompt, diff context for Opus reviewer (difflib), parent_version lineage tracking, token budget check at cycle start
+3. `src/shell/kraken.py` — `set_on_failure()` callback on KrakenWebSocket, fires on permanent failure
+4. `src/telegram/notifications.py` — `websocket_failed()` alert method
+5. `tests/test_integration.py` — `test_data_store_aggregation_5m_to_1h`, parent_version column assertion
+
+### Remaining Before Prompt Writing
 - [ ] Write Layer 1, Layer 2, fund mandate, response format prompt content
 - [ ] Write clean _analyze() user prompt
 - [ ] End-to-end review
 
 ### Current Status
 - Branch: v2-io-container
-- 7 of 10 implementation items complete
-- 3 remaining + prompt writing + rough fixes
+- All implementation items complete (10/10 + rough fixes)
+- Tests: 35/35 passing
+- Ready for prompt writing phase
 - System NOT running (stopped for development)
