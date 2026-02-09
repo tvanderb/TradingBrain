@@ -43,6 +43,7 @@ async def test_database_schema():
 
         required = ["candles", "positions", "trades", "signals", "daily_performance",
                      "strategy_versions", "orchestrator_log", "orchestrator_thoughts",
+                     "orchestrator_observations",
                      "token_usage", "fee_schedule", "strategy_state", "paper_tests",
                      "scan_results"]
         for t in required:

@@ -194,6 +194,17 @@ CREATE TABLE IF NOT EXISTS orchestrator_thoughts (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Orchestrator daily observations (rolling window, replaces strategy doc appends)
+CREATE TABLE IF NOT EXISTS orchestrator_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    cycle_id TEXT NOT NULL,
+    market_summary TEXT,
+    strategy_assessment TEXT,
+    notable_findings TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol, closed_at);
@@ -203,6 +214,7 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_date ON token_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_scan_results_ts ON scan_results(timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_results_symbol ON scan_results(symbol, timestamp);
 CREATE INDEX IF NOT EXISTS idx_thoughts_cycle ON orchestrator_thoughts(cycle_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_observations_date ON orchestrator_observations(date);
 """
 
 # Migrations for existing databases (columns added after initial schema)

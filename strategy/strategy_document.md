@@ -1,20 +1,15 @@
 # Trading Strategy Document
 
 > This document is the AI orchestrator's institutional memory.
-> Read every night before making decisions. Updated after each review.
+> It contains hard-won lessons validated through actual trading results.
+> Updated only when meaningful discoveries are made — not nightly.
 > Keep under ~2,000 words. Distill quarterly.
 
 ## 1. Current Market Thesis
-*Updated: Not yet — system just deployed.*
-
-No thesis established yet. Markets need to be observed before forming views.
+*No thesis established yet. To be developed through observation and experience.*
 
 ## 2. Core Principles
-- Fees eat 0.65-0.80% per round trip. Only trade with high conviction.
-- Small account ($200) means position sizing matters enormously.
-- Never fight the trend on shorter timeframes.
-- Prefer fewer, higher-quality trades over many marginal ones.
-- When in doubt, stay out.
+*To be discovered through trading experience. This section starts empty.*
 
 ## 3. Active Strategy Summary
 **Version**: v001 — EMA Crossover + RSI + Volume
@@ -23,31 +18,17 @@ No thesis established yet. Markets need to be observed before forming views.
 **Exit**: EMA bearish crossover or stop-loss (2%) / take-profit (4%)
 **Symbols**: BTC/USD, ETH/USD, SOL/USD
 
-**Why this strategy**: Simple, well-understood baseline. Agent needs a starting point to iterate from. Not expected to be profitable immediately — it's a learning starting point.
+**Why this strategy**: Simple, well-understood baseline. Starting point to iterate from.
 
 ## 4. Performance History
-*No data yet — system just deployed.*
+*No data yet.*
 
-| Version | Period | Trades | Win Rate | Net P&L | Expectancy | Market |
-|---------|--------|--------|----------|---------|------------|--------|
-| v001    | -      | -      | -        | -       | -          | -      |
+| Version | Period | Trades | Win Rate | Net P&L | Expectancy | Notes |
+|---------|--------|--------|----------|---------|------------|-------|
+| v001    | -      | -      | -        | -       | -          | -     |
 
-## 5. Risk Observations
-- Round-trip fees of 0.65% require minimum ~1.5% favorable move to profit
-- SOL/USD has lower liquidity, wider spreads — may need different parameters
-- Low-volatility ranging markets will generate many false crossover signals
+## 5. Lessons Learned
+*To be filled as the system gains experience. Every entry here should be backed by data.*
 
-## 6. Adaptation Plan
-- Observe v001 performance for at least 1 day of paper trading
-- Identify which market conditions cause most losses
-- Consider adding: MACD confirmation, ATR-based stops, regime filter
-- Long-term: develop swing and position trading strategies alongside day trading
-
-## 7. Market Condition Playbook
-| Regime | Approach | Notes |
-|--------|----------|-------|
-| Trending up | Trade with trend, wider TP | EMA crossover works well |
-| Trending down | Reduce position sizes, tighter SL | Consider sitting out |
-| Ranging | Avoid crossover strategies | Many false signals |
-| High volatility | Wider stops, smaller sizes | More opportunity but more risk |
-| Low volatility | Reduce trading frequency | Fees dominate in small moves |
+## 6. Market Condition Playbook
+*To be built from experience, not theory.*

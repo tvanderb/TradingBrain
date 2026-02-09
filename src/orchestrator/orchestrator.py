@@ -765,7 +765,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             # Get recent 1h candle data for backtest
             candle_data = {}
             for symbol in self._config.symbols:
-                df = await self._data_store.get_candles(symbol, "1h", limit=720)  # ~30 days
+                df = await self._data_store.get_candles(symbol, "5m", limit=8640)  # ~30 days of 5m
                 if not df.empty:
                     candle_data[symbol] = df
 
@@ -790,7 +790,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 starting_cash=self._config.paper_balance_usd,
             )
 
-            result = bt.run(candle_data, timeframe="1h")
+            result = bt.run(candle_data, timeframe="5m")
             summary = result.summary()
             log.info("orchestrator.backtest_complete", summary=summary)
 
