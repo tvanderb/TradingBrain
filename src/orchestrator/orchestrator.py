@@ -301,10 +301,8 @@ class Orchestrator:
                 # Also handle legacy names: TWEAK, RESTRUCTURE, OVERHAUL
                 report = await self._execute_change(decision, context)
 
-            # 4. Update strategy document
-            doc_update = decision.get("strategy_doc_update", "")
-            if doc_update:
-                await self._update_strategy_doc(doc_update, decision.get("market_observations", ""))
+            # 4. Store daily observations
+            await self._store_observation(decision)
 
             # 5. Log orchestration
             await self._log_orchestration(decision)
@@ -400,6 +398,20 @@ class Orchestrator:
         # --- 5. OPERATIONAL CONTEXT ---
         usage = await self._ai.get_daily_usage()
 
+        # Active paper tests
+        active_paper_tests = await self._db.fetchall(
+            """SELECT strategy_version, risk_tier, required_days, started_at, ends_at, status
+               FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC"""
+        )
+
+        # Recent observations (last 14 days)
+        recent_observations = await self._db.fetchall(
+            """SELECT date, market_summary, strategy_assessment, notable_findings
+               FROM orchestrator_observations
+               WHERE date >= date('now', '-14 days')
+               ORDER BY date DESC"""
+        )
+
         return {
             # Ground truth (rigid)
             "ground_truth": ground_truth,
@@ -419,6 +431,8 @@ class Orchestrator:
             "version_history": [dict(v) for v in versions],
             # Operational
             "token_usage": usage,
+            "active_paper_tests": [dict(t) for t in active_paper_tests],
+            "recent_observations": [dict(o) for o in recent_observations],
         }
 
     async def _analyze(self, context: dict) -> dict:
@@ -810,22 +824,28 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             except OSError:
                 pass
 
-    async def _update_strategy_doc(self, findings: str, market_obs: str) -> None:
-        """Append daily findings to the strategy document."""
-        if not STRATEGY_DOC_PATH.exists():
-            return
+    async def _store_observation(self, decision: dict) -> None:
+        """Store daily observations in DB table (replaces strategy doc appends).
 
-        content = STRATEGY_DOC_PATH.read_text()
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        # Add to Market Thesis section
-        update = f"\n\n### Daily Update ({today})\n{findings}\n"
-        if market_obs:
-            update += f"\n**Market Conditions**: {market_obs}\n"
-
-        content += update
-        STRATEGY_DOC_PATH.write_text(content)
-        log.info("orchestrator.strategy_doc_updated")
+        Observations are the orchestrator's daily findings — rolling 30-day window.
+        Strategy document updates are separate and rare (meaningful discoveries only).
+        """
+        try:
+            await self._db.execute(
+                """INSERT INTO orchestrator_observations
+                   (date, cycle_id, market_summary, strategy_assessment, notable_findings)
+                   VALUES (date('now'), ?, ?, ?, ?)""",
+                (
+                    self._cycle_id or "unknown",
+                    decision.get("market_observations", "")[:2000],
+                    decision.get("reasoning", "")[:2000],
+                    decision.get("cross_reference_findings", "")[:2000],
+                ),
+            )
+            await self._db.commit()
+            log.info("orchestrator.observation_stored", cycle_id=self._cycle_id)
+        except Exception as e:
+            log.warning("orchestrator.observation_store_failed", error=str(e))
 
     async def _log_orchestration(self, decision: dict) -> None:
         """Record orchestration decision in database."""

@@ -79,6 +79,46 @@ class Analysis(AnalysisBase):
 
         report["by_regime"] = by_regime
 
+        # --- Performance by Strategy Version ---
+        versions = await db.fetchall(
+            "SELECT DISTINCT strategy_version FROM trades WHERE strategy_version IS NOT NULL AND closed_at IS NOT NULL"
+        )
+
+        by_version = {}
+        for row in versions:
+            ver = row["strategy_version"]
+            stats = await db.fetchone(
+                """SELECT
+                    COUNT(*) as trades,
+                    COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                    COALESCE(SUM(pnl), 0) as net_pnl,
+                    COALESCE(SUM(fees), 0) as total_fees,
+                    COALESCE(AVG(pnl), 0) as avg_pnl,
+                    COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
+                    COALESCE(AVG(CASE WHEN pnl <= 0 THEN pnl END), 0) as avg_loss,
+                    MIN(opened_at) as first_trade,
+                    MAX(closed_at) as last_trade
+                FROM trades WHERE strategy_version = ? AND closed_at IS NOT NULL""",
+                (ver,),
+            )
+            if stats and stats["trades"] > 0:
+                win_rate = stats["wins"] / stats["trades"]
+                loss_rate = 1 - win_rate
+                expectancy = (win_rate * stats["avg_win"]) + (loss_rate * stats["avg_loss"])
+                by_version[ver] = {
+                    "trades": stats["trades"],
+                    "wins": stats["wins"],
+                    "win_rate": win_rate,
+                    "net_pnl": stats["net_pnl"],
+                    "total_fees": stats["total_fees"],
+                    "avg_pnl": stats["avg_pnl"],
+                    "expectancy": expectancy,
+                    "first_trade": stats["first_trade"],
+                    "last_trade": stats["last_trade"],
+                }
+
+        report["by_version"] = by_version
+
         # --- Signal Analysis ---
         signal_stats = await db.fetchone(
             """SELECT
