@@ -162,6 +162,12 @@ class PortfolioTracker:
             fees_today=self._fees_today,
         )
 
+    def _get_slippage(self, signal: Signal) -> float:
+        """Get slippage as a fraction (e.g. 0.0005). Signal override > config default."""
+        if signal.slippage_tolerance is not None:
+            return signal.slippage_tolerance
+        return self._config.default_slippage_pct
+
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None,
@@ -194,18 +200,24 @@ class PortfolioTracker:
 
         if self._config.is_paper():
             # Paper: simulate fill with slippage
-            slippage = price * 0.0005  # 0.05% slippage
+            slippage = price * self._get_slippage(signal)
             fill_price = price + slippage
             qty = trade_value / fill_price
             fee = trade_value * (fee_pct / 100)
         else:
             # Live: place order on Kraken
+            # For limit orders, use slippage tolerance to set price above market
+            limit_price = price if signal.order_type == OrderType.LIMIT else None
+            if signal.order_type == OrderType.LIMIT and limit_price and not signal.limit_price:
+                limit_price = price * (1 + self._get_slippage(signal))
+            elif signal.limit_price:
+                limit_price = signal.limit_price
             result = await self._kraken.place_order(
                 signal.symbol,
                 "buy",
                 signal.order_type.value.lower(),
                 qty,
-                price if signal.order_type == OrderType.LIMIT else None,
+                limit_price,
             )
             fill_price = price  # Will be updated by fill callback
             log.info("portfolio.order_placed", result=result)
@@ -294,7 +306,7 @@ class PortfolioTracker:
         pos = self._positions[symbol]
 
         if self._config.is_paper():
-            slippage = price * 0.0005
+            slippage = price * self._get_slippage(signal)
             fill_price = price - slippage  # Slippage works against us
         else:
             result = await self._kraken.place_order(symbol, "sell", "market", qty)

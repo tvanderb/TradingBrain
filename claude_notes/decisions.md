@@ -168,6 +168,39 @@
 - **What**: Add `strategy_regime` column to trades and signals tables
 - **Why**: Records what the strategy believed the regime was at decision time — useful as a fact about the decision process, not a fact about the market. Analysis modules can compare this against their own regime assessment.
 
+### Decision: No Short Selling — Kraken Canada Restriction (Sessions 10-11)
+- **Original plan**: Add `Action.SHORT` to the contract enum for full directional flexibility.
+- **Implemented (Session 11)**: SHORT added to enum and backtester with side-aware P&L, inverted SL/TP, margin-model cash accounting.
+- **Hard limitation discovered**: Kraken margin trading is NOT available to Canadian residents. From Kraken support: "Margin trading services are available to most verified clients that reside outside of the United States, United Kingdom, and Canada." Short selling requires margin. No workaround exists.
+- **Resolution**: Action.SHORT removed from contract and backtester reverted to long-only. System is long-only.
+- **Implication for orchestrator**: Layer 2 should inform the orchestrator that the system is long-only due to exchange restrictions. No short selling, no leverage. This is a hard constraint, not a preference.
+- **If exchange changes**: If Kraken enables margin for Canada, or if the system moves to another exchange, SHORT support would need to be re-implemented (backtester side-tracking, portfolio `_execute_short`, Kraken `leverage` API param, margin fee tracking, liquidation monitoring).
+
+### Decision: Token Budget as High Safety Net (Session 10)
+- **What**: Keep token budget but set very high (~10x expected: 1.5M tokens). Remove as a hard operational gate.
+- **Why**: Hard token limit contradicts "no hard gates, trust aligned agent" philosophy. Orchestrator should self-regulate via awareness (Layer 2) not be prevented from acting. Safety net only catches genuine bugs (infinite loops).
+- **Previous**: 150K daily limit with hard skip at cycle start.
+- **Change**: Raise limit to ~1.5M. Orchestrator sees spend in context, self-regulates. `max_revisions` (3 attempts) naturally caps per-cycle spend. Race condition becomes irrelevant at this threshold.
+
+### Decision: Orchestrator-Controlled Slippage (Session 10)
+- **What**: Replace hardcoded 0.05% slippage with configurable default + per-signal override.
+- **Why**: Slippage is a trading concept, not just simulation. Affects order placement strategy, edge calculation, and is something the orchestrator can learn about and optimize.
+- **Design**:
+  - `Signal` gets optional `slippage_tolerance` field (float, defaults to None → use config)
+  - Config gets `default_slippage_pct` (float, default 0.0005)
+  - Paper mode: shell simulates using signal value or config fallback
+  - Live mode: informs limit order price placement (buy limit = price * (1 + tolerance))
+  - Trade performance module can track actual vs expected slippage over time
+- **Learning loop**: Orchestrator adjusts slippage expectations per pair/condition as it learns from real fills
+
+### Decision: Static 9-Pair List with Per-Pair Fees (Session 10)
+- **What**: Expand from 3 to 9 pairs (12-pair cap). Static in config, not dynamically managed. Per-pair fee tracking and fees in IO contract.
+- **Why**: Dynamic watchlist adds complexity for little benefit. "Active pairs is really just where active trades are." The orchestrator picks which to trade from the available set; it doesn't need to manage the watchlist.
+- **Pairs**: BTC/USD, ETH/USD, SOL/USD, XRP/USD, DOGE/USD, ADA/USD, LINK/USD, AVAX/USD, DOT/USD
+- **Fees in IO contract**: `SymbolData` gets `maker_fee_pct` / `taker_fee_pct`. Strategy makes fee-aware decisions (break-even threshold, order type selection, confidence weighting).
+- **Fee storage**: `fee_schedule` table gets `symbol` column. `_check_fees()` iterates all pairs. Per-pair storage future-proofs for fee structure changes.
+- **Rejected**: Dynamic `WATCHLIST_UPDATE` decision type — too complex, unnecessary at this scale.
+
 ### Decision: Loosened Risk Limits for Learning Phase (Session 6)
 - **What**: Widened risk limits to give system room for asymmetric payoff strategies during learning.
 - **Why**: Fee wall (0.65-0.80% round-trip) naturally favors fewer, bigger trades. Over-constraining early prevents the system from finding its edge.

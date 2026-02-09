@@ -68,6 +68,7 @@ class Backtester:
         maker_fee_pct: float = 0.25,
         taker_fee_pct: float = 0.40,
         starting_cash: float = 200.0,
+        per_pair_fees: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_limits = risk_limits
@@ -75,6 +76,13 @@ class Backtester:
         self._maker_fee = maker_fee_pct
         self._taker_fee = taker_fee_pct
         self._starting_cash = starting_cash
+        self._per_pair_fees = per_pair_fees or {}
+
+    def _get_taker_fee(self, symbol: str) -> float:
+        """Get taker fee for symbol (per-pair if available, else global)."""
+        if symbol in self._per_pair_fees:
+            return self._per_pair_fees[symbol][1]
+        return self._taker_fee
 
     def run(self, candle_data: dict[str, pd.DataFrame], timeframe: str = "1h") -> BacktestResult:
         """Run backtest on historical data.
@@ -123,6 +131,7 @@ class Backtester:
                 current_price = float(historical.iloc[-1]["close"])
                 prices[symbol] = current_price
 
+                pair_fees = self._per_pair_fees.get(symbol)
                 markets[symbol] = SymbolData(
                     symbol=symbol,
                     current_price=current_price,
@@ -131,6 +140,8 @@ class Backtester:
                     candles_1d=historical.tail(2555),
                     spread=0.001,
                     volume_24h=float(historical.tail(24)["volume"].sum()) if len(historical) >= 24 else 0,
+                    maker_fee_pct=pair_fees[0] if pair_fees else self._maker_fee,
+                    taker_fee_pct=pair_fees[1] if pair_fees else self._taker_fee,
                 )
 
             if not markets:
@@ -178,7 +189,7 @@ class Backtester:
                 if price is None:
                     continue
 
-                fee_pct = self._taker_fee / 100  # Assume taker for backtest
+                fee_pct = self._get_taker_fee(signal.symbol) / 100
 
                 if signal.action == Action.BUY and signal.symbol not in positions:
                     trade_value = total_value * signal.size_pct
@@ -228,7 +239,7 @@ class Backtester:
                 if triggered:
                     qty = pos["qty"]
                     sale = qty * price
-                    fee = sale * (self._taker_fee / 100)
+                    fee = sale * (self._get_taker_fee(sym) / 100)
                     pnl = (price - pos["avg_entry"]) * qty - fee
                     pnl_pct = (price - pos["avg_entry"]) / pos["avg_entry"]
                     cash += (sale - fee)

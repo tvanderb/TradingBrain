@@ -135,9 +135,10 @@ CREATE TABLE IF NOT EXISTS token_usage (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
--- Fee schedule (updated daily from Kraken)
+-- Fee schedule (updated daily from Kraken, per-pair)
 CREATE TABLE IF NOT EXISTS fee_schedule (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
     maker_fee_pct REAL NOT NULL,
     taker_fee_pct REAL NOT NULL,
     volume_tier TEXT,
@@ -223,6 +224,8 @@ MIGRATIONS = [
     ("trades", "strategy_regime", "ALTER TABLE trades ADD COLUMN strategy_regime TEXT"),
     # Add strategy_regime to signals (if column doesn't exist yet)
     ("signals", "strategy_regime", "ALTER TABLE signals ADD COLUMN strategy_regime TEXT"),
+    # Add per-pair symbol to fee_schedule
+    ("fee_schedule", "symbol", "ALTER TABLE fee_schedule ADD COLUMN symbol TEXT"),
 ]
 
 

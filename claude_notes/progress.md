@@ -442,8 +442,51 @@ All meaningful findings fixed. Items #1 (backtester shorts — only supports lon
 | `backtester.py` | `float()` wrap on sum results (flaky test fix) | bonus |
 | `test_integration.py` | Multi-statement bypass test cases | bonus |
 
+### Pre-Prompt Features Implemented (Session 10 continued)
+
+All 4 design decisions from audit triage now implemented:
+
+| Feature | Files Changed | Details |
+|---------|--------------|---------|
+| ~~`Action.SHORT`~~ | ~~`contract.py`, `backtester.py`~~ | **REMOVED** — Kraken blocks margin trading for Canadian residents. System is long-only. |
+| Token budget 1.5M | `config.py`, `settings.toml` | `daily_token_limit` 150K → 1.5M (safety net only) |
+| Slippage tolerance | `contract.py`, `config.py`, `settings.toml`, `portfolio.py` | `Signal.slippage_tolerance` field, `default_slippage_pct` config, portfolio uses signal/config fallback |
+| 9 pairs + per-pair fees | `kraken.py`, `config.py`, `settings.toml`, `database.py`, `main.py`, `contract.py`, `backtester.py` | 9-pair PAIR_MAP with WS reverse, `symbol` column on fee_schedule, per-pair fee cache in TradingBrain, `SymbolData.maker_fee_pct/taker_fee_pct`, backtester per-pair fees |
+
+Tests updated: config, contract types, pair mapping all extended. **35/35 passing.**
+
+### Prompt Writing — Three-Layer Framework (Session 11 continued)
+
+Replaced monolithic `ANALYSIS_SYSTEM` with three-layer framework:
+
+| Constant | Layer | Content |
+|----------|-------|---------|
+| `LAYER_1_IDENTITY` | Identity (WHO) | 6 dimensions: honesty, judgment, uncertainty, probabilistic thinking, change, long-term |
+| `FUND_MANDATE` | Mandate | "Portfolio growth with capital preservation. Avoid major drawdowns. This is a long-term fund." |
+| `LAYER_2_SYSTEM` | System (WHAT) | Architecture, decisions/consequences, boundaries, processes, inputs, data, response format |
+
+**Removed from prompts** (framework violations):
+- All behavioral directives ("Be conservative", "Prefer NO_CHANGE")
+- All numeric thresholds ("Minimum ~20 trades", "Profit factor > 1.2", "3x fees")
+- All decision heuristics ("If you lack information, update analysis modules first")
+- `strategy_doc_update` from response JSON (dead field)
+
+**Updated `_analyze()` user prompt**:
+- "USER CONSTRAINTS" → "SYSTEM CONSTRAINTS"
+- Added: trading pairs, long-only, slippage
+- All values dynamic from config
+- No editorial commentary
+
+**Code gen/review prompts updated**:
+- `CODE_GEN_SYSTEM`: added fee fields, slippage, long-only constraint to contract description
+- `CODE_REVIEW_SYSTEM`: added long-only compliance check
+- Code gen user prompts: injected dynamic system constraints (fees, pairs, risk limits, slippage)
+
+**Test updated**: `test_analysis_code_gen_prompts_exist` → checks new constants (identity, mandate, Layer 2 content)
+
 ### Current Status
 - Branch: v2-io-container
 - Tests: 35/35 passing
 - System NOT running (stopped for development)
-- **All audit fixes applied. Ready for prompt writing phase.**
+- All audit fixes + pre-prompt features + prompt writing COMPLETE
+- **Next**: End-to-end review and test

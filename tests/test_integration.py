@@ -21,9 +21,13 @@ def test_config_loading():
     config = load_config()
     assert config.mode == "paper"
     assert "BTC/USD" in config.symbols
+    assert len(config.symbols) == 9  # 9 trading pairs
+    assert "DOGE/USD" in config.symbols
     assert config.risk.max_trade_pct == 0.07
     assert config.risk.rollback_consecutive_losses == 999
     assert config.ai.provider in ("anthropic", "vertex")
+    assert config.ai.daily_token_limit == 1500000  # 1.5M safety net
+    assert config.default_slippage_pct == 0.0005
 
 
 # --- Database ---
@@ -92,6 +96,11 @@ def test_contract_types():
     assert sig.action == Action.BUY
     assert sig.intent == Intent.DAY  # Default
     assert sig.order_type == OrderType.MARKET  # Default
+    assert sig.slippage_tolerance is None  # Default
+
+    # Slippage tolerance override
+    sig2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, slippage_tolerance=0.001)
+    assert sig2.slippage_tolerance == 0.001
 
     limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
                         max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
@@ -389,12 +398,26 @@ async def test_paper_trade_fees():
 # --- Kraken pair mapping ---
 
 def test_pair_mapping():
-    from src.shell.kraken import to_kraken_pair, from_kraken_pair
+    from src.shell.kraken import to_kraken_pair, from_kraken_pair, PAIR_MAP
 
+    # All 9 pairs mapped
+    assert len(PAIR_MAP) == 9
     assert to_kraken_pair("BTC/USD") == "XBTUSD"
     assert to_kraken_pair("ETH/USD") == "ETHUSD"
+    assert to_kraken_pair("DOGE/USD") == "XDGUSD"
+    assert to_kraken_pair("DOT/USD") == "DOTUSD"
+
+    # Reverse mapping (REST format)
     assert from_kraken_pair("XBTUSD") == "BTC/USD"
     assert from_kraken_pair("ETHUSD") == "ETH/USD"
+    assert from_kraken_pair("XDGUSD") == "DOGE/USD"
+
+    # WS v2 format reverse mapping
+    assert from_kraken_pair("XBT/USD") == "BTC/USD"
+    assert from_kraken_pair("XDG/USD") == "DOGE/USD"
+
+    # Unknown pairs pass through
+    assert from_kraken_pair("UNKNOWN") == "UNKNOWN"
 
 
 # --- Backtester ---
@@ -952,28 +975,39 @@ def test_orchestrator_decision_type_routing():
 # --- Analysis Module Evolution Pipeline ---
 
 def test_analysis_code_gen_prompts_exist():
-    """Verify analysis-specific prompts are defined in orchestrator."""
+    """Verify orchestrator prompts follow the three-layer framework."""
     from src.orchestrator.orchestrator import (
-        ANALYSIS_SYSTEM, ANALYSIS_CODE_GEN_SYSTEM, ANALYSIS_REVIEW_SYSTEM,
+        LAYER_1_IDENTITY, FUND_MANDATE, LAYER_2_SYSTEM,
+        ANALYSIS_CODE_GEN_SYSTEM, ANALYSIS_REVIEW_SYSTEM,
         CODE_GEN_SYSTEM, CODE_REVIEW_SYSTEM,
     )
 
-    # ANALYSIS_SYSTEM should contain labeled input sections
-    assert "GROUND TRUTH" in ANALYSIS_SYSTEM
-    assert "YOUR MARKET ANALYSIS" in ANALYSIS_SYSTEM
-    assert "YOUR TRADE PERFORMANCE ANALYSIS" in ANALYSIS_SYSTEM
-    assert "YOUR STRATEGY" in ANALYSIS_SYSTEM
-    assert "USER CONSTRAINTS" in ANALYSIS_SYSTEM
+    # Layer 1: Identity — character dimensions, no directives
+    assert "Radical Honesty" in LAYER_1_IDENTITY
+    assert "Probabilistic Thinking" in LAYER_1_IDENTITY
+    assert "Long-Term Orientation" in LAYER_1_IDENTITY
+    assert "uncertainty" in LAYER_1_IDENTITY.lower()
+    assert "Change" in LAYER_1_IDENTITY
 
-    # Should have explicit goals
-    assert "positive expectancy" in ANALYSIS_SYSTEM.lower()
-    assert "profit factor" in ANALYSIS_SYSTEM.lower()
-    assert "3x" in ANALYSIS_SYSTEM  # fee-awareness: expected move > 3x fees
+    # Fund mandate — brief, method-agnostic
+    assert "capital preservation" in FUND_MANDATE.lower()
+    assert "long-term fund" in FUND_MANDATE.lower()
 
-    # Should have expanded decision options
-    assert "MARKET_ANALYSIS_UPDATE" in ANALYSIS_SYSTEM
-    assert "TRADE_ANALYSIS_UPDATE" in ANALYSIS_SYSTEM
-    assert "STRATEGY_TWEAK" in ANALYSIS_SYSTEM
+    # Layer 2: System understanding — input categories
+    assert "GROUND TRUTH" in LAYER_2_SYSTEM
+    assert "YOUR MARKET ANALYSIS" in LAYER_2_SYSTEM
+    assert "YOUR TRADE PERFORMANCE ANALYSIS" in LAYER_2_SYSTEM
+    assert "YOUR STRATEGY" in LAYER_2_SYSTEM
+    assert "SYSTEM CONSTRAINTS" in LAYER_2_SYSTEM
+
+    # Layer 2: Decision types
+    assert "MARKET_ANALYSIS_UPDATE" in LAYER_2_SYSTEM
+    assert "TRADE_ANALYSIS_UPDATE" in LAYER_2_SYSTEM
+    assert "STRATEGY_TWEAK" in LAYER_2_SYSTEM
+
+    # Layer 2: Key system facts
+    assert "Long-only" in LAYER_2_SYSTEM
+    assert "paper test" in LAYER_2_SYSTEM.lower()
 
     # Analysis code gen should mention AnalysisBase, ReadOnlyDB
     assert "AnalysisBase" in ANALYSIS_CODE_GEN_SYSTEM

@@ -3,6 +3,7 @@ mode = "paper"              # "paper" or "live"
 paper_balance_usd = 200.0   # Starting balance for paper trading
 timezone = "US/Eastern"
 log_level = "INFO"
+default_slippage_pct = 0.0005  # 0.05% — signal can override per-trade
 
 [kraken]
 rest_url = "https://api.kraken.com"
@@ -12,13 +13,13 @@ maker_fee_pct = 0.25
 taker_fee_pct = 0.40
 
 [markets]
-symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
+symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "ADA/USD", "LINK/USD", "AVAX/USD", "DOT/USD"]
 
 [ai]
 provider = "anthropic"       # "anthropic" or "vertex"
 sonnet_model = "claude-sonnet-4-5-20250929"
 opus_model = "claude-opus-4-6"
-daily_token_limit = 150000   # Combined budget
+daily_token_limit = 1500000  # Safety net (10x expected), orchestrator self-regulates
 
 [ai.vertex]
 project_id = ""

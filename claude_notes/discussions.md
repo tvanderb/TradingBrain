@@ -1009,13 +1009,17 @@ Current JSON response still includes `strategy_doc_update`. During prompt writin
 
 1. [x] **System audit** — DONE (Session 10). 21 findings across 3 categories. See progress.md for table.
 2. [x] **Fix all 21 audit findings** — DONE (Session 10). 16 fixes applied, 5 triaged as not actionable. 35/35 tests passing.
-3. [ ] **Write Layer 1 prompt content** — translate identity design into actual prompt text
-4. [ ] **Write Layer 2 prompt content** — describe the system AS IT ACTUALLY IS
-5. [ ] **Write fund mandate** — translate mandate into prompt text
-6. [ ] **Write response format** — finalize JSON schema with observations mechanism
-7. [ ] **Write `_analyze()` user prompt** — clean version with dynamic config, no editorial commentary
-8. [x] ~~Strip strategy_document.md~~ — DONE (commit c9ae53e)
-9. [ ] **End-to-end review** — verify all three layers work together, no directive leakage
+3. [x] ~~**Implement Action.SHORT**~~ — REMOVED. Kraken margin blocked for Canada. System is long-only. (Session 11)
+4. [x] **Raise token budget safety net** — DONE (Session 11). 150K → 1.5M.
+5. [x] **Implement slippage tolerance** — DONE (Session 11). Signal field + config default + paper/live usage.
+6. [x] **Trading pairs + per-pair fees** — DONE (Session 11). 9 pairs, per-pair fee tracking, fees in IO contract.
+7. [x] **Write Layer 1 prompt content** — DONE (Session 11). `LAYER_1_IDENTITY` constant: 6 identity dimensions.
+8. [x] **Write Layer 2 prompt content** — DONE (Session 11). `LAYER_2_SYSTEM` constant: decisions/consequences, boundaries, processes, inputs, data landscape, response format.
+9. [x] **Write fund mandate** — DONE (Session 11). `FUND_MANDATE` constant: "Portfolio growth with capital preservation. Avoid major drawdowns. This is a long-term fund."
+10. [x] **Write response format** — DONE (Session 11). Removed `strategy_doc_update`, observations stored via existing `_store_observation()`.
+11. [x] **Write `_analyze()` user prompt** — DONE (Session 11). Renamed to SYSTEM CONSTRAINTS, added long-only/slippage/pairs, dynamic config, no editorial.
+12. [x] ~~Strip strategy_document.md~~ — DONE (commit c9ae53e)
+13. [ ] **End-to-end review** — verify all three layers work together, no directive leakage
 
 ---
 
@@ -1093,3 +1097,194 @@ Invalid values load silently. `max_daily_loss_pct = 150%` accepted without warni
 
 **#21 — Hardcoded slippage** (`src/shell/portfolio.py:176,277`)
 Fixed at 0.05%, not configurable. Paper trading slippage doesn't reflect per-pair market reality.
+
+---
+
+## Design Discussion: Audit Triage → New Features (Session 10)
+
+Five audit findings were initially triaged as "not actionable." User reviewed each and escalated four into design decisions.
+
+### #1 → Action.SHORT
+- **Initial triage**: "Backtester only supports longs, not a bug"
+- **User**: "I want to add short support"
+- **Decision**: Add `Action.SHORT` to contract enum. Explicit action, not inferred from context. Backtester tracks side, uses side-aware P&L. Portfolio tracker already handles shorts.
+
+### #14 → Trading Pairs + Per-Pair Fees (see full thread below)
+- **Initial triage**: "Fees are volume-tier based, not pair-specific"
+- **User**: "For long-term autonomy, should we ensure correct fees for all pairs? Can the orchestrator add new pairs?"
+- **Discussion**: Explored dynamic watchlist (orchestrator adds/removes pairs) vs static list. User concluded: static list is simpler, expand from 3 to 9 pairs, with 12-pair cap. Per-pair fee storage for future-proofing.
+- **Key insight from user**: "active pairs is really just where active trades are" — the orchestrator doesn't need to manage the watchlist, just decide which pairs to trade from the available set.
+
+### #18 → Token Budget as Safety Net
+- **Initial triage**: "Race condition can't happen in sequential orchestrator"
+- **User**: "Why do we have an enforced token budget? I'm not sure I want that."
+- **Discussion**: Hard token limit contradicts "no hard gates" philosophy. Orchestrator should self-regulate via awareness (Layer 2), not be hard-blocked.
+- **Decision**: Keep limit as safety net at ~10x expected (150K → 1.5M). Only catches runaway bugs. Orchestrator sees costs in context and self-regulates.
+
+### #20 → Confirmed Not a Bug
+- **Initial triage**: "First candle records starting cash, correct baseline"
+- **User**: "This sounds like correct functionality"
+- **Decision**: Closed. Not a bug.
+
+### #21 → Orchestrator-Controlled Slippage
+- **Initial triage**: "Cosmetic, only affects paper mode"
+- **User**: "I want to allow the orchestrator to create its own slippage rules. Is that possible?"
+- **Discussion**: Slippage isn't just simulation — it affects limit order placement, edge calculation, and is something the orchestrator can learn. Signal gets `slippage_tolerance` field, config has default, live mode uses it for limit order pricing.
+- **Key user insight**: "Does this tie into limit buy orders where the orchestrator could allow for some tolerance?" — yes, slippage tolerance directly informs limit price = current_price * (1 + tolerance).
+
+---
+
+## Trading Pairs — Full Design Thread (Session 10)
+
+### The Question
+Original system: 3 fixed pairs (BTC/USD, ETH/USD, SOL/USD). Design says "agent can expand" but no mechanism exists.
+
+### Options Explored
+1. **Dynamic watchlist** — orchestrator discovers pairs via Kraken API, adds/removes via new `WATCHLIST_UPDATE` decision type. Shell manages WS subscriptions and data pipeline dynamically.
+2. **Static list, expanded** — curate a good set of pairs in config. Orchestrator trades within this universe.
+
+### Decision: Static List (Option 2)
+User reasoning: "Maybe we don't dynamically change trading pairs. Active pairs is really just where active trades are." Dynamic management adds complexity for little benefit at current scale.
+
+Constraints decided:
+- **12-pair cap** (resource cost per pair: scans, WS, candle storage)
+- **Static in config** — the orchestrator picks which to trade, not which to monitor
+- **Per-pair fee tracking** — store and use correct fees per pair
+
+### Final Pair List (9 pairs, room for 3 more)
+
+All verified on Kraken API (2026-02-09):
+
+| # | Our Name | REST Input | Response Key | WS Name | Rationale |
+|---|----------|-----------|-------------|---------|-----------|
+| 1 | BTC/USD | BTCUSD | XXBTZUSD | XBT/USD | Anchor, highest liquidity |
+| 2 | ETH/USD | ETHUSD | XETHZUSD | ETH/USD | L1 leader, DeFi base |
+| 3 | SOL/USD | SOLUSD | SOLUSD | SOL/USD | High-performance L1 |
+| 4 | XRP/USD | XRPUSD | XXRPZUSD | XRP/USD | Top 5 market cap, very liquid |
+| 5 | DOGE/USD | DOGEUSD | XDGUSD | XDG/USD | Extremely high volume |
+| 6 | ADA/USD | ADAUSD | ADAUSD | ADA/USD | Top 10, consistent volume |
+| 7 | LINK/USD | LINKUSD | LINKUSD | LINK/USD | DeFi infra, less L1-correlated |
+| 8 | AVAX/USD | AVAXUSD | AVAXUSD | AVAX/USD | Growing L1 ecosystem |
+| 9 | DOT/USD | DOTUSD | DOTUSD | DOT/USD | Polkadot ecosystem |
+
+**Naming**: REST API accepts plain names (BTCUSD, DOGEUSD) — Kraken resolves them. Response keys use legacy format for older assets (XXBTZUSD, XETHZUSD, XXRPZUSD, XDGUSD). Our code handles this — grabs first non-`last` key from results. WS feed uses XBT for BTC and XDG for DOGE — PAIR_REVERSE map translates back.
+
+### Fees in the IO Contract
+User question: "Do per-pair fees affect how the strategy needs to be written?"
+
+**Current gap**: Strategy receives `SymbolData` + `Portfolio` + `RiskLimits` — no fee information. Generates signals blind to cost. Shell applies fees after the fact.
+
+**Fix**: Add `maker_fee_pct` and `taker_fee_pct` to `SymbolData`. Strategy can then:
+- Calculate per-pair break-even: only signal when expected move > N * round_trip
+- Choose order type: limit (cheaper) vs market (faster)
+- Factor total cost into signal confidence
+- Adapt dynamically if fees change (volume tier upgrade, policy change)
+
+### Per-Pair Fee System Design
+- `fee_schedule` table gets `symbol` column
+- `_check_fees()` iterates all pairs, stores per-pair rates
+- Trade execution looks up pair-specific fee
+- Config retains default fees as fallback before first check
+- Scan loop populates `SymbolData.maker_fee_pct` / `taker_fee_pct` from stored per-pair data
+
+---
+
+## Pre-Prompt Features — Implemented (Session 11)
+
+All four features implemented. Affect what the orchestrator can do → required before writing Layer 2 prompts.
+
+### 1. Action.SHORT — REMOVED (Hard Limitation)
+- **Initially implemented**: SHORT enum, backtester side-aware P&L, inverted SL/TP, margin-model cash accounting.
+- **Hard limitation found**: Kraken margin trading is blocked for Canadian residents. From Kraken support (Dec 2025): "Margin trading services are available to most verified clients that reside outside of the United States, United Kingdom, and Canada." Short selling requires margin. No workaround.
+- **Reverted**: Action.SHORT removed from contract enum. Backtester reverted to long-only. System is permanently long-only on Kraken.
+- **Kraken margin reference** (for future): All 9 of our pairs support margin (BTC/ETH/SOL/XRP/DOGE up to 10x, ADA/LINK/AVAX/DOT up to 3x). Opening fee 0.01-0.05%, rollover fee same rate per 4 hours. But none of this is accessible from Canada.
+
+### 2. Token Budget Safety Net — DONE
+- `config.py` + `settings.toml`: `daily_token_limit` 150K → 1.5M
+- Orchestrator self-regulates via Layer 2 awareness; limit only catches genuine bugs
+
+### 3. Slippage Tolerance — DONE
+- `contract.py`: `Signal.slippage_tolerance: Optional[float] = None`
+- `config.py` + `settings.toml`: `default_slippage_pct = 0.0005`
+- `portfolio.py`: `_get_slippage()` method — signal override > config fallback
+- Paper mode: simulates slippage at configured rate
+- Live mode: informs limit order price placement (buy limit = price * (1 + tolerance))
+
+### 4. Trading Pairs + Per-Pair Fees — DONE
+- `kraken.py`: PAIR_MAP expanded to 9 pairs + WS reverse mappings (XBT/USD → BTC/USD, XDG/USD → DOGE/USD)
+- `config.py` + `settings.toml`: 9 symbols default
+- `database.py`: `symbol` column on fee_schedule (with migration)
+- `main.py`: `_pair_fees` dict cached per 24h, all fee usage sites use per-pair lookup with global fallback
+- `contract.py`: `SymbolData.maker_fee_pct` / `taker_fee_pct` populated from per-pair cache
+- `backtester.py`: Optional `per_pair_fees` dict, `_get_taker_fee()` per-symbol lookup
+
+---
+
+## Prompt Writing — Three-Layer Implementation (Session 11, continued)
+
+### What Changed
+Replaced the monolithic `ANALYSIS_SYSTEM` prompt with three separate constants following the approved framework:
+
+**`LAYER_1_IDENTITY`** — WHO the orchestrator is:
+- 6 identity dimensions: Radical Honesty, Professional Judgment, Comfort with Uncertainty, Probabilistic Thinking, Relationship to Change, Long-Term Orientation
+- All written as identity statements, not directives
+- Uses the exact approved phrasings from Sessions 7-8 (e.g., "You understand that stability compounds" not "Be conservative")
+
+**`FUND_MANDATE`** — Investor expectations:
+- "Portfolio growth with capital preservation. Avoid major drawdowns. This is a long-term fund."
+- Brief, method-agnostic. The mandate IS deliberately directive — it's the investor's voice.
+
+**`LAYER_2_SYSTEM`** — WHAT it works with:
+- Architecture overview (rigid shell + flexible components)
+- Decisions and consequences (strategy tiers, analysis modules, paper test termination)
+- Shell-enforced boundaries (risk limits, long-only constraint, code pipeline)
+- Independent processes (scan loop, position monitor, data maintenance)
+- Input categories with trust levels (5 categories)
+- Data landscape
+- Response format (removed `strategy_doc_update`, observations stored via `_store_observation()`)
+
+**`_analyze()` user prompt** — cleaned up:
+- Renamed "USER CONSTRAINTS" to "SYSTEM CONSTRAINTS"
+- Added: trading pairs list, long-only constraint, default slippage
+- All values dynamic from config
+- No editorial commentary
+- Opening changed from directive ("Review...and decide") to factual ("Current fund state for nightly review")
+
+### What Was Removed
+- All behavioral directives: "Be conservative", "Prefer NO_CHANGE", "Fewer trades, bigger moves"
+- All numeric thresholds: "Minimum ~20 trades", "Profit factor > 1.2", "3x round-trip cost"
+- All decision heuristics: "If you lack information, update analysis modules first"
+- All optimization instructions: "Achieve positive expectancy after fees"
+- Cross-referencing instructions (orchestrator does this naturally from identity)
+- `strategy_doc_update` from response JSON (dead field, observations already handled)
+
+### Audit Against Framework
+Post-implementation audit identified 3 potential concerns:
+1. "stability compounds" in identity — this IS the approved identity statement from the framework design table
+2. "Rapid strategy changes destroy..." in Layer 2 — this is a mechanical fact about the data pipeline
+3. "Avoid major drawdowns" in mandate — the mandate IS the investor's directive by design
+
+All three are intentional. Framework-aligned.
+
+### Code Gen & Review Prompts — Also Updated
+The `CODE_GEN_SYSTEM` and `CODE_REVIEW_SYSTEM` prompts were stale relative to contract changes. Updated:
+
+**`CODE_GEN_SYSTEM`**:
+- SymbolData description now includes `maker_fee_pct`, `taker_fee_pct`
+- Portfolio description now includes `total_value`, `daily_pnl`, `total_pnl`, `fees_today`
+- Signal description now includes `slippage_tolerance` (optional override)
+- Added MUST NOT: "Generate SHORT signals — the system is long-only"
+
+**`CODE_REVIEW_SYSTEM`**:
+- Added check #6: "Long-only compliance — no SHORT signals"
+
+**Code gen user prompts** (`_execute_change()`, both tier 1 and tier 2+):
+- Injected dynamic `## System Constraints` block with: trading pairs, long-only, fees, slippage, trade sizes, max positions, SymbolData fee fields, Signal slippage field
+
+**Analysis module prompts** — left as-is (they query DB directly, don't need trading config).
+
+### Files Modified
+- `src/orchestrator/orchestrator.py` — Replaced `ANALYSIS_SYSTEM` with 3 constants, updated `_analyze()` system prompt construction and user prompt, updated `CODE_GEN_SYSTEM` and `CODE_REVIEW_SYSTEM`, added dynamic constraints to code gen user prompts
+- `tests/test_integration.py` — Updated `test_analysis_code_gen_prompts_exist` to import/check new constants
+
+### Test Count: 35/35 passing

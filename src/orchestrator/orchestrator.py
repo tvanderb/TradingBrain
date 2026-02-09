@@ -29,100 +29,120 @@ from src.orchestrator.ai_client import AIClient
 from src.orchestrator.reporter import Reporter
 from src.shell.config import Config
 from src.shell.contract import RiskLimits
-from src.shell.database import Database
 from src.shell.data_store import DataStore
+from src.shell.database import Database
 from src.shell.truth import compute_truth_benchmarks
-from src.statistics.loader import load_analysis_module, get_module_path, get_code_hash as get_analysis_hash
+from src.statistics.loader import deploy_module as deploy_analysis_module
+from src.statistics.loader import get_code_hash as get_analysis_hash
+from src.statistics.loader import get_module_path, load_analysis_module
 from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
 from src.statistics.sandbox import validate_analysis_module
-from src.statistics.loader import deploy_module as deploy_analysis_module
 from src.strategy.backtester import Backtester
-from src.strategy.loader import deploy_strategy, get_code_hash, get_strategy_path, load_strategy
+from src.strategy.loader import (
+    deploy_strategy,
+    get_code_hash,
+    get_strategy_path,
+    load_strategy,
+)
 from src.strategy.sandbox import validate_strategy
 
 log = structlog.get_logger()
 
-STRATEGY_DOC_PATH = Path(__file__).resolve().parent.parent.parent / "strategy" / "strategy_document.md"
+STRATEGY_DOC_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "strategy" / "strategy_document.md"
+)
 
-ANALYSIS_SYSTEM = """You are the AI orchestrator for a crypto trading system. You review performance, analyze market conditions, and decide whether to modify the trading strategy or your analysis modules.
+# --- Orchestrator Prompt: Three-Layer Framework ---
+# Layer 1 (Identity) + Fund Mandate + Layer 2 (System Understanding)
+# Concatenated at runtime in _analyze(). See discussions.md Sessions 7-8.
 
-## Your Inputs (labeled by category)
+LAYER_1_IDENTITY = """You are the fund manager for a crypto trading fund. You operate nightly — reviewing performance, analyzing markets, and deciding whether to modify the trading strategy or your analysis tools.
 
-You receive FIVE categories of information. Pay attention to their labels:
+## Your Character
 
-1. **GROUND TRUTH** (rigid shell — you cannot change this, use to verify your analysis)
-   Simple verifiable metrics computed directly from raw database data. Trade counts, win/loss, P&L, fees, expectancy, consecutive losses, drawdown, signal/scan activity. These are always correct.
+**Radical Honesty**
+You do not rationalize your decisions. When a change didn't help, you acknowledge it. When a thesis isn't supported by data, you abandon it. You do not cherry-pick results, find patterns that aren't there, or ignore inconvenient findings. You acknowledge sample size limitations rather than drawing conclusions from insufficient data. A loss is a loss.
 
-2. **YOUR MARKET ANALYSIS** (you designed this module — you can rewrite it)
-   Analysis of exchange data, indicators, price action, volatility, signal proximity. You wrote this code. If it's missing metrics you need, update it.
+**Professional Judgment**
+You are a thoughtful fund manager who has internalized the realities of markets. You bring judgment, not just computation. You are neither a day-trader chasing signals nor a rigid algorithm following rules.
 
-3. **YOUR TRADE PERFORMANCE ANALYSIS** (you designed this module — you can rewrite it)
-   Analysis of trade execution quality, strategy effectiveness, fee impact, holding duration, rolling metrics. You wrote this code. If it's incomplete, update it.
+**Comfort with Uncertainty**
+You are comfortable saying "I don't have enough information yet." You do not force conclusions from thin data. But you do not use uncertainty as an excuse to avoid decisions — you know the difference between needing more data and avoiding responsibility.
 
-4. **YOUR STRATEGY** (you designed this — you can rewrite it)
-   The trading strategy source code, strategy document (institutional memory), version history.
+**Probabilistic Thinking**
+You think in distributions, not individual outcomes. A losing trade does not mean the strategy is wrong. A winning trade does not mean it is right. What matters is whether the system has an edge over many trades. You understand that statistical conclusions from small samples are unreliable.
 
-5. **USER CONSTRAINTS** (risk limits, goals — you cannot change these)
-   Hard risk limits enforced by the shell. Your budget and operational parameters.
+**Relationship to Change**
+Every modification resets the evaluation clock — new strategy means new data is needed to evaluate it. Persisting with something broken also has a cost. Change is a tool with a price. You understand that stability compounds and unnecessary changes introduce risk.
 
-## Your Goals (in priority order)
+**Long-Term Orientation**
+You think in terms of compounding — both returns and knowledge. Individual cycles are data points, not verdicts. The fund's trajectory over months matters more than any single decision."""
 
-**Primary**: Achieve positive expectancy after fees. Every trade must clear the ~0.65-0.80% round-trip fee wall.
+FUND_MANDATE = """## Fund Mandate
 
-**Secondary**:
-- Profit factor > 1.2 (gross wins / gross losses — the system makes more than it loses)
-- Average win / average loss ratio > 2.0 (when you win, win big relative to losses)
-- Net positive P&L over any 30-day rolling window
+Portfolio growth with capital preservation. Avoid major drawdowns. This is a long-term fund."""
 
-**Informational** (track but don't optimize for directly):
-- Win rate (a 30% win rate is fine if avg_win/avg_loss is 3:1)
-- Sharpe ratio (noisy on small samples, penalizes upside volatility)
-- Sortino ratio (better than Sharpe — only penalizes downside)
+LAYER_2_SYSTEM = """## System
 
-**Meta-goals** (how you should operate):
-- Be conservative — don't change what's working
-- Build understanding before acting — prefer NO_CHANGE when data is insufficient
-- Improve observability — if you can't answer a question about performance, update your analysis modules
-- Maintain institutional memory — always document findings in the strategy document
-- Think long-term — a small consistent edge compounds; wild swings in approach don't
-- **Fewer trades, bigger moves** — every trade must overcome ~0.65-0.80% round-trip fees. Only take setups where the expected move is at least 3x the round-trip cost (~2% minimum expected move). Trade quality always beats trade quantity.
+### Architecture
+You operate within a rigid shell (Kraken exchange client, risk manager, portfolio tracker, database, Telegram). You control the flexible components: one trading strategy module and two analysis modules (market analysis and trade performance).
 
-## Cross-referencing
+### Your Decisions and Their Consequences
 
-Your market analysis and trade performance modules run independently — neither sees the other's output. YOU cross-reference them:
-- Do trade outcomes correlate with market conditions? (e.g., losing in ranging markets, winning in trends)
-- Does your market analysis capture what matters for your strategy's decisions?
-- Does your trade performance analysis measure what actually drives profitability?
+**Strategy changes** trigger a pipeline: Sonnet generates code → Opus reviews → sandbox validates → backtest → paper test → deploy.
+- **NO_CHANGE** (tier 0): Data keeps accumulating. Active paper tests continue.
+- **STRATEGY_TWEAK** (tier 1): Targeted changes, 1-day paper test. Any active paper test on the previous version terminates and its data becomes incomplete.
+- **STRATEGY_RESTRUCTURE** (tier 2): Logic changes, 2-day paper test. Same consequences.
+- **STRATEGY_OVERHAUL** (tier 3): Fundamental approach change, 1-week paper test. Same consequences.
 
-Always verify your analysis modules' output against GROUND TRUTH. If they disagree, ground truth is correct.
+**Analysis module changes** — Sonnet generates → Opus reviews (math correctness focus) → sandbox → immediate deploy. No paper test needed (read-only modules).
+- **MARKET_ANALYSIS_UPDATE**: Changes what market data you see next cycle.
+- **TRADE_ANALYSIS_UPDATE**: Changes what performance data you see next cycle.
 
-## Decision Options
+Deploying a new strategy while a paper test is active terminates that test. Rapid strategy changes destroy the ability to evaluate whether previous changes helped.
 
-Choose ONE:
-- **NO_CHANGE** (tier 0): No modifications needed. Document observations.
-- **STRATEGY_TWEAK** (tier 1): Parameter changes, threshold adjustments. 1 day paper test.
-- **STRATEGY_RESTRUCTURE** (tier 2): Logic changes, new indicators, different entry/exit. 2 day paper test.
-- **STRATEGY_OVERHAUL** (tier 3): Fundamentally different approach. 1 week paper test.
-- **MARKET_ANALYSIS_UPDATE**: Rewrite your market analysis module to measure different/better things.
-- **TRADE_ANALYSIS_UPDATE**: Rewrite your trade performance module to measure different/better things.
+### Shell-Enforced Boundaries
+These hard constraints cannot be bypassed, modified, or overridden:
+- **Risk manager**: Silently clamps oversized trade requests to configured maximums.
+- **Daily loss halt**: Trading stops for the day when cumulative losses hit the limit.
+- **Drawdown halt**: System halts entirely when portfolio drops below the threshold from peak.
+- **Truth benchmarks**: 17 metrics computed from raw database data. You cannot modify these. They exist so you can verify your analysis modules against reality.
+- **Long-only**: Only long positions. Short selling is unavailable — Kraken margin trading is not accessible from Canada. No leverage.
+- **Code pipeline**: All generated code must pass sandbox validation, Opus code review, and backtesting before deployment.
 
-## Decision Guidelines
+### Independent Processes
+Running continuously without your involvement:
+- **Scan loop** (every 5 min): Collects market data from Kraken, computes indicators, runs the active strategy, stores scan results, acts on signals that pass risk checks.
+- **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions.
+- **Data maintenance** (nightly, after your cycle): Aggregates and prunes candles beyond retention windows.
+- **Paper trading**: All trades execute with configurable slippage and real fee calculations.
 
-- Minimum ~20 trades before judging strategy performance statistically
-- Distinguish between strategy problems and market condition problems
-- If you lack information to decide, update analysis modules first (cheaper than bad strategy changes)
-- Analysis module updates are low-risk (read-only, no paper test needed) — prefer them when unsure
-- Don't chase short-term noise; look for persistent patterns
+### Your Inputs
+Five categories, labeled by trust level:
+1. **GROUND TRUTH** — Rigid shell metrics. Always correct. Use to verify your analysis.
+2. **YOUR MARKET ANALYSIS** — Module you designed. You can rewrite it.
+3. **YOUR TRADE PERFORMANCE ANALYSIS** — Module you designed. You can rewrite it.
+4. **YOUR STRATEGY** — Code you designed. Changes go through the pipeline.
+5. **SYSTEM CONSTRAINTS** — Risk limits, fees, operational parameters. You cannot change these.
 
-Respond in JSON format:
+If your analysis module output contradicts ground truth, ground truth is correct — your analysis has a bug.
+
+### Data Landscape
+- 5-minute candles: last 30 days per symbol
+- 1-hour candles: last 1 year
+- Daily candles: up to 7 years
+- Scan results: raw indicator values stored every scan
+- Trades and signals: tagged with strategy version and strategy regime
+
+### Response Format
+Respond in JSON:
 {
     "decision": "NO_CHANGE" | "STRATEGY_TWEAK" | "STRATEGY_RESTRUCTURE" | "STRATEGY_OVERHAUL" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
     "risk_tier": 0 | 1 | 2 | 3,
-    "reasoning": "...",
-    "specific_changes": "..." (if changing strategy or analysis),
-    "cross_reference_findings": "..." (what you found comparing market conditions to trade outcomes),
-    "market_observations": "...",
-    "strategy_doc_update": "..." (daily findings to add to institutional memory)
+    "reasoning": "Your analysis and the basis for your decision",
+    "specific_changes": "What exactly to change, if applicable",
+    "cross_reference_findings": "Findings from comparing market conditions to trade outcomes",
+    "market_observations": "Notable market observations from this cycle"
 }"""
 
 CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading strategy.
@@ -139,17 +159,18 @@ You MUST NOT:
 - Import os, subprocess, socket, http, or any network/filesystem modules
 - Make any API calls or file I/O
 - Use eval(), exec(), or __import__()
+- Generate SHORT signals — the system is long-only (no margin, no leverage)
 
 Available imports:
 - pandas, numpy, ta
 - src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData)
 
 The strategy receives:
-- markets: dict[str, SymbolData] with candles_5m (30d), candles_1h (1yr), candles_1d (7yr), current_price, spread, volume_24h
-- portfolio: Portfolio with cash, positions, recent_trades, pnl
+- markets: dict[str, SymbolData] with candles_5m (30d), candles_1h (1yr), candles_1d (7yr), current_price, spread, volume_24h, maker_fee_pct, taker_fee_pct
+- portfolio: Portfolio with cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today
 - timestamp: datetime
 
-Return list[Signal] with: symbol, action (BUY/SELL/CLOSE), size_pct, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning
+Return list[Signal] with: symbol, action (BUY/SELL/CLOSE), size_pct, order_type, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override)
 
 Output ONLY the Python code. No markdown, no explanation, just the code."""
 
@@ -160,6 +181,7 @@ CODE_REVIEW_SYSTEM = """You are a code reviewer for a trading strategy. Check fo
 3. Logic correctness — edge cases, division by zero, empty data handling
 4. Risk management — stop losses set, position sizing within limits
 5. Risk tier accuracy — is the self-assessed tier correct?
+6. Long-only compliance — no SHORT signals (system has no margin access)
 
 Respond in JSON:
 {
@@ -244,8 +266,12 @@ class Orchestrator:
     """Nightly AI review and strategy evolution engine."""
 
     def __init__(
-        self, config: Config, db: Database, ai: AIClient,
-        reporter: Reporter, data_store: DataStore,
+        self,
+        config: Config,
+        db: Database,
+        ai: AIClient,
+        reporter: Reporter,
+        data_store: DataStore,
     ) -> None:
         self._config = config
         self._db = db
@@ -293,13 +319,18 @@ class Orchestrator:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(response[start:i + 1])
+                        return json.loads(response[start : i + 1])
                     except json.JSONDecodeError:
                         return None
         return None
 
     async def _store_thought(
-        self, step: str, model: str, input_summary: str, full_response: str, parsed_result=None,
+        self,
+        step: str,
+        model: str,
+        input_summary: str,
+        full_response: str,
+        parsed_result=None,
     ) -> None:
         """Store an AI response in the thought spool for later browsing."""
         if not self._cycle_id:
@@ -315,7 +346,9 @@ class Orchestrator:
                     model,
                     (input_summary[:500] if input_summary else None),
                     full_response,
-                    json.dumps(parsed_result, default=str) if parsed_result is not None else None,
+                    json.dumps(parsed_result, default=str)
+                    if parsed_result is not None
+                    else None,
                 ),
             )
             await self._db.commit()
@@ -330,7 +363,10 @@ class Orchestrator:
         try:
             # 0. Check token budget
             if self._ai.tokens_remaining < 5000:
-                log.warning("orchestrator.insufficient_budget", remaining=self._ai.tokens_remaining)
+                log.warning(
+                    "orchestrator.insufficient_budget",
+                    remaining=self._ai.tokens_remaining,
+                )
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
             # 1. Gather context
@@ -407,7 +443,9 @@ class Orchestrator:
         # --- 4. STRATEGY CONTEXT ---
         # Current strategy code
         strategy_path = get_strategy_path()
-        strategy_code = strategy_path.read_text() if strategy_path.exists() else "No strategy file"
+        strategy_code = (
+            strategy_path.read_text() if strategy_path.exists() else "No strategy file"
+        )
         code_hash = get_code_hash(strategy_path) if strategy_path.exists() else "none"
 
         # Current analysis module code (so orchestrator can see what it wrote)
@@ -415,17 +453,25 @@ class Orchestrator:
         trade_performance_code = ""
         try:
             market_path = get_module_path("market_analysis")
-            market_analysis_code = market_path.read_text() if market_path.exists() else "No module"
+            market_analysis_code = (
+                market_path.read_text() if market_path.exists() else "No module"
+            )
         except Exception:
             market_analysis_code = "Failed to read"
         try:
             perf_path = get_module_path("trade_performance")
-            trade_performance_code = perf_path.read_text() if perf_path.exists() else "No module"
+            trade_performance_code = (
+                perf_path.read_text() if perf_path.exists() else "No module"
+            )
         except Exception:
             trade_performance_code = "Failed to read"
 
         # Strategy document
-        strategy_doc = STRATEGY_DOC_PATH.read_text() if STRATEGY_DOC_PATH.exists() else "No strategy document"
+        strategy_doc = (
+            STRATEGY_DOC_PATH.read_text()
+            if STRATEGY_DOC_PATH.exists()
+            else "No strategy document"
+        )
 
         # Performance data
         performance = await self._reporter.strategy_performance(days=7)
@@ -508,33 +554,33 @@ class Orchestrator:
 
     async def _analyze(self, context: dict) -> dict:
         """Opus analyzes performance and decides on action."""
-        prompt = f"""Review the trading system's current state and decide on action.
+        prompt = f"""Current fund state for nightly review.
 
 ---
 
-## GROUND TRUTH (rigid shell — you cannot change this, use to verify your analysis)
-{json.dumps(context['ground_truth'], indent=2, default=str)}
+## GROUND TRUTH (rigid shell — you cannot change this)
+{json.dumps(context["ground_truth"], indent=2, default=str)}
 
 ---
 
 ## YOUR MARKET ANALYSIS (you designed this module — you can rewrite it)
 ### Module Output:
-{json.dumps(context['market_report'], indent=2, default=str)}
+{json.dumps(context["market_report"], indent=2, default=str)}
 
 ### Module Source Code:
 ```python
-{context['market_analysis_code']}
+{context["market_analysis_code"]}
 ```
 
 ---
 
 ## YOUR TRADE PERFORMANCE ANALYSIS (you designed this module — you can rewrite it)
 ### Module Output:
-{json.dumps(context['trade_performance_report'], indent=2, default=str)}
+{json.dumps(context["trade_performance_report"], indent=2, default=str)}
 
 ### Module Source Code:
 ```python
-{context['trade_performance_code']}
+{context["trade_performance_code"]}
 ```
 
 ---
@@ -542,61 +588,72 @@ class Orchestrator:
 ## YOUR STRATEGY (you designed this — you can rewrite it)
 ### Strategy Source Code:
 ```python
-{context['strategy_code']}
+{context["strategy_code"]}
 ```
 
 ### Strategy Document (Institutional Memory):
-{context['strategy_doc']}
+{context["strategy_doc"]}
 
 ### Performance (Last 7 Days):
-{json.dumps(context['performance_7d'], indent=2, default=str)}
+{json.dumps(context["performance_7d"], indent=2, default=str)}
 
 ### Daily Performance Snapshots:
-{json.dumps(context['daily_performance'], indent=2, default=str)}
+{json.dumps(context["daily_performance"], indent=2, default=str)}
 
 ### Recent Trades (Last 50):
-{json.dumps(context['recent_trades'], indent=2, default=str)}
+{json.dumps(context["recent_trades"], indent=2, default=str)}
 
 ### Strategy Version History:
-{json.dumps(context['version_history'], indent=2, default=str)}
+{json.dumps(context["version_history"], indent=2, default=str)}
 
 ---
 
-## USER CONSTRAINTS (risk limits — you cannot change these)
+## SYSTEM CONSTRAINTS (you cannot change these)
+- Trading pairs: {", ".join(self._config.symbols)}
+- System: Long-only (no short selling, no leverage)
 - Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%
+- Default slippage: {self._config.default_slippage_pct * 100:.2f}% (signals can override per-trade)
 - Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio
 - Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio
 - Max position size: {self._config.risk.max_position_pct * 100:.0f}% of portfolio
 - Max positions: {self._config.risk.max_positions}
-- Max daily loss: {self._config.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts for the day)
-- Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts entirely)
-- Token budget: {context['token_usage'].get('used', 0)} / {context['token_usage'].get('daily_limit', 0)} tokens used today (${context['token_usage'].get('total_cost', 0):.4f})
+- Max daily loss: {self._config.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts)
+- Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts)
+- Token budget: {context["token_usage"].get("used", 0)} / {context["token_usage"].get("daily_limit", 0)} tokens used today (${context["token_usage"].get("total_cost", 0):.4f})
 
 ---
 
 ## SIGNAL & OBSERVATION STATE
 ### Signal Drought Detection:
-{json.dumps(context['signal_drought'], indent=2, default=str)}
+{json.dumps(context["signal_drought"], indent=2, default=str)}
 
 ### Active Paper Tests:
-{json.dumps(context['active_paper_tests'], indent=2, default=str) if context['active_paper_tests'] else "No active paper tests."}
+{json.dumps(context["active_paper_tests"], indent=2, default=str) if context["active_paper_tests"] else "No active paper tests."}
 
 ### Recent Observations (last 14 days):
-{json.dumps(context['recent_observations'], indent=2, default=str) if context['recent_observations'] else "No prior observations."}
+{json.dumps(context["recent_observations"], indent=2, default=str) if context["recent_observations"] else "No prior observations."}
 
 ---
 
-Analyze and decide. Respond in JSON format."""
+Respond in JSON format."""
+
+        # Build system prompt from three-layer framework
+        system_prompt = (
+            f"{LAYER_1_IDENTITY}\n\n---\n\n{FUND_MANDATE}\n\n---\n\n{LAYER_2_SYSTEM}"
+        )
 
         response = await self._ai.ask_opus(
-            prompt, system=ANALYSIS_SYSTEM, max_tokens=2048, purpose="nightly_analysis"
+            prompt, system=system_prompt, max_tokens=2048, purpose="nightly_analysis"
         )
 
         # Parse JSON from response
         parsed = self._extract_json(response)
         if parsed is None:
             log.warning("orchestrator.json_parse_failed", response=response[:200])
-            parsed = {"decision": "NO_CHANGE", "reasoning": "Failed to parse analysis response"}
+            parsed = {
+                "decision": "NO_CHANGE",
+                "reasoning": "Failed to parse analysis response",
+            }
 
         await self._store_thought("analysis", "opus", prompt[:500], response, parsed)
         return parsed
@@ -615,6 +672,20 @@ Analyze and decide. Respond in JSON format."""
 
         for attempt in range(max_revisions):
             # Sonnet generates code — tier 1 gets targeted edit instructions
+            # System constraints shared by both tier 1 and tier 2+ prompts
+            system_constraints = (
+                f"## System Constraints\n"
+                f"- Trading pairs: {', '.join(self._config.symbols)}\n"
+                f"- Long-only (no short selling, no leverage)\n"
+                f"- Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%\n"
+                f"- Default slippage: {self._config.default_slippage_pct * 100:.2f}%\n"
+                f"- Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio\n"
+                f"- Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio\n"
+                f"- Max positions: {self._config.risk.max_positions}\n"
+                f"- SymbolData includes maker_fee_pct and taker_fee_pct per pair\n"
+                f"- Signal supports optional slippage_tolerance override (float)"
+            )
+
             if tier == 1:
                 gen_prompt = f"""Make targeted changes to the existing trading strategy.
 
@@ -628,14 +699,16 @@ Analyze and decide. Respond in JSON format."""
 
 ## Current Strategy (modify this)
 ```python
-{context['strategy_code']}
+{context["strategy_code"]}
 ```
 
 ## Strategy Document
-{context['strategy_doc']}
+{context["strategy_doc"]}
 
 ## Performance Context
-{json.dumps(context['performance_7d'], indent=2, default=str)}
+{json.dumps(context["performance_7d"], indent=2, default=str)}
+
+{system_constraints}
 
 Output the complete strategy.py file with your targeted changes applied."""
             else:
@@ -646,22 +719,28 @@ Output the complete strategy.py file with your targeted changes applied."""
 
 ## Current Strategy (for reference)
 ```python
-{context['strategy_code']}
+{context["strategy_code"]}
 ```
 
 ## Strategy Document
-{context['strategy_doc']}
+{context["strategy_doc"]}
 
 ## Performance Context
-{json.dumps(context['performance_7d'], indent=2, default=str)}
+{json.dumps(context["performance_7d"], indent=2, default=str)}
+
+{system_constraints}
 
 Generate the complete strategy.py file."""
 
             code = await self._ai.ask_sonnet(
-                gen_prompt, system=CODE_GEN_SYSTEM, max_tokens=8192,
-                purpose=f"code_gen_attempt_{attempt+1}",
+                gen_prompt,
+                system=CODE_GEN_SYSTEM,
+                max_tokens=8192,
+                purpose=f"code_gen_attempt_{attempt + 1}",
             )
-            await self._store_thought(f"code_gen_{attempt+1}", "sonnet", gen_prompt[:500], code)
+            await self._store_thought(
+                f"code_gen_{attempt + 1}", "sonnet", gen_prompt[:500], code
+            )
 
             # Strip markdown code fences if present
             if "```python" in code:
@@ -673,14 +752,22 @@ Generate the complete strategy.py file."""
             # Sandbox validation
             sandbox_result = validate_strategy(code)
             if not sandbox_result.passed:
-                log.warning("orchestrator.sandbox_failed", attempt=attempt+1, errors=sandbox_result.errors)
+                log.warning(
+                    "orchestrator.sandbox_failed",
+                    attempt=attempt + 1,
+                    errors=sandbox_result.errors,
+                )
                 changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
                 continue
 
             # Generate diff for reviewer context
-            old_lines = context['strategy_code'].splitlines(keepends=True)
+            old_lines = context["strategy_code"].splitlines(keepends=True)
             new_lines = code.splitlines(keepends=True)
-            diff = ''.join(difflib.unified_diff(old_lines, new_lines, fromfile='current', tofile='proposed', n=3))
+            diff = "".join(
+                difflib.unified_diff(
+                    old_lines, new_lines, fromfile="current", tofile="proposed", n=3
+                )
+            )
 
             # Opus code review — includes diff for change context
             review_prompt = f"""Review this trading strategy code for correctness and safety.
@@ -695,21 +782,29 @@ Generate the complete strategy.py file."""
 {code}
 ```
 
-The agent classified this change as risk tier {tier} ({['', 'tweak', 'restructure', 'overhaul'][tier]}).
+The agent classified this change as risk tier {tier} ({["", "tweak", "restructure", "overhaul"][tier]}).
 Is this classification correct?
 
 {json.dumps(decision, indent=2, default=str)}"""
 
             review_response = await self._ai.ask_opus(
-                review_prompt, system=CODE_REVIEW_SYSTEM, max_tokens=1024,
-                purpose=f"code_review_attempt_{attempt+1}",
+                review_prompt,
+                system=CODE_REVIEW_SYSTEM,
+                max_tokens=1024,
+                purpose=f"code_review_attempt_{attempt + 1}",
             )
 
             review = self._extract_json(review_response)
             if review is None:
                 review = {"approved": False, "feedback": "Failed to parse review"}
 
-            await self._store_thought(f"code_review_{attempt+1}", "opus", review_prompt[:500], review_response, review)
+            await self._store_thought(
+                f"code_review_{attempt + 1}",
+                "opus",
+                review_prompt[:500],
+                review_response,
+                review,
+            )
 
             if review.get("approved"):
                 # Determine actual risk tier
@@ -719,8 +814,12 @@ Is this classification correct?
                 # Backtest against historical data before deploying
                 backtest_passed, backtest_summary = await self._run_backtest(code)
                 if not backtest_passed:
-                    log.warning("orchestrator.backtest_failed", summary=backtest_summary)
-                    changes += f"\n\nBacktest failed: {backtest_summary}. Adjust the strategy."
+                    log.warning(
+                        "orchestrator.backtest_failed", summary=backtest_summary
+                    )
+                    changes += (
+                        f"\n\nBacktest failed: {backtest_summary}. Adjust the strategy."
+                    )
                     continue
 
                 # Deploy to active
@@ -732,12 +831,19 @@ Is this classification correct?
                     """INSERT INTO strategy_versions
                        (version, parent_version, code_hash, risk_tier, description, market_conditions, deployed_at)
                        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
-                    (version, parent_version, code_hash, actual_tier, changes[:500],
-                     decision.get("market_observations", "")[:500]),
+                    (
+                        version,
+                        parent_version,
+                        code_hash,
+                        actual_tier,
+                        changes[:500],
+                        decision.get("market_observations", "")[:500],
+                    ),
                 )
 
                 # Create paper test entry
                 from datetime import timedelta
+
                 ends_at = (datetime.now() + timedelta(days=paper_days)).isoformat()
                 await self._db.execute(
                     """INSERT INTO paper_tests
@@ -748,8 +854,13 @@ Is this classification correct?
 
                 await self._db.commit()
 
-                log.info("orchestrator.strategy_deployed", version=version,
-                         tier=actual_tier, paper_days=paper_days, parent=parent_version)
+                log.info(
+                    "orchestrator.strategy_deployed",
+                    version=version,
+                    tier=actual_tier,
+                    paper_days=paper_days,
+                    parent=parent_version,
+                )
 
                 return (
                     f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"
@@ -758,7 +869,11 @@ Is this classification correct?
             else:
                 feedback = review.get("feedback", "No feedback")
                 issues = review.get("issues", [])
-                log.warning("orchestrator.review_rejected", attempt=attempt+1, feedback=feedback)
+                log.warning(
+                    "orchestrator.review_rejected",
+                    attempt=attempt + 1,
+                    feedback=feedback,
+                )
                 changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
 
         return f"Strategy change aborted after {max_revisions} failed attempts."
@@ -770,12 +885,14 @@ Is this classification correct?
         """
         decision_type = decision.get("decision", "")
         module_name = (
-            "market_analysis" if decision_type == "MARKET_ANALYSIS_UPDATE"
+            "market_analysis"
+            if decision_type == "MARKET_ANALYSIS_UPDATE"
             else "trade_performance"
         )
         changes = decision.get("specific_changes", "")
         current_code = context.get(
-            "market_analysis_code" if module_name == "market_analysis"
+            "market_analysis_code"
+            if module_name == "market_analysis"
             else "trade_performance_code",
             "",
         )
@@ -783,7 +900,7 @@ Is this classification correct?
 
         for attempt in range(max_revisions):
             # Sonnet generates analysis module code
-            gen_prompt = f"""Generate a new {module_name.replace('_', ' ')} module based on these requirements:
+            gen_prompt = f"""Generate a new {module_name.replace("_", " ")} module based on these requirements:
 
 ## Change Request
 {changes}
@@ -797,15 +914,22 @@ Is this classification correct?
 {json.dumps(get_schema_description(), indent=2)}
 
 ## Ground Truth Benchmarks (for context on what data exists)
-{json.dumps(context.get('ground_truth', {}), indent=2, default=str)}
+{json.dumps(context.get("ground_truth", {}), indent=2, default=str)}
 
 Generate the complete {module_name}.py file."""
 
             code = await self._ai.ask_sonnet(
-                gen_prompt, system=ANALYSIS_CODE_GEN_SYSTEM, max_tokens=8192,
-                purpose=f"analysis_gen_{module_name}_attempt_{attempt+1}",
+                gen_prompt,
+                system=ANALYSIS_CODE_GEN_SYSTEM,
+                max_tokens=8192,
+                purpose=f"analysis_gen_{module_name}_attempt_{attempt + 1}",
             )
-            await self._store_thought(f"analysis_gen_{module_name}_{attempt+1}", "sonnet", gen_prompt[:500], code)
+            await self._store_thought(
+                f"analysis_gen_{module_name}_{attempt + 1}",
+                "sonnet",
+                gen_prompt[:500],
+                code,
+            )
 
             # Strip markdown code fences if present
             if "```python" in code:
@@ -817,13 +941,17 @@ Generate the complete {module_name}.py file."""
             # Sandbox validation
             sandbox_result = validate_analysis_module(code, module_name)
             if not sandbox_result.passed:
-                log.warning("orchestrator.analysis_sandbox_failed",
-                            module=module_name, attempt=attempt+1, errors=sandbox_result.errors)
+                log.warning(
+                    "orchestrator.analysis_sandbox_failed",
+                    module=module_name,
+                    attempt=attempt + 1,
+                    errors=sandbox_result.errors,
+                )
                 changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
                 continue
 
             # Opus reviews for mathematical correctness
-            review_prompt = f"""Review this {module_name.replace('_', ' ')} module for mathematical correctness and safety:
+            review_prompt = f"""Review this {module_name.replace("_", " ")} module for mathematical correctness and safety:
 
 ```python
 {code}
@@ -832,23 +960,35 @@ Generate the complete {module_name}.py file."""
 The orchestrator wants to change this module because: {changes[:500]}"""
 
             review_response = await self._ai.ask_opus(
-                review_prompt, system=ANALYSIS_REVIEW_SYSTEM, max_tokens=1024,
-                purpose=f"analysis_review_{module_name}_attempt_{attempt+1}",
+                review_prompt,
+                system=ANALYSIS_REVIEW_SYSTEM,
+                max_tokens=1024,
+                purpose=f"analysis_review_{module_name}_attempt_{attempt + 1}",
             )
 
             review = self._extract_json(review_response)
             if review is None:
                 review = {"approved": False, "feedback": "Failed to parse review"}
 
-            await self._store_thought(f"analysis_review_{module_name}_{attempt+1}", "opus", review_prompt[:500], review_response, review)
+            await self._store_thought(
+                f"analysis_review_{module_name}_{attempt + 1}",
+                "opus",
+                review_prompt[:500],
+                review_response,
+                review,
+            )
 
             if review.get("approved"):
                 # Deploy — no paper testing needed (read-only module)
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M')}"
                 code_hash = deploy_analysis_module(module_name, code, version)
 
-                log.info("orchestrator.analysis_deployed",
-                         module=module_name, version=version, hash=code_hash)
+                log.info(
+                    "orchestrator.analysis_deployed",
+                    module=module_name,
+                    version=version,
+                    hash=code_hash,
+                )
 
                 return (
                     f"Analysis module '{module_name}' updated ({version}).\n"
@@ -857,9 +997,15 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             else:
                 feedback = review.get("feedback", "No feedback")
                 math_errors = review.get("math_errors", [])
-                log.warning("orchestrator.analysis_review_rejected",
-                            module=module_name, attempt=attempt+1, feedback=feedback)
-                changes += f"\n\nReview feedback: {feedback}\nMath errors: {math_errors}"
+                log.warning(
+                    "orchestrator.analysis_review_rejected",
+                    module=module_name,
+                    attempt=attempt + 1,
+                    feedback=feedback,
+                )
+                changes += (
+                    f"\n\nReview feedback: {feedback}\nMath errors: {math_errors}"
+                )
 
         return f"Analysis module '{module_name}' update aborted after {max_revisions} failed attempts."
 
@@ -887,7 +1033,9 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             # Get recent 1h candle data for backtest
             candle_data = {}
             for symbol in self._config.symbols:
-                df = await self._data_store.get_candles(symbol, "5m", limit=8640)  # ~30 days of 5m
+                df = await self._data_store.get_candles(
+                    symbol, "5m", limit=8640
+                )  # ~30 days of 5m
                 if not df.empty:
                     candle_data[symbol] = df
 
@@ -918,7 +1066,10 @@ The orchestrator wants to change this module because: {changes[:500]}"""
 
             # Fail only on catastrophic results (crash or very negative)
             if result.total_trades >= 10 and result.max_drawdown_pct > 0.15:
-                return False, f"Excessive drawdown: {result.max_drawdown_pct:.1%}. {summary}"
+                return (
+                    False,
+                    f"Excessive drawdown: {result.max_drawdown_pct:.1%}. {summary}",
+                )
 
             return True, summary
 
@@ -927,6 +1078,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             return False, f"Strategy crashed during backtest: {e}"
         finally:
             import os
+
             try:
                 os.unlink(tmp_path)
             except OSError:

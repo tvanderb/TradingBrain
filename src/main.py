@@ -62,6 +62,7 @@ class TradingBrain:
         self._scheduler: AsyncIOScheduler | None = None
         self._scan_state: dict = {}
         self._commands: BotCommands | None = None
+        self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
         self._running = False
 
     async def start(self) -> None:
@@ -303,6 +304,7 @@ class TradingBrain:
                     spread = await self._kraken.get_spread(symbol)
                     vol_24h = float(ticker.get("v", [0, 0])[1])
 
+                    pair_fees = self._pair_fees.get(symbol)
                     markets[symbol] = SymbolData(
                         symbol=symbol,
                         current_price=price,
@@ -311,6 +313,8 @@ class TradingBrain:
                         candles_1d=df_1d if not df_1d.empty else df_5m,
                         spread=spread,
                         volume_24h=vol_24h,
+                        maker_fee_pct=pair_fees[0] if pair_fees else self._config.kraken.maker_fee_pct,
+                        taker_fee_pct=pair_fees[1] if pair_fees else self._config.kraken.taker_fee_pct,
                     )
 
                     # Compute indicators for scan_state (used by /report)
@@ -371,13 +375,14 @@ class TradingBrain:
                 # Clamp to risk limits
                 signal = self._risk.clamp_signal(signal, portfolio_value)
 
-                # Execute
+                # Execute (use per-pair fees if available)
                 price = prices.get(signal.symbol, 0)
                 regime = scan_symbols.get(signal.symbol, {}).get("regime")
+                sym_fees = self._pair_fees.get(signal.symbol)
                 result = await self._portfolio.execute_signal(
                     signal, price,
-                    self._config.kraken.maker_fee_pct,
-                    self._config.kraken.taker_fee_pct,
+                    sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                    sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                     strategy_regime=regime,
                 )
 
@@ -488,10 +493,11 @@ class TradingBrain:
             )
             # Use most recent scan's regime for this symbol
             regime = self._scan_state.get("symbols", {}).get(symbol, {}).get("regime")
+            sym_fees = self._pair_fees.get(symbol)
             result = await self._portfolio.execute_signal(
                 signal, price,
-                self._config.kraken.maker_fee_pct,
-                self._config.kraken.taker_fee_pct,
+                sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                 strategy_regime=regime,
             )
             if result:
@@ -500,18 +506,25 @@ class TradingBrain:
                 await self._notifier.trade_executed(result)
 
     async def _check_fees(self) -> None:
-        """Update fee schedule from Kraken."""
+        """Update fee schedule from Kraken for all pairs."""
+        if not self._config.kraken.api_key:
+            return
         try:
-            if self._config.kraken.api_key:
-                maker, taker = await self._kraken.get_fee_schedule(self._config.symbols[0])
-                self._config.kraken.maker_fee_pct = maker
-                self._config.kraken.taker_fee_pct = taker
+            for symbol in self._config.symbols:
+                maker, taker = await self._kraken.get_fee_schedule(symbol)
+                self._pair_fees[symbol] = (maker, taker)
                 await self._db.execute(
-                    "INSERT INTO fee_schedule (maker_fee_pct, taker_fee_pct) VALUES (?, ?)",
-                    (maker, taker),
+                    "INSERT INTO fee_schedule (symbol, maker_fee_pct, taker_fee_pct) VALUES (?, ?, ?)",
+                    (symbol, maker, taker),
                 )
-                await self._db.commit()
-                log.info("fees.updated", maker=maker, taker=taker)
+            # Also update global config with first pair's fees as default
+            if self._config.symbols:
+                first = self._config.symbols[0]
+                if first in self._pair_fees:
+                    self._config.kraken.maker_fee_pct = self._pair_fees[first][0]
+                    self._config.kraken.taker_fee_pct = self._pair_fees[first][1]
+            await self._db.commit()
+            log.info("fees.updated", pairs=len(self._pair_fees))
         except Exception as e:
             log.warning("fees.check_failed", error=str(e))
 
@@ -569,10 +582,11 @@ class TradingBrain:
                     symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
                     intent=Intent.DAY, confidence=1.0, reasoning="Emergency stop",
                 )
+                sym_fees = self._pair_fees.get(pos["symbol"])
                 await self._portfolio.execute_signal(
                     signal, price,
-                    self._config.kraken.maker_fee_pct,
-                    self._config.kraken.taker_fee_pct,
+                    sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                    sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                 )
             except Exception as e:
                 log.error("emergency.close_failed", symbol=pos["symbol"], error=str(e))

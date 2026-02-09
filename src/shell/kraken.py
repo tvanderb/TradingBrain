@@ -26,14 +26,25 @@ from src.shell.config import KrakenConfig
 
 log = structlog.get_logger()
 
-# Kraken pair mapping: user-friendly -> API format
+# Kraken pair mapping: user-friendly -> REST API format
 PAIR_MAP = {
     "BTC/USD": "XBTUSD",
     "ETH/USD": "ETHUSD",
     "SOL/USD": "SOLUSD",
+    "XRP/USD": "XRPUSD",
+    "DOGE/USD": "XDGUSD",
+    "ADA/USD": "ADAUSD",
+    "LINK/USD": "LINKUSD",
+    "AVAX/USD": "AVAXUSD",
+    "DOT/USD": "DOTUSD",
 }
 
 PAIR_REVERSE = {v: k for k, v in PAIR_MAP.items()}
+# WS v2 uses slash-separated format with Kraken's internal names
+PAIR_REVERSE.update({
+    "XBT/USD": "BTC/USD",
+    "XDG/USD": "DOGE/USD",
+})
 
 
 def to_kraken_pair(symbol: str) -> str:

@@ -74,6 +74,8 @@ class SymbolData:
     candles_1d: pd.DataFrame   # Last 7 years of daily candles
     spread: float
     volume_24h: float
+    maker_fee_pct: float = 0.25   # Per-pair fee from Kraken (%)
+    taker_fee_pct: float = 0.40   # Per-pair fee from Kraken (%)
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class Signal:
     intent: Intent = Intent.DAY
     confidence: float = 0.5
     reasoning: str = ""
+    slippage_tolerance: Optional[float] = None  # Override default; e.g. 0.0005 = 0.05%
 
 
 # --- Strategy Interface ---
