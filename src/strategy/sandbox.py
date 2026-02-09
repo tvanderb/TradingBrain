@@ -139,12 +139,12 @@ def validate_strategy(code: str) -> SandboxResult:
         return SandboxResult(False, import_errors, [])
 
     # Step 3: Load the module in a temp file
+    tmp_path = None
+    module_name = "sandbox_test_strategy"
     try:
         with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
             f.write(code)
             tmp_path = f.name
-
-        module_name = "sandbox_test_strategy"
         if module_name in sys.modules:
             del sys.modules[module_name]
 
@@ -196,7 +196,8 @@ def validate_strategy(code: str) -> SandboxResult:
         # Cleanup
         if module_name in sys.modules:
             del sys.modules[module_name]
-        Path(tmp_path).unlink(missing_ok=True)
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
 
     if errors:
         return SandboxResult(False, errors, warnings)

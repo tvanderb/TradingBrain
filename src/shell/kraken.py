@@ -96,7 +96,10 @@ class KrakenREST:
             params["since"] = since
 
         result = await self.public("OHLC", params)
-        pair_key = [k for k in result if k != "last"][0]
+        pair_keys = [k for k in result if k != "last"]
+        if not pair_keys:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        pair_key = pair_keys[0]
         rows = result[pair_key]
 
         if not rows:
@@ -115,6 +118,8 @@ class KrakenREST:
     async def get_ticker(self, symbol: str) -> dict:
         pair = to_kraken_pair(symbol)
         result = await self.public("Ticker", {"pair": pair})
+        if not result:
+            raise RuntimeError(f"Kraken returned empty ticker for {symbol}")
         pair_key = list(result.keys())[0]
         return result[pair_key]
 
@@ -257,6 +262,10 @@ class KrakenWebSocket:
         async for msg_raw in ws:
             try:
                 msg = json.loads(msg_raw)
+            except json.JSONDecodeError:
+                continue
+
+            try:
                 channel = msg.get("channel")
 
                 if channel == "ticker":
@@ -266,15 +275,22 @@ class KrakenWebSocket:
                         if symbol and price:
                             self._prices[symbol] = price
                             for cb in self._callbacks.get("ticker", []):
-                                await cb(symbol, price) if asyncio.iscoroutinefunction(cb) else cb(symbol, price)
+                                try:
+                                    await cb(symbol, price) if asyncio.iscoroutinefunction(cb) else cb(symbol, price)
+                                except Exception as e:
+                                    log.error("websocket.callback_error", channel="ticker", error=str(e))
 
                 elif channel == "ohlc":
                     for item in msg.get("data", []):
                         symbol = from_kraken_pair(item.get("symbol", ""))
                         for cb in self._callbacks.get("ohlc", []):
-                            await cb(symbol, item) if asyncio.iscoroutinefunction(cb) else cb(symbol, item)
+                            try:
+                                await cb(symbol, item) if asyncio.iscoroutinefunction(cb) else cb(symbol, item)
+                            except Exception as e:
+                                log.error("websocket.callback_error", channel="ohlc", error=str(e))
 
-            except (json.JSONDecodeError, KeyError):
+            except (KeyError, ValueError) as e:
+                log.debug("websocket.msg_parse_error", error=str(e))
                 continue
 
     async def stop(self) -> None:

@@ -21,6 +21,15 @@ from src.shell.kraken import KrakenREST
 log = structlog.get_logger()
 
 
+def _safe_intent(value: str) -> Intent:
+    """Parse Intent from string, defaulting to DAY on invalid values."""
+    try:
+        return Intent[value]
+    except KeyError:
+        log.warning("portfolio.invalid_intent", value=value)
+        return Intent.DAY
+
+
 class PortfolioTracker:
     """Tracks positions, executes trades, computes P&L."""
 
@@ -61,8 +70,20 @@ class PortfolioTracker:
             self._cash = last_snap["cash"]
         elif self._config.is_paper():
             self._cash = self._config.paper_balance_usd
+        else:
+            # Live mode — fetch balance from Kraken
+            try:
+                balances = await self._kraken.get_balance()
+                self._cash = balances.get("ZUSD", balances.get("USD", 0.0))
+                log.info("portfolio.live_balance_loaded", cash=self._cash)
+            except Exception as e:
+                log.warning("portfolio.live_balance_failed", error=str(e))
 
-        self._daily_start_value = await self.total_value()
+        # Use last daily snapshot to preserve daily P&L across restarts
+        if last_snap and last_snap.get("portfolio_value") is not None:
+            self._daily_start_value = last_snap["portfolio_value"]
+        else:
+            self._daily_start_value = await self.total_value()
 
     async def total_value(self) -> float:
         """Cash + sum of position values at current prices."""
@@ -101,7 +122,7 @@ class PortfolioTracker:
                 current_price=current,
                 unrealized_pnl=pnl,
                 unrealized_pnl_pct=pnl_pct,
-                intent=Intent[p.get("intent", "DAY")],
+                intent=_safe_intent(p.get("intent", "DAY")),
                 stop_loss=p.get("stop_loss"),
                 take_profit=p.get("take_profit"),
                 opened_at=datetime.fromisoformat(p["opened_at"]) if p.get("opened_at") else datetime.now(),
@@ -122,7 +143,7 @@ class PortfolioTracker:
                 pnl=t["pnl"] or 0.0,
                 pnl_pct=t["pnl_pct"] or 0.0,
                 fees=t["fees"] or 0.0,
-                intent=Intent[t.get("intent", "DAY")],
+                intent=_safe_intent(t.get("intent", "DAY")),
                 opened_at=datetime.fromisoformat(t["opened_at"]) if t.get("opened_at") else datetime.now(),
                 closed_at=datetime.fromisoformat(t["closed_at"]) if t.get("closed_at") else datetime.now(),
             ))

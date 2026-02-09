@@ -251,9 +251,9 @@ class Backtester:
         result.total_trades = len(all_trades)
         result.wins = sum(1 for t in all_trades if t.pnl > 0)
         result.losses = sum(1 for t in all_trades if t.pnl <= 0)
-        result.total_fees = sum(t.fee for t in all_trades)
-        result.gross_pnl = sum(t.pnl + t.fee for t in all_trades)
-        result.net_pnl = sum(t.pnl for t in all_trades)
+        result.total_fees = float(sum(t.fee for t in all_trades))
+        result.gross_pnl = float(sum(t.pnl + t.fee for t in all_trades))
+        result.net_pnl = float(sum(t.pnl for t in all_trades))
         result.win_rate = result.wins / result.total_trades if result.total_trades > 0 else 0
 
         # Expectancy

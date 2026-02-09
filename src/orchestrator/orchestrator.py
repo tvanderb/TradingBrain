@@ -254,6 +254,50 @@ class Orchestrator:
         self._data_store = data_store
         self._cycle_id: str | None = None
 
+    def _extract_json(self, response: str) -> dict | None:
+        """Extract JSON object from AI response text.
+
+        Handles responses that wrap JSON in explanatory text.
+        Uses brace-depth tracking to find the outermost JSON object.
+        """
+        # Try direct parse first (entire response is JSON)
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+
+        # Find the first { and walk to its matching }
+        start = response.find("{")
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(start, len(response)):
+            c = response[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == "\\":
+                escape_next = True
+                continue
+            if c == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(response[start:i + 1])
+                    except json.JSONDecodeError:
+                        return None
+        return None
+
     async def _store_thought(
         self, step: str, model: str, input_summary: str, full_response: str, parsed_result=None,
     ) -> None:
@@ -549,17 +593,9 @@ Analyze and decide. Respond in JSON format."""
         )
 
         # Parse JSON from response
-        parsed = None
-        try:
-            # Find JSON in response
-            start = response.find("{")
-            end = response.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = json.loads(response[start:end])
-        except json.JSONDecodeError:
-            log.warning("orchestrator.json_parse_failed", response=response[:200])
-
+        parsed = self._extract_json(response)
         if parsed is None:
+            log.warning("orchestrator.json_parse_failed", response=response[:200])
             parsed = {"decision": "NO_CHANGE", "reasoning": "Failed to parse analysis response"}
 
         await self._store_thought("analysis", "opus", prompt[:500], response, parsed)
@@ -669,11 +705,8 @@ Is this classification correct?
                 purpose=f"code_review_attempt_{attempt+1}",
             )
 
-            try:
-                start = review_response.find("{")
-                end = review_response.rfind("}") + 1
-                review = json.loads(review_response[start:end])
-            except (json.JSONDecodeError, ValueError):
+            review = self._extract_json(review_response)
+            if review is None:
                 review = {"approved": False, "feedback": "Failed to parse review"}
 
             await self._store_thought(f"code_review_{attempt+1}", "opus", review_prompt[:500], review_response, review)
@@ -803,11 +836,8 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 purpose=f"analysis_review_{module_name}_attempt_{attempt+1}",
             )
 
-            try:
-                start = review_response.find("{")
-                end = review_response.rfind("}") + 1
-                review = json.loads(review_response[start:end])
-            except (json.JSONDecodeError, ValueError):
+            review = self._extract_json(review_response)
+            if review is None:
                 review = {"approved": False, "feedback": "Failed to parse review"}
 
             await self._store_thought(f"analysis_review_{module_name}_{attempt+1}", "opus", review_prompt[:500], review_response, review)

@@ -131,11 +131,11 @@ class DataStore:
                 count = await self.store_candles(symbol, "1h", hourly)
                 total_aggregated += count
 
-            # Delete old 5m candles
-            await self._db.execute(
-                "DELETE FROM candles WHERE symbol = ? AND timeframe = '5m' AND timestamp < ?",
-                (symbol, cutoff),
-            )
+                # Only delete 5m candles after successful aggregation
+                await self._db.execute(
+                    "DELETE FROM candles WHERE symbol = ? AND timeframe = '5m' AND timestamp < ?",
+                    (symbol, cutoff),
+                )
 
         await self._db.commit()
         if total_aggregated > 0:
@@ -182,10 +182,11 @@ class DataStore:
                 count = await self.store_candles(symbol, "1d", daily)
                 total_aggregated += count
 
-            await self._db.execute(
-                "DELETE FROM candles WHERE symbol = ? AND timeframe = '1h' AND timestamp < ?",
-                (symbol, cutoff),
-            )
+                # Only delete 1h candles after successful aggregation
+                await self._db.execute(
+                    "DELETE FROM candles WHERE symbol = ? AND timeframe = '1h' AND timestamp < ?",
+                    (symbol, cutoff),
+                )
 
         await self._db.commit()
         if total_aggregated > 0:

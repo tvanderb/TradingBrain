@@ -71,8 +71,8 @@
 - Pipeline: backtest → paper test → deploy
 
 ## Strategy Failure: Automatic Rollback
-- **Shell-enforced**: 5% portfolio drop/day → halt + rollback, 10 consecutive losses → pause, crashes → immediate rollback
-- **Orchestrator-level**: Win rate <40% over 30 trades, negative expectancy over 1 week, Sharpe <0.3 over 2 weeks, drawdown >8%
+- **Shell-enforced**: Risk limits in `config/risk_limits.toml` — daily loss halt, drawdown halt, crashes → immediate rollback. Values are dynamic (pulled from config at runtime).
+- **Orchestrator-level**: No hardcoded thresholds. Per the fund mandate framework (Sessions 7-8), the orchestrator uses its own judgment based on identity + full awareness of system state. No numeric triggers — the aligned agent decides when to act.
 
 ## Data Retention: 7 Years, Tiered
 - 5-min candles: 30 days → aggregate to 1-hour
@@ -87,12 +87,11 @@
 - Yearly archives available for deep reference but not loaded by default
 - Prevents context snowball over years of operation
 
-## Performance Criteria (Priority)
-1. Expectancy = (win_rate × avg_win) - (loss_rate × avg_loss)
-2. Win Rate
-3. Sharpe Ratio
-4. P&L (outcome metric)
-- Also track: Profit Factor, Max Drawdown, Time in Market
+## Performance Criteria
+- **Superseded by fund mandate** (Sessions 7-8): "Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund."
+- No prioritized numeric targets — orchestrator determines what matters via identity + awareness
+- All metrics tracked by truth benchmarks: expectancy, win rate, P&L, profit factor, drawdown, fees
+- Orchestrator decides relative importance based on context, not hardcoded priority order
 
 ## Skills Library
 - Agent builds reusable indicator functions in `strategy/skills/`
@@ -137,12 +136,10 @@
 - **What**: All orchestrator inputs are explicitly labeled by category (ground truth / its analysis / its strategy / user constraints)
 - **Why**: Orchestrator must understand what it can change vs what it should trust. Without this, it might try to "fix" truth benchmark numbers by changing the statistics module instead of fixing the strategy.
 
-### Decision: Explicit Orchestrator Goals
-- **What**: Clear, prioritized goals embedded in the orchestrator's system prompt
-- **Why**: Without explicit goals, the orchestrator optimizes for whatever seems locally reasonable. Could lead to random changes, over-trading, or analysis paralysis.
-- **Primary**: Positive expectancy after fees
-- **Secondary**: Win rate > 45%, Sharpe > 0.3, positive monthly P&L
-- **Meta**: Conservative, build understanding, improve observability, institutional memory
+### Decision: Fund Mandate Replaces Explicit Goals (Sessions 7-8)
+- **What**: Scrapped prioritized numeric goals. Replaced with a fund mandate: "Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund."
+- **Why**: Per "maximize awareness, minimize direction" framework — numeric targets are directives. A well-informed agent with the right identity decides what to optimize. The mandate is the investor's voice; the manager decides how.
+- **See**: discussions.md Sessions 7-8 for full framework
 
 ### Decision: Statistics Module Code Review — Mathematical Focus
 - **What**: Opus code review for statistics module must verify mathematical correctness, not just code safety
@@ -171,11 +168,8 @@
 - **What**: Add `strategy_regime` column to trades and signals tables
 - **Why**: Records what the strategy believed the regime was at decision time — useful as a fact about the decision process, not a fact about the market. Analysis modules can compare this against their own regime assessment.
 
-### Decision: Aggressive Tilt — Low-Frequency High-Conviction Goals (Session 6)
-- **What**: Replaced win rate and Sharpe ratio targets with profit factor and avg_win/avg_loss ratio. Loosened risk limits to give system room for asymmetric payoff strategies. Added fee-awareness meta-goal.
-- **Why**: The fee wall (0.65-0.80% round-trip) means the system needs 1.5-2% moves to profit. This naturally favors fewer, bigger trades over frequent small-edge trades. A trend-following strategy can be very profitable at 30% win rate if wins are 3x larger than losses. The old 45% win rate target would push the orchestrator toward high-frequency approaches that get eaten by fees.
-- **Changes**:
-  - **Goals**: Win rate >45% → profit factor >1.2 + avg_win/avg_loss >2.0. Sharpe >0.3 → informational only. Added fee-awareness: expected move must be >3x round-trip fees.
-  - **Risk limits**: max_trade_pct 5%→7%, max_position_pct 10%→15%, max_daily_loss 3%→6%, max_drawdown 10%→12%, consecutive_losses 10→disabled (999), rollback_daily_loss 5%→8%, default_trade_pct 2%→3%, default_take_profit 4%→6%.
-  - **Philosophy**: Lower the floor on what's acceptable while learning (profit factor 1.2, drawdown 12%), raise the bar on what constitutes a good trade (2.0 reward-to-risk, 3x fees). Drawdown is the real safety net, not streak length.
-- **Risk**: Wider limits mean the system can lose more before halting ($24 vs $20 on $200). Acceptable because: still survivable, and over-constraining early prevents the system from finding its edge.
+### Decision: Loosened Risk Limits for Learning Phase (Session 6)
+- **What**: Widened risk limits to give system room for asymmetric payoff strategies during learning.
+- **Why**: Fee wall (0.65-0.80% round-trip) naturally favors fewer, bigger trades. Over-constraining early prevents the system from finding its edge.
+- **Risk limit changes**: max_trade_pct 5%→7%, max_position_pct 10%→15%, max_daily_loss 3%→6%, max_drawdown 10%→12%, consecutive_losses 10→disabled (999), rollback_daily_loss 5%→8%, default_trade_pct 2%→3%, default_take_profit 4%→6%.
+- **Note**: The specific numeric *goals* from Session 6 (profit factor >1.2, avg_win/avg_loss >2.0) were subsequently scrapped in Sessions 7-8 in favor of the fund mandate. The risk *limits* above remain in config.

@@ -12,6 +12,8 @@ Sends notifications for:
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from telegram.ext import Application
 
@@ -32,10 +34,16 @@ class Notifier:
         if not self._app or not self._chat_id:
             log.debug("notifier.skip", reason="no app or chat_id")
             return
-        try:
-            await self._app.bot.send_message(chat_id=self._chat_id, text=text[:4096])
-        except Exception as e:
-            log.error("notifier.send_failed", error=str(e))
+        for attempt in range(2):
+            try:
+                await self._app.bot.send_message(chat_id=self._chat_id, text=text[:4096])
+                return
+            except Exception as e:
+                if attempt == 0:
+                    log.warning("notifier.send_retry", error=str(e))
+                    await asyncio.sleep(1)
+                else:
+                    log.error("notifier.send_failed", error=str(e))
 
     async def trade_executed(self, trade: dict) -> None:
         action = trade.get("action", "?")

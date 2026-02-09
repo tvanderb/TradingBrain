@@ -116,7 +116,9 @@ class TradingBrain:
             try:
                 await self._ai.initialize()
             except Exception as e:
-                log.warning("ai.init_failed", error=str(e))
+                # System can still trade without AI — orchestration will be unavailable
+                log.error("ai.init_failed", error=str(e),
+                          note="Nightly orchestration will be unavailable")
 
         # 6. Reporter & Orchestrator
         self._reporter = Reporter(self._db)
@@ -455,6 +457,8 @@ class TradingBrain:
         except Exception as e:
             import traceback
             log.error("scan.failed", error=str(e), traceback=traceback.format_exc())
+            if self._notifier:
+                await self._notifier.system_error(f"Scan loop failed: {e}")
 
     async def _position_monitor(self) -> None:
         """Check stop-loss and take-profit on open positions."""
@@ -468,8 +472,8 @@ class TradingBrain:
                 try:
                     ticker = await self._kraken.get_ticker(symbol)
                     prices[symbol] = float(ticker["c"][0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("position_monitor.price_fetch_failed", symbol=symbol, error=str(e))
 
         triggered = await self._portfolio.update_prices(prices)
         for t in triggered:
@@ -554,6 +558,8 @@ class TradingBrain:
     async def _emergency_stop(self) -> None:
         """Close all positions immediately."""
         log.warning("brain.emergency_stop")
+        await self._notifier.system_error("Emergency stop initiated — closing all positions")
+
         positions = await self._db.fetchall("SELECT * FROM positions")
         for pos in positions:
             try:
@@ -570,6 +576,18 @@ class TradingBrain:
                 )
             except Exception as e:
                 log.error("emergency.close_failed", symbol=pos["symbol"], error=str(e))
+
+        # Verify all positions were closed
+        remaining = await self._db.fetchall("SELECT symbol FROM positions")
+        if remaining:
+            symbols = [r["symbol"] for r in remaining]
+            log.error("emergency.positions_remaining", symbols=symbols)
+            await self._notifier.system_error(
+                f"Emergency stop incomplete — positions remaining: {', '.join(symbols)}"
+            )
+        else:
+            log.info("emergency.all_positions_closed")
+            await self._notifier.system_error("Emergency stop complete — all positions closed")
 
     async def stop(self) -> None:
         """Graceful shutdown sequence."""

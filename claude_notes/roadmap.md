@@ -9,16 +9,14 @@
 **Build an autonomous, self-evolving crypto trading system that generates consistent risk-adjusted returns through continuous strategy refinement, starting from a $200 paper account and scaling to real capital once profitability is proven.**
 
 ### Success Criteria
-| Metric | Paper Phase Target | Live Phase Target |
+> **Note**: Specific numeric targets below are from Session 6 and serve as rough benchmarks only. Per the fund mandate framework (Sessions 7-8), the orchestrator is NOT given these as goals. The mandate is: "Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund." The orchestrator determines what matters based on its own judgment.
+
+| Metric | Paper Phase Benchmark | Live Phase Benchmark |
 |--------|-------------------|-------------------|
 | Expectancy | > 0 (any positive) | > 0.5% per trade |
-| Profit Factor | > 1.2 | > 1.5 |
-| Avg Win / Avg Loss | > 2.0 | > 2.5 |
-| Max Drawdown | < 12% | < 10% |
+| Max Drawdown | < 12% (shell-enforced) | < 10% |
 | Monthly P&L | Positive 2 of 3 months | Consistently positive |
 | Strategy Evolution | At least 3 iterations | Stabilizing, fewer changes |
-
-*Note: Win rate and Sharpe ratio are tracked as informational metrics but not optimized for. A 30% win rate with 3:1 reward-to-risk is more profitable than 60% win rate with 0.5:1. Sortino ratio preferred over Sharpe (doesn't penalize upside volatility).*
 
 ### What This System Is
 - A mini autonomous crypto hedge fund operating 24/7
@@ -59,18 +57,18 @@
 | Main (lifecycle, scheduler, scan loop) | ~600 | - | Working |
 | Strategy v001 (EMA + RSI + Volume) | ~160 | - | Running |
 | Skills library (indicators) | ~120 | 1 | Working |
-| Integration tests | ~350 | 18/18 | All passing |
-| **Total** | **~3,840** | **18** | **All green** |
+| Integration tests | ~500+ | 35/35 | All passing |
+| **Total** | **~4,500+** | **35** | **All green** |
 
 ### Known Issues (Non-Critical for Paper)
 
-1. **Paper test duration not enforced** — orchestrator records `paper_days` in DB but doesn't gate deployment on completion. Impact: low (whole system is paper mode anyway).
+1. **Paper test duration not enforced** — orchestrator records `paper_days` in DB but doesn't gate deployment on completion. Impact: low (whole system is paper mode anyway). Orchestrator is now *aware* of active paper tests (Session 8).
 
 2. **Live order fill tracking missing** — places Kraken orders but doesn't confirm fills. Impact: none in paper mode. Must fix before live.
 
-3. **WebSocket max-retry silent failure** — if WS hits 5 retries, falls back to REST silently. No Telegram alert. Impact: slower data, user unaware.
+3. ~~**WebSocket max-retry silent failure**~~ — **FIXED** (Session 9): `set_on_failure()` callback on KrakenWebSocket, Telegram alert via `websocket_failed()`.
 
-4. **Import path fragility** — `from strategy.skills import compute_indicators` relies on CWD being project root. Would break if run from different directory.
+4. ~~**Import path fragility**~~ — **FIXED** (Session 9): Moved to top-level import in `src/main.py`.
 
 ---
 
@@ -152,15 +150,15 @@
 
 ## Necessary Changes by Phase
 
-### Before Unattended Paper Trading (Now)
+### Before Unattended Paper Trading — ALL DONE
 - [x] PID lockfile prevents multiple instances
 - [x] WebSocket reconnection with backoff
-- [x] **Test Telegram commands from phone** — confirm bot responds to /status, /report, /positions
-- [x] **Commit all code to git** — nothing committed since v2 build
-- [ ] **Statistics shell** — truth benchmarks + two analysis modules (see Phase 0 below)
-- [ ] **Scan results collection** — store indicator state + strategy_regime every scan
-- [ ] **Regime tagging** — tag strategy_regime on trades and signals (what strategy thought, not ground truth)
-- [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks, two analysis reports
+- [x] Test Telegram commands from phone
+- [x] Commit all code to git
+- [x] Statistics shell — truth benchmarks + two analysis modules
+- [x] Scan results collection — indicator state + strategy_regime every scan
+- [x] Regime tagging — strategy_regime on trades and signals
+- [x] Orchestrator awareness upgrade — labeled inputs, truth benchmarks, analysis reports, drought detection, paper test awareness
 
 ### Before First Orchestration Cycle
 - [x] **Orchestrator thought spool** — `orchestrator_thoughts` DB table stores every AI response per cycle. Browsable via `/thoughts` (cycle list) and `/thought <cycle> <step>` (full response). Instrumented at all 5 AI call sites in orchestrator.
@@ -170,7 +168,7 @@
 - [ ] **Server-side stop-losses** — use Kraken's conditional orders, not scan-based SL
 - [ ] **Position reconciliation on startup** — compare DB vs Kraken actual positions
 - [ ] **Paper test enforcement** — gate deployment on elapsed paper test duration
-- [ ] **WebSocket failure alerting** — notify user when WS dies permanently
+- [x] **WebSocket failure alerting** — DONE (Session 9): `set_on_failure()` callback + Telegram alert
 - [ ] **VPS deployment** — systemd service with auto-restart, monitoring
 - [ ] **Live mode testing on testnet** — verify Kraken API key permissions, order placement
 
@@ -184,10 +182,10 @@
 
 ## Future Implementation Roadmap
 
-### Phase 0: Statistics Shell & Orchestrator Upgrade (Build Next)
-**Goal**: Give the orchestrator situational awareness, hard-computed statistics, and clear goals before it runs its first cycle.
+### Phase 0: Statistics Shell & Orchestrator Upgrade — COMPLETE
+**Goal**: Give the orchestrator situational awareness, hard-computed statistics, and clear mandate before it runs its first cycle.
 
-**This must be built before unattended paper trading.** Without it, the orchestrator will make decisions based on incomplete context and potentially miscalculated statistics.
+> All 9 implementation steps complete (Sessions 5-9). Truth benchmarks, both analysis modules, scan results collection, orchestrator integration, thought spool, observations table, historical data bootstrap, strategy evolution improvements, and rough fixes all done. 35/35 tests passing.
 
 **Architecture**: Two flexible analysis modules + one rigid truth benchmarks layer:
 - **Truth Benchmarks** (rigid shell) — simple verifiable metrics, orchestrator cannot modify
@@ -340,7 +338,7 @@ After all steps:
 - First quarterly document distillation
 - Expanded indicator skills library
 
-**Exit criteria**: Positive expectancy over 30+ trades, win rate > 45%
+**Exit criteria**: Positive expectancy over 30+ trades, strategy stabilizing
 
 ### Phase 3: Go Live (Months 3-4)
 **Goal**: Deploy with real money, smallest viable positions.
@@ -364,7 +362,7 @@ After all steps:
 - Portfolio-level risk management (Kelly criterion)
 - Fee tier progression (volume → lower fees → better profitability)
 
-**Exit criteria**: Consistent monthly profitability, Sharpe > 0.5
+**Exit criteria**: Consistent monthly profitability, stable strategy
 
 ### Phase 5: Full Hedge Fund Mode (Months 9-12)
 **Goal**: Sophisticated multi-strategy system.
@@ -423,9 +421,10 @@ The shell-enforced risk limits exist to prevent catastrophic loss, not to optimi
 ### When to Go Live
 Checklist before deploying real money:
 1. Positive paper expectancy over 50+ trades
-2. Win rate above 45% sustained over 2+ weeks
-3. No shell-triggered rollbacks in last 2 weeks
-4. Strategy has survived at least one market regime change
-5. VPS deployed and running 24/7 for 1+ week without issues
-6. User has tested all Telegram commands and trusts the system
-7. Live-mode changes implemented (order fill tracking, server-side stops)
+2. No shell-triggered rollbacks in last 2 weeks
+3. Strategy has survived at least one market regime change
+4. VPS deployed and running 24/7 for 1+ week without issues
+5. User has tested all Telegram commands and trusts the system
+6. Live-mode changes implemented (order fill tracking, server-side stops)
+
+> **Note**: Removed specific win rate target (45%) — per fund mandate, the orchestrator determines what success looks like.

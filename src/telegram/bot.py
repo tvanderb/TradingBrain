@@ -22,7 +22,8 @@ class TelegramBot:
     async def start(self) -> None:
         """Initialize and start the Telegram bot."""
         if not self._config.enabled or not self._config.bot_token:
-            log.info("telegram.disabled")
+            log.warning("telegram.disabled", enabled=self._config.enabled,
+                        has_token=bool(self._config.bot_token))
             return
 
         self._app = (

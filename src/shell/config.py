@@ -195,4 +195,30 @@ def load_config() -> Config:
     config.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     config.telegram.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
+    # Validate critical values
+    _validate_config(config)
+
     return config
+
+
+def _validate_config(config: Config) -> None:
+    """Validate config values are within sane ranges."""
+    errors = []
+
+    if not (0 < config.risk.max_trade_pct <= 1):
+        errors.append(f"max_trade_pct must be 0-1, got {config.risk.max_trade_pct}")
+    if not (0 < config.risk.max_position_pct <= 1):
+        errors.append(f"max_position_pct must be 0-1, got {config.risk.max_position_pct}")
+    if not (0 < config.risk.max_daily_loss_pct <= 1):
+        errors.append(f"max_daily_loss_pct must be 0-1, got {config.risk.max_daily_loss_pct}")
+    if not (0 < config.risk.max_drawdown_pct <= 1):
+        errors.append(f"max_drawdown_pct must be 0-1, got {config.risk.max_drawdown_pct}")
+    if config.risk.max_positions < 1:
+        errors.append(f"max_positions must be >= 1, got {config.risk.max_positions}")
+    if not config.symbols:
+        errors.append("At least one trading symbol must be configured")
+    if config.mode not in ("paper", "live"):
+        errors.append(f"mode must be 'paper' or 'live', got '{config.mode}'")
+
+    if errors:
+        raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

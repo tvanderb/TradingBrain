@@ -597,6 +597,9 @@ async def test_readonly_db_blocks_writes():
             "ALTER TABLE signals ADD COLUMN test TEXT",
             "CREATE TABLE evil (id INTEGER)",
             "  INSERT INTO signals (symbol, action, size_pct) VALUES ('X', 'BUY', 0.01)",
+            # Multi-statement bypass attempts
+            "SELECT 1; DROP TABLE signals",
+            "SELECT 1; INSERT INTO signals (symbol) VALUES ('X')",
         ]
 
         for sql in blocked_queries:

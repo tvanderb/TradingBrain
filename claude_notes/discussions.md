@@ -14,29 +14,8 @@
 - `/ask` — the ONE place where on-demand Claude calls are acceptable (user explicitly asks a question)
 - `/report` old behavior was wrong: it called Claude with no market data, Claude said "I don't have access to market data." Even after I tried fixing it to include data, user pointed out the fundamental design issue: reports should reflect existing calculations, not generate new ones.
 
-## Design Direction: Self-Evolution (Major Open Thread)
-User wants 4 levels. Currently only Level 1 (parameter tuning) is implemented.
-
-**Level 1: Parameter Tuning** (DONE)
-- Executive brain (Opus) reads performance, adjusts numbers in strategy_params.json
-- Max 20% change per cycle, all changes logged
-
-**Level 2: Prompt Evolution** (NOT STARTED)
-- Modify how the analyst brain evaluates signals
-- Needs safety rails: A/B testing? Rollback mechanism?
-
-**Level 3: Strategy Composition** (NOT STARTED)
-- Enable/disable/combine indicator modules
-- Could mean dynamic strategy weighting, adding new indicator combos
-
-**Level 4: Code Generation** (NOT STARTED)
-- Write new Python strategy functions
-- Highest risk, needs sandbox, validation, human review
-- User knows this is ambitious but wants it
-
-**Key user statement**: "i would like to be involved with that discussion to the furthest extent" — this means a dedicated collaborative planning session, not me designing it solo.
-
-**Status**: Deferred until paper trading validates the base system. User said "let's paper test then go back to working on expanding to a more ambitious plan."
+## Design Direction: Strategy Evolution
+> **Note**: v1 had a 4-level evolution concept (parameter tuning → prompt evolution → strategy composition → code gen). This was replaced entirely by the IO-container architecture where the orchestrator rewrites the strategy module directly. Sonnet generates code, Opus reviews, sandbox validates, backtest → paper test → deploy. See architecture.md for current design.
 
 ## Discussion: Exchange Selection
 - Started with Alpaca (US stocks + crypto)
@@ -169,29 +148,14 @@ User proposed scrapping the three-brain architecture entirely in favor of a fund
 - Read by orchestrator EVERY night before decisions
 - Prevents reactive changes, enforces deliberation
 
-### Performance Criteria (Priority Order)
-1. **Expectancy**: (win_rate × avg_win) - (loss_rate × avg_loss) — most important
-2. **Win Rate**: User priority, also affects drawdown management
-3. **Sharpe Ratio**: Risk-adjusted returns
-4. **P&L**: Outcome metric, influenced by sizing
-- Also track: Profit Factor, Max Drawdown, Time in Market
+### Performance Criteria
+> **Superseded** by fund mandate (Sessions 7-8). No prioritized list — orchestrator determines what matters. All metrics tracked by truth benchmarks (expectancy, win rate, P&L, profit factor, drawdown, fees). Mandate: "Portfolio growth with capital preservation. Avoid major drawdowns."
 
 ### Strategy Failure Thresholds
-**Automatic rollback (shell-enforced):**
-- 5% portfolio drop in a day → halt + rollback
-- 10 consecutive losses → pause + review
-- Strategy crashes → immediate rollback
+> **Note**: Specific values below are from the v2 design phase and were subsequently updated. Shell-enforced limits now come from `config/risk_limits.toml` (6% daily loss, 12% drawdown, 999 consecutive losses). Orchestrator review triggers were **removed entirely** per the fund mandate framework (Sessions 7-8) — the orchestrator uses its own judgment, not hardcoded thresholds.
 
-**Orchestrator review triggers:**
-- Win rate < 40% over 30+ trades
-- Negative expectancy over 1 week
-- Sharpe < 0.3 over 2 weeks
-- Max drawdown > 8%
-
-**Normal (not failure):**
-- 3-5 losing trades in a row
-- One bad day
-- Temporary win rate dip during regime change
+**Shell-enforced (values from config):** Daily loss halt, drawdown halt, strategy crashes → rollback.
+**Orchestrator:** No numeric triggers — uses identity + awareness to decide when to act.
 
 ### Strategy Index (Database)
 - Every version cataloged with metadata
@@ -344,19 +308,8 @@ The orchestrator must understand its own architecture — what it receives and w
 
 This labeling must be explicit in the orchestrator's system prompt so it reasons correctly about what to trust vs what to question.
 
-### Orchestrator Goals — Explicit and Prioritized
-**Primary goal**: Achieve positive expectancy after fees.
-**Secondary goals** (priority order):
-1. Win rate above 45% sustained
-2. Sharpe ratio above 0.3
-3. Positive monthly net P&L
-
-**Meta-goals** (how it operates):
-- Be conservative — when uncertain, don't change
-- Build understanding before acting — accumulate data, observe conditions
-- Improve its own observability — evolve the statistics module
-- Maintain institutional memory via strategy document
-- Recognize context — "3 days running with 0 trades" ≠ "3 months with 0 trades"
+### Orchestrator Goals — Superseded
+> **Note**: This section was from Session 4. It was scrapped in Sessions 7-8 and replaced by the fund mandate framework: "Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund." No explicit goals, no meta-goals as directives — the orchestrator's behavior emerges from identity (Layer 1) + system awareness (Layer 2) + institutional memory (Layer 3). See "Orchestrator Prompt Design Framework" section below.
 
 ### Statistics Module vs Strategy Module
 
@@ -509,13 +462,8 @@ Full critical review of the system identified 12 categories of risks and gaps. U
 - **User's analogy**: "Think of the orchestrator like a hedge fund manager and the user is an investor. The investor can take his money out, but he doesn't get to control the operations at the firm."
 - **Direction**: No `/rollback` command. No user intervention in operations. Design the orchestrator to be competent enough that manual intervention is unnecessary. User's only controls: `/pause`, `/resume`, `/kill` (pull money out).
 
-### Open Questions Requiring Discussion
-1. ~~Cold start strategy~~ — RESOLVED (see round 2 below)
-2. ~~Paper test enforcement~~ — RESOLVED (see round 2 below)
-3. ~~Strategy evolution alternatives~~ — RESOLVED (see round 2 below)
-4. ~~Version-partitioned performance tracking~~ — RESOLVED (see round 2 below)
-5. ~~Strategy document redesign~~ — RESOLVED (see round 2 below)
-6. ~~Supervised cold start period~~ — RESOLVED (see round 2 below)
+### Open Questions — ALL RESOLVED
+All 6 open questions from round 1 were resolved in round 2 (Session 7) and subsequently implemented (Sessions 8-9). See round 2 sections below and progress.md for implementation details.
 
 ---
 
@@ -749,14 +697,14 @@ JSON response changes needed:
 
 Replaced `_update_strategy_doc()` with `_store_observation()`. Daily findings now go to `orchestrator_observations` DB table. Strategy doc no longer appended nightly.
 
-### 5. `src/orchestrator/orchestrator.py` — _gather_context() — MOSTLY FIXED
+### 5. `src/orchestrator/orchestrator.py` — _gather_context() — FIXED
 
-**Missing context that should be added:**
-- ~~Active paper test status and what deploying would do~~ — FIXED (commit 7c424f2)
-- ~~Signal drought detection results~~ — FIXED (commit 87d93bc)
-- ~~Per-version performance breakdown~~ — FIXED (commit 7c424f2, via trade_performance by_version)
-- ~~Last N daily observations (from new DB table)~~ — FIXED (commit 7c424f2)
-- Available historical data summary (how much candle data exists) — NOT YET (depends on bootstrap)
+All missing context has been added:
+- ~~Active paper test status~~ — FIXED (commit 7c424f2)
+- ~~Signal drought detection~~ — FIXED (commit 87d93bc)
+- ~~Per-version performance breakdown~~ — FIXED (commit 7c424f2)
+- ~~Last N daily observations~~ — FIXED (commit 7c424f2)
+- ~~Historical data bootstrap~~ — FIXED (Session 9, `_bootstrap_historical_data()`)
 
 ### 6. `strategy/strategy_document.md` — Content
 
@@ -782,11 +730,9 @@ Added `orchestrator_observations` table with index.
 
 Added `by_version` section with full metrics (trades, wins, win_rate, net_pnl, fees, expectancy, first/last trade dates) grouped by `strategy_version`.
 
-### 9. `src/main.py` — Missing historical data bootstrap
+### ~~9. `src/main.py` — Missing historical data bootstrap~~ FIXED (Session 9)
 
-**Problem:** On first startup with empty DB, the system has no candle data until the first scan. Orchestrator sees empty market analysis.
-
-**Action:** On startup, if candle tables are empty, poll Kraken for historical 5m data (30 days, ~8,640 candles/symbol, paginated).
+`_bootstrap_historical_data()` in `src/main.py` — paginates Kraken OHLC API (720 candles/request, rate-limited 1/sec) to fetch ~30 days of 5m data per symbol on startup.
 
 ### ~~10. `src/orchestrator/orchestrator.py` — _run_backtest()~~ FIXED (commit c9ae53e)
 
@@ -1043,30 +989,107 @@ The orchestrator runs nightly, but these processes run continuously without its 
 - Performance summary (last 7 days)
 - Token usage (daily)
 
-**Will be added after implementation:**
-- Paper test status (active test? which version? when does it end? consequence of deploying now)
-- Signal drought detection (how long since last signal? is this a drought?)
-- Per-version performance breakdown (how did v001 perform vs v002?)
-- Recent daily observations (from new observations table, last 7-14 days)
-- Historical data availability (how much candle data exists per symbol?)
+**Also implemented (Session 8-9):**
+- Paper test status (active test, version, consequence of deploying now)
+- Signal drought detection (last signal time, 7d/30d counts, 24h scans)
+- Per-version performance breakdown (trade_performance by_version section)
+- Recent daily observations (from orchestrator_observations table, last 7-14 days)
+- Historical data bootstrap (30 days of 5m candles on first startup)
 
-#### Response Format Changes Needed
+#### Response Format — To Be Updated During Prompt Writing
 
-Current JSON response includes `strategy_doc_update` which forces nightly appends to the strategy document. After implementation:
-- **Remove** `strategy_doc_update`
-- **Add** observation fields (daily findings → observations DB table, rolling 30-day window)
-- **Add** optional strategy doc flag — orchestrator can flag when it has a meaningful discovery worth adding to institutional memory (rare, not nightly)
+Current JSON response still includes `strategy_doc_update`. During prompt writing phase:
+- Replace with observation fields (daily findings → `orchestrator_observations` table, rolling 30d)
+- Add optional strategy doc flag for rare meaningful discoveries
+- `_store_observation()` method already implemented (Session 8)
 
 ---
 
-### Post-Implementation To-Do
+### Post-Implementation To-Do — CURRENT PHASE
 
-All implementation changes are now COMPLETE. Remaining prompt writing tasks:
+1. [x] **System audit** — DONE (Session 10). 21 findings across 3 categories. See progress.md for table.
+2. [x] **Fix all 21 audit findings** — DONE (Session 10). 16 fixes applied, 5 triaged as not actionable. 35/35 tests passing.
+3. [ ] **Write Layer 1 prompt content** — translate identity design into actual prompt text
+4. [ ] **Write Layer 2 prompt content** — describe the system AS IT ACTUALLY IS
+5. [ ] **Write fund mandate** — translate mandate into prompt text
+6. [ ] **Write response format** — finalize JSON schema with observations mechanism
+7. [ ] **Write `_analyze()` user prompt** — clean version with dynamic config, no editorial commentary
+8. [x] ~~Strip strategy_document.md~~ — DONE (commit c9ae53e)
+9. [ ] **End-to-end review** — verify all three layers work together, no directive leakage
 
-1. **Write Layer 2 prompt content** — describe the system AS IT ACTUALLY IS after implementation
-2. **Write Layer 1 prompt content** — translate the identity design into actual prompt text
-3. **Write fund mandate** — translate the decided mandate into prompt text
-4. **Write response format** — finalize JSON schema with observations mechanism
-5. **Write `_analyze()` user prompt** — clean version with dynamic config, no editorial commentary
-6. ~~**Strip strategy_document.md**~~ — DONE (commit c9ae53e)
-7. **Review everything end-to-end** — verify all three layers work together, no directive leakage
+---
+
+## System Audit — Session 10 (2026-02-09)
+
+Full codebase audit before prompt writing phase. User directive: "let's look for oversights, for unpolished code, rough code, potential errors. let's think about foggy observability. let's think about graceful error handling. let's look at everything and make sure it's clean."
+
+Three parallel audit agents scanned all source files. 21 findings organized into three categories.
+
+### Category 1: Core Functionality — What's Actually Broken
+
+**#1 — Backtester short P&L inverted** (`src/strategy/backtester.py:202`)
+P&L always uses `(exit - entry) / entry`. For short positions, should be `(entry - exit) / entry`. All backtest metrics (expectancy, win rate, Sharpe) are wrong for short strategies. Orchestrator could deploy or reject strategies based on incorrect backtest data.
+
+**#2 — Kraken API assumes non-empty dicts** (`src/shell/kraken.py:99,118`)
+`get_ohlc()` and `get_ticker()` use `list(result.keys())[0]` with no bounds check. If Kraken returns empty result (API hiccup, pair delisted), `IndexError` crashes the entire scan cycle. No recovery, no alert.
+
+**#3 — Portfolio cash = 0 in live mode** (`src/shell/portfolio.py:56-63`)
+If `daily_performance` table is empty and mode is live, `_cash` stays at default 0.0. Paper mode falls back to `paper_balance_usd`; live mode has no fallback. All position sizing wrong from the start.
+
+**#4 — JSON parsing from LLM fragile** (`src/orchestrator/orchestrator.py:553,673,807`)
+Uses `rfind("}")` to find end of JSON in free-text LLM response. If LLM wraps JSON in code blocks or includes multiple JSON objects, grabs wrong brace. No validation of required keys. Missing `decision` key silently treated as `None`. Three call sites with same pattern (analysis, code review, analysis review).
+
+**#5 — Data aggregation can lose candles** (`src/shell/data_store.py:130-140`)
+Aggregation DELETEs 5m candles per-symbol, then INSERTs 1h aggregates. If INSERT fails mid-batch (e.g., disk error), 5m candles already gone. Single commit at end means partial failure = data loss.
+
+**#6 — Daily start value resets on restart** (`src/shell/portfolio.py:65`)
+`_daily_start_value` set to current portfolio value on init, not actual day-start. Mid-day restart → daily P&L calculated from restart point → risk manager's daily loss limit enforced against wrong baseline.
+
+### Category 2: Graceful Autonomy — Silent Failures & Observability Gaps
+
+**#7 — Scan loop failures silent** (`src/main.py:455-457`)
+Exception is logged but no Telegram alert sent. APScheduler won't retry; next scan is 5 minutes away. System appears running while doing nothing. User unaware.
+
+**#8 — Telegram disabled silently** (`src/telegram/bot.py:24-26`)
+If bot_token missing or `enabled=false`, system starts normally with zero observability. Emergency alerts never reach user. Only debug-level log line indicates Telegram is off.
+
+**#9 — Notifier no retry** (`src/telegram/notifications.py:31-38`)
+All notifications catch exceptions and discard message. Transient Telegram API failure = critical alert permanently lost. No queue, no retry, no fallback.
+
+**#10 — WebSocket callback failures swallowed** (`src/shell/kraken.py:268-277`)
+Callbacks wrapped in `except (json.JSONDecodeError, KeyError): continue`. If a registered callback throws, it's silently caught. Price update callbacks could stop working. No logging.
+
+**#11 — AI client init failure continues** (`src/main.py:115-119`)
+If API key wrong or Anthropic down, system starts. Orchestrator never works, strategy never evolves. Only a `warning` log, no alert.
+
+**#12 — Emergency stop doesn't verify fills** (`src/main.py:554-572`)
+Sends close signals for all positions but doesn't confirm execution. If one close fails (network error), continues to next. User thinks all positions closed.
+
+**#13 — Position monitor stale prices on WS failure** (`src/main.py:459-472`)
+REST fallback can fail per-symbol with bare `except: pass`. Stop-loss/take-profit checked against outdated prices. No alert when price data is stale.
+
+**#14 — Fee check uses only first symbol** (`src/main.py:501-502`)
+Assumes all symbols have same fee tier. If symbols have different fees, wrong fees applied to some trades.
+
+### Category 3: Robustness & Cleanliness
+
+**#15 — Intent enum crashes on bad DB data** (`src/shell/portfolio.py:104,125`)
+`Intent[p.get("intent", "DAY")]` — if DB contains invalid string, `KeyError` crashes portfolio init. System can't restart until DB manually cleaned.
+
+**#16 — Sandbox tmp_path not initialized** (`src/strategy/sandbox.py:143`, `src/statistics/sandbox.py:105`)
+If exception occurs before `tmp_path = f.name`, finally block tries to unlink undefined variable. `NameError` masks real error.
+
+**#17 — ReadOnlyDB regex multi-statement bypass** (`src/statistics/readonly_db.py:17-20`)
+Only checks first statement. `"SELECT 1; DROP TABLE trades"` passes. Low practical risk (code is reviewed) but gap exists.
+
+**#18 — Token budget race condition** (`src/orchestrator/ai_client.py:84-86`)
+Check before call, deduction after. Two concurrent calls could both pass. Unlikely in current design but fragile.
+
+**#19 — No config validation** (`src/shell/config.py:105-198`)
+Invalid values load silently. `max_daily_loss_pct = 150%` accepted without warning.
+
+**#20 — Backtester first-day inflation** (`src/strategy/backtester.py:243-247`)
+`prev_day = None` means first candle triggers new day, inflating daily_values by one extra entry. Drawdown and Sharpe slightly off.
+
+**#21 — Hardcoded slippage** (`src/shell/portfolio.py:176,277`)
+Fixed at 0.05%, not configurable. Paper trading slippage doesn't reflect per-pair market reality.

@@ -28,8 +28,11 @@ class ReadOnlyDB:
 
     def _check_readonly(self, sql: str) -> None:
         """Raise ValueError if the SQL is not a read-only query."""
-        if _WRITE_PATTERNS.match(sql):
-            raise ValueError(f"Write operation blocked in read-only mode: {sql[:80]}")
+        # Check each statement to prevent multi-statement bypass (e.g. "SELECT 1; DROP TABLE")
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement and _WRITE_PATTERNS.match(statement):
+                raise ValueError(f"Write operation blocked in read-only mode: {statement[:80]}")
 
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
         """Execute a read-only SQL query."""

@@ -49,7 +49,7 @@
          │     Opus reviews for correctness   │
          │     Sandbox → Backtest → Paper     │
          │     Hot-swap if tests pass         │
-         │  6. Update strategy document       │
+         │  6. Store observations, maintain   │
          │  7. Generate report, notify user   │
          └──────────────────────────────────┘
 ```
@@ -325,10 +325,9 @@ Analyzes: trades, signals, portfolio snapshots
 | scipy/statistics | Not needed | Allowed |
 | ta (indicators) | Allowed | Allowed |
 
-### Orchestrator Goals (embedded in system prompt)
-**Primary**: Positive expectancy after fees
-**Secondary**: Win rate > 45%, Sharpe > 0.3, positive monthly P&L
-**Meta**: Conservative changes, build understanding, improve observability, maintain institutional memory
+### Orchestrator Mandate (embedded in system prompt)
+**Fund mandate**: Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund.
+**Framework**: Three-layer prompt — Identity (WHO) / System Understanding (WHAT it works with) / Institutional Memory (WHAT it learned). No numeric targets, no behavioral directives. See discussions.md Sessions 7-8.
 
 ### Updated Orchestrator Nightly Flow
 ```
@@ -349,8 +348,8 @@ Analyzes: trades, signals, portfolio snapshots
      - UPDATE_MARKET_ANALYSIS → generate → review (math focus) → deploy
      - UPDATE_TRADE_PERFORMANCE → generate → review (math focus) → deploy
      - NO_CHANGE
-9. Update strategy document
-10. Data maintenance
+9. Store observations (daily findings → orchestrator_observations DB table, rolling 30d)
+10. Data maintenance (aggregation, pruning)
 11. Send report via Telegram
 ```
 
