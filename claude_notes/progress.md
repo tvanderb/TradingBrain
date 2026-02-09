@@ -369,3 +369,98 @@ Previous 33 + 1 new: test_orchestrator_thoughts_table
 ### Current Status
 - Thought spool complete and tested
 - Ready for orchestrator integration (Steps 7-8) or first end-to-end test
+
+## Session 7 (2026-02-08, continued)
+
+### Context
+E2E orchestrator test run, system review, critical gap analysis, and extensive design discussion. No code changes — all design and documentation.
+
+### E2E Orchestrator Test — SUCCESS
+- Ran real Opus API call against seeded scan data (5 BTC, 3 ETH)
+- Cost: $0.21, decision: NO_CHANGE (correct — ranging market, 0 trades)
+- Thought spool captured 1 thought (3,456 chars), browsable
+- Proved the orchestrator makes reasonable decisions when given good context
+
+### System Critical Review
+- Reviewed full system end-to-end, identified 12 categories of risks and gaps
+- User responded to each with design direction (see discussions.md for full detail)
+- Key decisions: no hard gates (trust aligned agent), VPS-only deployment, hedge fund analogy
+
+### Orchestrator Prompt Design Framework — APPROVED
+- Three-layer framework: Identity (WHO) / System Understanding (WHAT it works with) / Institutional Memory (WHAT it learned)
+- Core philosophy: "Maximize awareness, minimize direction"
+- Identity statements vs directive statements — framework prohibits directives
+- Fund mandate replaces goals section: portfolio growth, capital preservation, avoid major drawdowns, long-term
+- This is the governing design document for ALL orchestrator prompting
+
+### Misalignment Audit
+- Documented 12 specific items across codebase that violate the new framework
+- ANALYSIS_SYSTEM prompt: heavily misaligned (full of directives, no identity layer)
+- _analyze() user prompt: minor (editorial commentary, hardcoded values)
+- Other 4 prompts (CODE_GEN, CODE_REVIEW, ANALYSIS_CODE_GEN, ANALYSIS_REVIEW): fine
+- Strategy document: pre-loaded wisdom violates "earned not pre-loaded" principle
+
+### Current Status
+- All design documented in discussions.md (Sessions 7-8 sections)
+- No code committed — all documentation and planning
+
+## Session 8 (2026-02-09)
+
+### Context
+Continuing from session 7. Focused prompt audit, identity design, Layer 2 system map, then implementation of pending changes.
+
+### Design Work Completed
+- **Focused prompt audit**: Line-by-line audit of all 5 prompts + user prompt against framework
+- **Layer classification correction**: Architecture awareness → Layer 2, not Layer 1
+- **Fund mandate decided**: Portfolio growth with capital preservation, avoid major drawdowns, long-term
+- **Layer 1 identity designed**: 6 dimensions — radical honesty (foundation), professional character, uncertainty, probabilistic thinking, relationship to change, long-term orientation
+- **Layer 2 system map**: Full map of what orchestrator can/can't do, external processes, data received, consequences of decisions. Content deferred to post-implementation.
+- **Separate prompt strings**: Layer 1 and Layer 2 will be separate constants in code
+- **Dynamic config**: Risk limits must come from config, not hardcoded
+- **Post-implementation to-do**: Write all prompt content AFTER implementation changes
+
+### Implementation Commits
+
+**Commit c9ae53e** — Infrastructure (items 1-3):
+1. `src/shell/database.py` — Added `orchestrator_observations` table + index
+2. `src/orchestrator/orchestrator.py` — Fixed backtester from 1h to 5m candles
+3. `strategy/strategy_document.md` — Stripped to factual minimum (earned knowledge only)
+4. `tests/test_integration.py` — Added observations table to required tables list
+
+**Commit 7c424f2** — Orchestrator improvements (items 4-6):
+1. `src/orchestrator/orchestrator.py` — Replaced `_update_strategy_doc()` with `_store_observation()` (writes to DB, not strategy doc)
+2. `statistics/active/trade_performance.py` — Added `by_version` section (GROUP BY strategy_version with full metrics)
+3. `src/orchestrator/orchestrator.py` — Added active paper test status + recent observations to `_gather_context()`
+
+**Commit 87d93bc** — Drought detection + prompt cleanup (items 7, 10):
+1. `src/orchestrator/orchestrator.py` — Signal drought detector in `_gather_context()` (last signal time, 7d/30d counts, 24h scans)
+2. `src/orchestrator/orchestrator.py` — Dynamic config values in `_analyze()` prompt (fees from Kraken API, risk limits from config)
+3. `src/orchestrator/orchestrator.py` — Removed editorial commentary from USER CONSTRAINTS
+4. `src/orchestrator/orchestrator.py` — Removed explicit cross-reference instruction
+5. `src/orchestrator/orchestrator.py` — Added drought, paper test, observations sections to user prompt
+
+### Files Modified This Session
+```
+src/shell/database.py              — orchestrator_observations table + index
+src/orchestrator/orchestrator.py   — _store_observation(), drought detector, dynamic config, paper test awareness, prompt cleanup
+statistics/active/trade_performance.py — by_version performance section
+strategy/strategy_document.md      — stripped to factual minimum
+tests/test_integration.py          — observations table in required list
+claude_notes/discussions.md        — extensive design documentation (Sessions 7-8)
+```
+
+### Test Count: 34/34 passing (unchanged)
+
+### Remaining Implementation Before Prompt Writing
+- [ ] Historical data bootstrap on first startup
+- [ ] Strategy evolution (targeted edits, diff to reviewer, parent_version)
+- [ ] Rough/unpolished fixes (12 items)
+- [ ] Write Layer 1, Layer 2, fund mandate, response format prompt content
+- [ ] Write clean _analyze() user prompt
+- [ ] End-to-end review
+
+### Current Status
+- Branch: v2-io-container
+- 7 of 10 implementation items complete
+- 3 remaining + prompt writing + rough fixes
+- System NOT running (stopped for development)

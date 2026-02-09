@@ -743,22 +743,20 @@ JSON response changes needed:
 - **No diff sent to Opus reviewer** — Opus sees only the new code, not what changed or why.
 - **No targeted edit option** — Always full rewrite, even for tier 1 tweaks.
 - **parent_version never populated** — `strategy_versions` table has the column but it's always NULL.
-- **Backtest uses 1h candles** — Should use 5m. (`_run_backtest()` calls `get_candles(symbol, "1h", limit=720)`)
+- ~~**Backtest uses 1h candles**~~ — FIXED (commit c9ae53e, now uses 5m)
 
-### 4. `src/orchestrator/orchestrator.py` — _update_strategy_doc()
+### ~~4. `src/orchestrator/orchestrator.py` — _update_strategy_doc()~~ FIXED (commit 7c424f2)
 
-**Problem:** Appends findings to strategy document every night. Per the approved decision, daily observations go to a DB table (not yet created: `orchestrator_observations`). Strategy doc updates should be rare.
+Replaced `_update_strategy_doc()` with `_store_observation()`. Daily findings now go to `orchestrator_observations` DB table. Strategy doc no longer appended nightly.
 
-**Action:** Replace with `_store_observation()` that writes to DB table. Create a separate mechanism for meaningful strategy doc updates (orchestrator explicitly flags these in its response).
-
-### 5. `src/orchestrator/orchestrator.py` — _gather_context()
+### 5. `src/orchestrator/orchestrator.py` — _gather_context() — MOSTLY FIXED
 
 **Missing context that should be added:**
-- Active paper test status and what deploying would do
-- Signal drought detection results
-- Per-version performance breakdown
-- Last N daily observations (from new DB table)
-- Available historical data summary (how much candle data exists)
+- ~~Active paper test status and what deploying would do~~ — FIXED (commit 7c424f2)
+- ~~Signal drought detection results~~ — FIXED (commit 87d93bc)
+- ~~Per-version performance breakdown~~ — FIXED (commit 7c424f2, via trade_performance by_version)
+- ~~Last N daily observations (from new DB table)~~ — FIXED (commit 7c424f2)
+- Available historical data summary (how much candle data exists) — NOT YET (depends on bootstrap)
 
 ### 6. `strategy/strategy_document.md` — Content
 
@@ -776,16 +774,13 @@ Sections that violate "earned not pre-loaded":
 
 **Action:** Strip to factual minimum. §1 empty. §2 only the fee fact (this IS ground truth, not theory). §3 v001 description. §4-7 empty, to be filled by earned experience.
 
-### 7. `src/shell/database.py` — Missing tables
+### ~~7. `src/shell/database.py` — Missing tables~~ FIXED (commit c9ae53e)
 
-**Need to add:**
-- `orchestrator_observations` table: `date TEXT, cycle_id TEXT, market_summary TEXT, strategy_assessment TEXT, notable_findings TEXT, created_at TEXT`
+Added `orchestrator_observations` table with index.
 
-### 8. `statistics/active/trade_performance.py` — Missing version breakdown
+### ~~8. `statistics/active/trade_performance.py` — Missing version breakdown~~ FIXED (commit 7c424f2)
 
-**Problem:** Doesn't partition metrics by `strategy_version`. The orchestrator can't compare how different strategy versions performed.
-
-**Action:** Add `by_version` section to output, grouping trade metrics by `strategy_version`.
+Added `by_version` section with full metrics (trades, wins, win_rate, net_pnl, fees, expectancy, first/last trade dates) grouped by `strategy_version`.
 
 ### 9. `src/main.py` — Missing historical data bootstrap
 
@@ -793,11 +788,9 @@ Sections that violate "earned not pre-loaded":
 
 **Action:** On startup, if candle tables are empty, poll Kraken for historical 5m data (30 days, ~8,640 candles/symbol, paginated).
 
-### 10. `src/orchestrator/orchestrator.py` — _run_backtest()
+### ~~10. `src/orchestrator/orchestrator.py` — _run_backtest()~~ FIXED (commit c9ae53e)
 
-**Problem:** Uses 1h candles (`get_candles(symbol, "1h", limit=720)`). Strategy uses 5m.
-
-**Action:** Change to `get_candles(symbol, "5m", limit=8640)` (30 days of 5m data).
+Changed from `get_candles(symbol, "1h", limit=720)` to `get_candles(symbol, "5m", limit=8640)`.
 
 ### 11. Rough/Unpolished Items (fix before VPS deployment)
 
@@ -1075,5 +1068,5 @@ After ALL pending implementation changes are complete (observations table, paper
 3. **Write fund mandate** — translate the decided mandate into prompt text
 4. **Write response format** — finalize JSON schema with observations mechanism
 5. **Write `_analyze()` user prompt** — clean version with dynamic config, no editorial commentary
-6. **Strip strategy_document.md** — remove pre-loaded wisdom, keep factual minimum
+6. ~~**Strip strategy_document.md**~~ — DONE (commit c9ae53e)
 7. **Review everything end-to-end** — verify all three layers work together, no directive leakage
