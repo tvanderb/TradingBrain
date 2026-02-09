@@ -43,6 +43,8 @@ class TelegramBot:
             "strategy": self._commands.cmd_strategy,
             "tokens": self._commands.cmd_tokens,
             "ask": self._commands.cmd_ask,
+            "thoughts": self._commands.cmd_thoughts,
+            "thought": self._commands.cmd_thought,
             "pause": self._commands.cmd_pause,
             "resume": self._commands.cmd_resume,
             "kill": self._commands.cmd_kill,

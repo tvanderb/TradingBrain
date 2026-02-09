@@ -163,7 +163,7 @@
 - [ ] **Orchestrator awareness upgrade** — labeled inputs, explicit goals, truth benchmarks, two analysis reports
 
 ### Before First Orchestration Cycle
-- [ ] **Orchestrator thought spool** — store full AI responses (Opus analysis, Sonnet code gen, review feedback) in a browsable format (DB table or files). Currently buried in structlog JSON. User needs to see what the orchestrator is thinking and why it made decisions. Design TBD.
+- [x] **Orchestrator thought spool** — `orchestrator_thoughts` DB table stores every AI response per cycle. Browsable via `/thoughts` (cycle list) and `/thought <cycle> <step>` (full response). Instrumented at all 5 AI call sites in orchestrator.
 
 ### Before Going Live (Month 2-3)
 - [ ] **Order fill tracking** — poll Kraken for fill status after placing orders

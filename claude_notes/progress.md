@@ -243,3 +243,129 @@ Continuing from session 3. System was running in paper mode but had issues.
 - Fee check confirmed: 0.25% maker / 0.40% taker
 - Strategy generating 0 signals (expected — EMA crossover needs trend to form)
 - **Next**: Build statistics shell (Phase 0) before first orchestration cycle
+
+## Session 5 (2026-02-08)
+
+### Context
+Continuing from session 4. All design finalized (two-module statistics shell), committed. Building Phase 0 step by step.
+
+### Phase 0 Progress: Statistics Shell Implementation
+
+**Step 1: Database Schema Additions** — DONE (commit 672d54c)
+- Added `scan_results` table with raw indicator values + strategy_regime
+- Added `strategy_regime` column to `trades` and `signals` tables
+- Migration runner for existing databases (ALTER TABLE if column missing)
+- Indexes on `scan_results(timestamp)` and `(symbol, timestamp)`
+
+**Step 2: Scan Results Collection** — DONE (commit 67d7c45)
+- Scan loop writes indicator state to `scan_results` after every scan
+- Signal INSERTs include `strategy_regime` (both rejected and acted)
+- Trade INSERTs include `strategy_regime` via `execute_signal()` parameter
+- Position monitor passes last-known regime on SL/TP-triggered closes
+- `scan_results` updated with signal info after strategy runs
+
+**Step 3: Truth Benchmarks** — DONE (commit f84d6c8)
+- Created `src/shell/truth.py` — rigid shell, orchestrator CANNOT modify
+- `compute_truth_benchmarks(db)` returns 17 metrics: trade counts, win rate, P&L, fees, expectancy, consecutive losses, drawdown, signal/scan activity, strategy version
+- All calculations trivially verifiable (COUNT, SUM, simple ratios)
+- Tests: seeded data verification + empty DB edge case
+
+**Step 4: Analysis Module Infrastructure** — DONE (commit 2d4c9ad)
+- `AnalysisBase` added to IO contract (`src/shell/contract.py`): `async analyze(db, schema) -> dict`
+- `src/statistics/readonly_db.py` — ReadOnlyDB wrapper blocks INSERT/UPDATE/DELETE/DROP/ALTER/CREATE via regex
+- `src/statistics/loader.py` — dynamic import for both modules, archive, deploy (same pattern as strategy loader)
+- `src/statistics/sandbox.py` — validates code safety; allows scipy/statistics but blocks network/filesystem/subprocess
+- `get_schema_description()` returns dict describing all tables and columns for modules
+- Tests: ReadOnlyDB allows SELECT / blocks writes, sandbox valid/invalid/no-class/imports
+
+**Step 5: Market Analysis Module** — DONE (commit d445650)
+- `statistics/active/market_analysis.py` (v001, hand-written starting point)
+- Computes: price summary per symbol (current, 24h change, 7d change, EMA alignment, RSI, volume ratio)
+- Indicator distributions (24h): RSI overbought/oversold frequency, EMA bullish %, volume avg
+- Signal proximity: EMA gap %, cross nearness, RSI distance to extremes
+- Data quality: total scans, first/last scan, scans last hour vs expected
+
+**Step 6: Trade Performance Module** — DONE (commit d445650)
+- `statistics/active/trade_performance.py` (v001, hand-written starting point)
+- Computes: performance by symbol (trades, wins, win rate, P&L, expectancy)
+- Performance by strategy_regime
+- Signal analysis (total, acted, rejected, act rate, top rejection reasons)
+- Fee impact (total fees, fees as % of gross wins, round-trip fee %, break-even move)
+- Holding duration (avg hours overall, winning, losing)
+- Rolling metrics (7d, 30d)
+
+**Step 7: Orchestrator Integration** — NOT YET STARTED
+- Wire truth benchmarks + both analysis modules into orchestrator nightly cycle
+- Labeled inputs, explicit goals, cross-referencing instructions
+- Analysis module evolution pipeline (Sonnet generates, Opus reviews math, sandbox, deploy)
+
+**Step 8: Analysis Module Evolution** — NOT YET STARTED
+- Expand orchestrator decision options: MARKET_ANALYSIS_UPDATE, TRADE_ANALYSIS_UPDATE
+- Independent module evolution
+
+**Step 9: Tests** — Tests written alongside each step (29/29 passing)
+
+### Design Decisions Made This Session
+- **Cross-referencing**: Modules run independently, orchestrator cross-references (option 3). Neither module sees the other's output.
+- **Orchestrator thought spool**: Added to roadmap — store full AI responses in browsable format (design TBD, before first orchestration cycle)
+
+### Files Created This Session
+```
+src/shell/truth.py                      — Truth benchmarks (rigid shell)
+src/statistics/__init__.py              — Statistics package init
+src/statistics/readonly_db.py           — ReadOnlyDB wrapper + schema description
+src/statistics/loader.py                — Analysis module loader/archiver/deployer
+src/statistics/sandbox.py               — Analysis code validation
+statistics/active/market_analysis.py    — Market analysis v001
+statistics/active/trade_performance.py  — Trade performance v001
+```
+
+### Files Modified This Session
+```
+src/shell/database.py        — scan_results table, strategy_regime columns, migrations
+src/shell/contract.py        — Added AnalysisBase to IO contract
+src/shell/portfolio.py       — strategy_regime parameter threading
+src/main.py                  — Scan results collection, regime tagging on signals/trades
+tests/test_integration.py    — 11 new tests (29 total, was 18)
+claude_notes/architecture.md — Doc fixes (async, filenames, schema alignment)
+claude_notes/decisions.md    — Cross-referencing decision
+claude_notes/roadmap.md      — Phase 0 updated for two modules, thought spool added
+```
+
+### Test Count: 29/29 passing
+Original 18 + 11 new:
+- test_truth_benchmarks, test_truth_benchmarks_empty_db
+- test_readonly_db_allows_select, test_readonly_db_blocks_writes
+- test_analysis_sandbox_valid, test_analysis_sandbox_rejects_forbidden
+- test_analysis_sandbox_rejects_no_class, test_analysis_sandbox_allows_scipy
+- test_market_analysis_module, test_trade_performance_module
+- test_analysis_modules_empty_db
+
+### Current Status
+- Phase 0 Steps 1-6 complete, committed on v2-io-container branch
+- Steps 7-8 (orchestrator integration + evolution) remaining
+- System is NOT running (was killed for development)
+- No data loss risk — all schema changes are additive (new table + new columns)
+
+## Session 6 (2026-02-08)
+
+### Context
+Continuing from session 5. Implementing orchestrator thought spool — prerequisite before first end-to-end orchestration test.
+
+### Orchestrator Thought Spool — DONE
+- **Purpose**: Capture every AI response from the nightly cycle so user can browse what the orchestrator was thinking. Previously, Opus reasoning was parsed for JSON and the raw text was discarded.
+- **Design**: DB table `orchestrator_thoughts` grouped by `cycle_id`, `_store_thought()` helper called after each AI call, Telegram `/thoughts` + `/thought` commands for browsing.
+
+**Changes Made**:
+1. `src/shell/database.py` — Added `orchestrator_thoughts` table + `idx_thoughts_cycle` index
+2. `src/orchestrator/orchestrator.py` — Added `self._cycle_id`, `_store_thought()` helper, cycle_id generation at cycle start, instrumented 5 AI call sites (analysis, code_gen, code_review, analysis_gen, analysis_review)
+3. `src/telegram/commands.py` — Added `cmd_thoughts` (cycle index/list/detail) and `cmd_thought` (full response with chunking for 4096 limit), updated `/start` help text
+4. `src/telegram/bot.py` — Registered `thoughts` and `thought` handlers
+5. `tests/test_integration.py` — Added `orchestrator_thoughts` to required tables, added `test_orchestrator_thoughts_table` test
+
+### Test Count: 34/34 passing
+Previous 33 + 1 new: test_orchestrator_thoughts_table
+
+### Current Status
+- Thought spool complete and tested
+- Ready for orchestrator integration (Steps 7-8) or first end-to-end test

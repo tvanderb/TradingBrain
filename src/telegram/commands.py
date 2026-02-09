@@ -68,6 +68,8 @@ class BotCommands:
             "/strategy - Active strategy info\n"
             "/tokens - Token usage\n"
             "/ask <question> - Ask Claude\n"
+            "/thoughts - Browse orchestrator AI reasoning\n"
+            "/thought <cycle> <step> - Full AI response\n"
             "/pause - Pause trading\n"
             "/resume - Resume trading\n"
             "/kill - Emergency stop"
@@ -297,6 +299,118 @@ class BotCommands:
             await update.message.reply_text(answer[:4000])
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_thoughts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Browse orchestrator thought spool.
+
+        /thoughts       — show latest cycle summary
+        /thoughts list  — show recent cycles
+        /thoughts <id>  — show steps for a specific cycle
+        """
+        if not self._authorized(update):
+            return
+
+        args = context.args if context.args else []
+
+        if args and args[0] == "list":
+            # Show recent cycles
+            rows = await self._db.fetchall(
+                """SELECT cycle_id, COUNT(*) as steps, MIN(created_at) as started
+                   FROM orchestrator_thoughts
+                   GROUP BY cycle_id ORDER BY started DESC LIMIT 10"""
+            )
+            if not rows:
+                await update.message.reply_text("No orchestrator cycles recorded yet.")
+                return
+            lines = ["Recent Orchestrator Cycles:"]
+            for r in rows:
+                lines.append(f"\n{r['cycle_id']} — {r['steps']} steps ({r['started'][:16]})")
+            await update.message.reply_text("\n".join(lines))
+
+        elif args:
+            # Show steps for a specific cycle
+            cycle_id = args[0]
+            rows = await self._db.fetchall(
+                """SELECT step, model, LENGTH(full_response) as resp_len, created_at
+                   FROM orchestrator_thoughts
+                   WHERE cycle_id = ? ORDER BY created_at""",
+                (cycle_id,),
+            )
+            if not rows:
+                await update.message.reply_text(f"No thoughts found for cycle '{cycle_id}'.")
+                return
+            lines = [f"Cycle {cycle_id}:"]
+            for r in rows:
+                lines.append(f"\n  {r['step']} ({r['model']}) — {r['resp_len']} chars @ {r['created_at'][:16]}")
+            lines.append(f"\nUse /thought {cycle_id} <step> to view full response.")
+            await update.message.reply_text("\n".join(lines))
+
+        else:
+            # Show latest cycle summary
+            latest = await self._db.fetchone(
+                """SELECT cycle_id FROM orchestrator_thoughts
+                   ORDER BY created_at DESC LIMIT 1"""
+            )
+            if not latest:
+                await update.message.reply_text("No orchestrator cycles recorded yet.")
+                return
+            cycle_id = latest["cycle_id"]
+            rows = await self._db.fetchall(
+                """SELECT step, model, LENGTH(full_response) as resp_len, created_at
+                   FROM orchestrator_thoughts
+                   WHERE cycle_id = ? ORDER BY created_at""",
+                (cycle_id,),
+            )
+            lines = [f"Latest Cycle: {cycle_id}"]
+            for r in rows:
+                lines.append(f"\n  {r['step']} ({r['model']}) — {r['resp_len']} chars")
+            lines.append(f"\nUse /thought {cycle_id} <step> to view full response.")
+            lines.append("Use /thoughts list to see all cycles.")
+            await update.message.reply_text("\n".join(lines))
+
+    async def cmd_thought(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show full AI response for a specific cycle step.
+
+        /thought <cycle_id> <step>
+        Chunks long responses for Telegram's 4096 char limit.
+        """
+        if not self._authorized(update):
+            return
+
+        args = context.args if context.args else []
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /thought <cycle_id> <step>")
+            return
+
+        cycle_id = args[0]
+        step = args[1]
+
+        row = await self._db.fetchone(
+            """SELECT full_response, model, input_summary, parsed_result, created_at
+               FROM orchestrator_thoughts
+               WHERE cycle_id = ? AND step = ?""",
+            (cycle_id, step),
+        )
+        if not row:
+            await update.message.reply_text(f"No thought found for cycle '{cycle_id}', step '{step}'.")
+            return
+
+        header = f"Cycle: {cycle_id}\nStep: {step} ({row['model']})\nTime: {row['created_at']}\n"
+        if row["input_summary"]:
+            header += f"Input: {row['input_summary'][:200]}...\n"
+        header += "\n--- Response ---\n"
+
+        text = row["full_response"]
+        max_chunk = 4096 - len(header) - 50  # margin for chunk label
+
+        if len(text) <= max_chunk:
+            await update.message.reply_text(header + text)
+        else:
+            # Split into chunks
+            chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
+            for i, chunk in enumerate(chunks):
+                prefix = header if i == 0 else f"(part {i+1}/{len(chunks)})\n"
+                await update.message.reply_text(prefix + chunk)
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

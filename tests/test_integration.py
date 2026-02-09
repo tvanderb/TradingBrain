@@ -42,8 +42,9 @@ async def test_database_schema():
         tables = [r["name"] for r in rows]
 
         required = ["candles", "positions", "trades", "signals", "daily_performance",
-                     "strategy_versions", "orchestrator_log", "token_usage",
-                     "fee_schedule", "strategy_state", "paper_tests", "scan_results"]
+                     "strategy_versions", "orchestrator_log", "orchestrator_thoughts",
+                     "token_usage", "fee_schedule", "strategy_state", "paper_tests",
+                     "scan_results"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -1038,3 +1039,77 @@ class Analysis(AnalysisBase):
 '''
     result = validate_analysis_module(net_code, "test_module")
     assert not result.passed, "Should reject network import"
+
+
+# --- Orchestrator Thought Spool ---
+
+@pytest.mark.asyncio
+async def test_orchestrator_thoughts_table():
+    """Thought spool stores and retrieves AI responses grouped by cycle."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        cycle_id = "20260201_020000"
+
+        # Insert multiple thoughts for one cycle
+        thoughts = [
+            (cycle_id, "analysis", "opus", "Review the system...", "Full Opus analysis response here", '{"decision": "NO_CHANGE"}'),
+            (cycle_id, "code_gen_1", "sonnet", "Generate strategy...", "class Strategy(StrategyBase):\n    pass", None),
+            (cycle_id, "code_review_1", "opus", "Review this code...", '{"approved": true}', '{"approved": true}'),
+        ]
+        for t in thoughts:
+            await db.execute(
+                """INSERT INTO orchestrator_thoughts
+                   (cycle_id, step, model, input_summary, full_response, parsed_result)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                t,
+            )
+        await db.commit()
+
+        # Query by cycle_id
+        rows = await db.fetchall(
+            "SELECT * FROM orchestrator_thoughts WHERE cycle_id = ? ORDER BY created_at",
+            (cycle_id,),
+        )
+        assert len(rows) == 3
+        assert rows[0]["step"] == "analysis"
+        assert rows[0]["model"] == "opus"
+        assert rows[1]["step"] == "code_gen_1"
+        assert rows[2]["step"] == "code_review_1"
+
+        # Query specific step
+        row = await db.fetchone(
+            "SELECT * FROM orchestrator_thoughts WHERE cycle_id = ? AND step = ?",
+            (cycle_id, "analysis"),
+        )
+        assert row is not None
+        assert "Opus analysis" in row["full_response"]
+        assert row["parsed_result"] is not None
+
+        # Verify cycle grouping with a second cycle
+        await db.execute(
+            """INSERT INTO orchestrator_thoughts
+               (cycle_id, step, model, input_summary, full_response, parsed_result)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("20260202_020000", "analysis", "opus", "Day 2 review...", "Day 2 response", None),
+        )
+        await db.commit()
+
+        # Count by cycle
+        cycles = await db.fetchall(
+            """SELECT cycle_id, COUNT(*) as steps
+               FROM orchestrator_thoughts GROUP BY cycle_id ORDER BY cycle_id"""
+        )
+        assert len(cycles) == 2
+        assert cycles[0]["steps"] == 3  # first cycle
+        assert cycles[1]["steps"] == 1  # second cycle
+
+        await db.close()
+    finally:
+        os.unlink(db_path)

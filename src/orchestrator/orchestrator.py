@@ -251,10 +251,36 @@ class Orchestrator:
         self._ai = ai
         self._reporter = reporter
         self._data_store = data_store
+        self._cycle_id: str | None = None
+
+    async def _store_thought(
+        self, step: str, model: str, input_summary: str, full_response: str, parsed_result=None,
+    ) -> None:
+        """Store an AI response in the thought spool for later browsing."""
+        if not self._cycle_id:
+            return
+        try:
+            await self._db.execute(
+                """INSERT INTO orchestrator_thoughts
+                   (cycle_id, step, model, input_summary, full_response, parsed_result)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    self._cycle_id,
+                    step,
+                    model,
+                    (input_summary[:500] if input_summary else None),
+                    full_response,
+                    json.dumps(parsed_result, default=str) if parsed_result is not None else None,
+                ),
+            )
+            await self._db.commit()
+        except Exception as e:
+            log.warning("orchestrator.store_thought_failed", step=step, error=str(e))
 
     async def run_nightly_cycle(self) -> str:
         """Execute the full nightly orchestration cycle. Returns report summary."""
-        log.info("orchestrator.cycle_start")
+        self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
 
         try:
             # 1. Gather context
@@ -472,16 +498,21 @@ Analyze and decide. Respond in JSON format."""
         )
 
         # Parse JSON from response
+        parsed = None
         try:
             # Find JSON in response
             start = response.find("{")
             end = response.rfind("}") + 1
             if start >= 0 and end > start:
-                return json.loads(response[start:end])
+                parsed = json.loads(response[start:end])
         except json.JSONDecodeError:
             log.warning("orchestrator.json_parse_failed", response=response[:200])
 
-        return {"decision": "NO_CHANGE", "reasoning": "Failed to parse analysis response"}
+        if parsed is None:
+            parsed = {"decision": "NO_CHANGE", "reasoning": "Failed to parse analysis response"}
+
+        await self._store_thought("analysis", "opus", prompt[:500], response, parsed)
+        return parsed
 
     async def _execute_change(self, decision: dict, context: dict) -> str:
         """Execute a strategy change: generate -> review -> sandbox -> backtest."""
@@ -513,6 +544,7 @@ Generate the complete strategy.py file."""
                 gen_prompt, system=CODE_GEN_SYSTEM, max_tokens=8192,
                 purpose=f"code_gen_attempt_{attempt+1}",
             )
+            await self._store_thought(f"code_gen_{attempt+1}", "sonnet", gen_prompt[:500], code)
 
             # Strip markdown code fences if present
             if "```python" in code:
@@ -551,6 +583,8 @@ Is this classification correct?
                 review = json.loads(review_response[start:end])
             except (json.JSONDecodeError, ValueError):
                 review = {"approved": False, "feedback": "Failed to parse review"}
+
+            await self._store_thought(f"code_review_{attempt+1}", "opus", review_prompt[:500], review_response, review)
 
             if review.get("approved"):
                 # Determine actual risk tier
@@ -646,6 +680,7 @@ Generate the complete {module_name}.py file."""
                 gen_prompt, system=ANALYSIS_CODE_GEN_SYSTEM, max_tokens=8192,
                 purpose=f"analysis_gen_{module_name}_attempt_{attempt+1}",
             )
+            await self._store_thought(f"analysis_gen_{module_name}_{attempt+1}", "sonnet", gen_prompt[:500], code)
 
             # Strip markdown code fences if present
             if "```python" in code:
@@ -682,6 +717,8 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 review = json.loads(review_response[start:end])
             except (json.JSONDecodeError, ValueError):
                 review = {"approved": False, "feedback": "Failed to parse review"}
+
+            await self._store_thought(f"analysis_review_{module_name}_{attempt+1}", "opus", review_prompt[:500], review_response, review)
 
             if review.get("approved"):
                 # Deploy — no paper testing needed (read-only module)
