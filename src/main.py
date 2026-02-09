@@ -35,6 +35,9 @@ from src.strategy.loader import load_strategy, get_strategy_path, get_code_hash
 from src.telegram.bot import TelegramBot
 from src.telegram.commands import BotCommands
 from src.telegram.notifications import Notifier
+from aiohttp import web
+
+from src.api.server import create_app as create_api_app
 from src.utils.logging import setup_logging
 from strategy.skills import compute_indicators
 
@@ -62,6 +65,7 @@ class TradingBrain:
         self._scan_state: dict = {}
         self._commands: BotCommands | None = None
         self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
+        self._api_runner: web.AppRunner | None = None
         self._running = False
 
     async def start(self) -> None:
@@ -127,11 +131,15 @@ class TradingBrain:
         # 6. Reporter & Orchestrator
         self._reporter = Reporter(self._db)
         self._orchestrator = Orchestrator(
-            self._config, self._db, self._ai, self._reporter, self._data_store
+            self._config, self._db, self._ai, self._reporter, self._data_store,
+            notifier=self._notifier,
         )
 
         # 7. Telegram
-        self._notifier = Notifier(self._config.telegram.chat_id)
+        self._notifier = Notifier(
+            self._config.telegram.chat_id,
+            tg_filter=self._config.telegram.notifications,
+        )
         self._commands = BotCommands(
             config=self._config,
             db=self._db,
@@ -140,6 +148,7 @@ class TradingBrain:
             risk_manager=self._risk,
             ai_client=self._ai,
             reporter=self._reporter,
+            notifier=self._notifier,
         )
         self._telegram = TelegramBot(self._config.telegram, self._commands)
         await self._telegram.start()
@@ -149,6 +158,26 @@ class TradingBrain:
         # 8. WebSocket
         self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
         self._ws.set_on_failure(self._on_ws_failure)
+
+        # 8b. API Server
+        if self._config.api.enabled:
+            api_app, ws_manager = create_api_app(
+                config=self._config,
+                db=self._db,
+                portfolio=self._portfolio,
+                risk=self._risk,
+                ai=self._ai,
+                scan_state=self._scan_state,
+                commands=self._commands,
+            )
+            self._notifier.set_ws_manager(ws_manager)
+            self._api_runner = web.AppRunner(api_app)
+            await self._api_runner.setup()
+            site = web.TCPSite(
+                self._api_runner, self._config.api.host, self._config.api.port,
+            )
+            await site.start()
+            log.info("api.started", host=self._config.api.host, port=self._config.api.port)
 
         # 9. Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -367,6 +396,11 @@ class TradingBrain:
 
                 if not check.passed:
                     log.info("scan.signal_rejected", symbol=signal.symbol, reason=check.reason)
+                    await self._notifier.signal_rejected(
+                        signal.symbol, signal.action.value, check.reason,
+                    )
+                    if self._risk.is_halted:
+                        await self._notifier.risk_halt(self._risk.halt_reason)
                     regime = scan_symbols.get(signal.symbol, {}).get("regime")
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -418,6 +452,7 @@ class TradingBrain:
                     )
                     if not rollback.passed:
                         await self._notifier.rollback_alert(rollback.reason, "previous")
+                        await self._notifier.risk_halt(rollback.reason)
                         log.warning("scan.rollback_triggered", reason=rollback.reason)
 
                     # Update portfolio peak
@@ -447,6 +482,7 @@ class TradingBrain:
             self._scan_state["symbols"] = scan_symbols
             self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
             log.info("scan.complete", symbols=len(scan_symbols), signals=len(signals))
+            await self._notifier.scan_complete(len(scan_symbols), len(signals))
 
             # Save strategy state periodically (keep last 10)
             state = self._strategy.get_state()
@@ -622,6 +658,9 @@ class TradingBrain:
         log.info("brain.stopping")
         self._running = False
 
+        if self._notifier:
+            await self._notifier.system_shutdown()
+
         # 1. Stop scheduler
         if self._scheduler:
             self._scheduler.shutdown(wait=False)
@@ -643,7 +682,11 @@ class TradingBrain:
             except Exception as e:
                 log.warning("shutdown.cancel_orders_failed", error=str(e))
 
-        # 4. Stop WebSocket
+        # 4. Stop API server
+        if self._api_runner:
+            await self._api_runner.cleanup()
+
+        # 5. Stop WebSocket
         if self._ws:
             await self._ws.stop()
 

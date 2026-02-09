@@ -30,6 +30,7 @@ class BotCommands:
         risk_manager=None,
         ai_client=None,
         reporter=None,
+        notifier=None,
     ) -> None:
         self._config = config
         self._db = db
@@ -38,6 +39,7 @@ class BotCommands:
         self._risk = risk_manager
         self._ai = ai_client
         self._reporter = reporter
+        self._notifier = notifier
         self._paused = False
 
     @property
@@ -434,6 +436,8 @@ class BotCommands:
         self._paused = False
         if self._risk and self._risk.is_halted:
             self._risk.unhalt()
+            if self._notifier:
+                await self._notifier.risk_resumed()
             await update.message.reply_text("Trading RESUMED. Risk halt cleared.")
         else:
             await update.message.reply_text("Trading RESUMED.")

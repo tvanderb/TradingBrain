@@ -37,11 +37,43 @@ class AIConfig:
 
 
 @dataclass
+class NotificationConfig:
+    """Which events send Telegram alerts. All default True except high-frequency ones."""
+    trade_executed: bool = True
+    stop_triggered: bool = True
+    risk_halt: bool = True
+    risk_resumed: bool = True
+    rollback: bool = True
+    strategy_deployed: bool = True
+    system_online: bool = True
+    system_shutdown: bool = True
+    system_error: bool = True
+    websocket_failed: bool = True
+    daily_summary: bool = True
+    weekly_report: bool = True
+    # High-frequency — default off for Telegram
+    signal_rejected: bool = False
+    scan_complete: bool = False
+    paper_test_started: bool = False
+    paper_test_completed: bool = False
+    orchestrator_cycle_started: bool = False
+    orchestrator_cycle_completed: bool = False
+
+
+@dataclass
+class ApiConfig:
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+
+@dataclass
 class TelegramConfig:
     enabled: bool = True
     bot_token: str = ""
     chat_id: str = ""
     allowed_user_ids: list[int] = field(default_factory=list)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
 
 @dataclass
@@ -100,6 +132,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     fees: FeeConfig = field(default_factory=FeeConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     db_path: str = ""
 
     def is_paper(self) -> bool:
@@ -153,6 +186,16 @@ def load_config() -> Config:
         tg = settings.get("telegram", {})
         config.telegram.enabled = tg.get("enabled", config.telegram.enabled)
         config.telegram.allowed_user_ids = tg.get("allowed_user_ids", config.telegram.allowed_user_ids)
+
+        tg_notif = tg.get("notifications", {})
+        for key in vars(config.telegram.notifications):
+            if key in tg_notif:
+                setattr(config.telegram.notifications, key, tg_notif[key])
+
+        api = settings.get("api", {})
+        config.api.enabled = api.get("enabled", config.api.enabled)
+        config.api.host = api.get("host", config.api.host)
+        config.api.port = api.get("port", config.api.port)
 
         fees = settings.get("fees", {})
         config.fees.check_interval_hours = fees.get("check_interval_hours", config.fees.check_interval_hours)

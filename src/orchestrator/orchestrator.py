@@ -28,6 +28,7 @@ import structlog
 from src.orchestrator.ai_client import AIClient
 from src.orchestrator.reporter import Reporter
 from src.shell.config import Config
+from src.telegram.notifications import Notifier
 from src.shell.contract import RiskLimits
 from src.shell.data_store import DataStore
 from src.shell.database import Database
@@ -272,12 +273,14 @@ class Orchestrator:
         ai: AIClient,
         reporter: Reporter,
         data_store: DataStore,
+        notifier: Notifier | None = None,
     ) -> None:
         self._config = config
         self._db = db
         self._ai = ai
         self._reporter = reporter
         self._data_store = data_store
+        self._notifier = notifier
         self._cycle_id: str | None = None
 
     def _extract_json(self, response: str) -> dict | None:
@@ -360,6 +363,9 @@ class Orchestrator:
         self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
 
+        if self._notifier:
+            await self._notifier.orchestrator_cycle_started()
+
         try:
             # 0. Check token budget
             if self._ai.tokens_remaining < 5000:
@@ -410,6 +416,8 @@ class Orchestrator:
             await self._data_store.run_nightly_maintenance()
 
             log.info("orchestrator.cycle_complete", decision=decision.get("decision"))
+            if self._notifier:
+                await self._notifier.orchestrator_cycle_completed(decision_type)
             return report
 
         except Exception as e:
@@ -916,6 +924,10 @@ Is this classification correct?
                     parent=parent_version,
                 )
 
+                if self._notifier:
+                    await self._notifier.strategy_deployed(version, actual_tier, changes)
+                    await self._notifier.paper_test_started(version, paper_days)
+
                 return (
                     f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"
                     f"Changes: {changes[:200]}"
@@ -978,6 +990,13 @@ Is this classification correct?
                 "trades": trade_count,
                 "pnl": total_pnl,
             })
+
+            if self._notifier:
+                await self._notifier.paper_test_completed(
+                    version, passed,
+                    {"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins},
+                )
+
             log.info(
                 "orchestrator.paper_test_evaluated",
                 version=version, status=status,

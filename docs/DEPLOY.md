@@ -26,6 +26,7 @@ KRAKEN_SECRET_KEY=        # Kraken API secret
 ANTHROPIC_API_KEY=        # Required if ai.provider = "anthropic"
 TELEGRAM_BOT_TOKEN=       # Telegram bot token from @BotFather
 TELEGRAM_CHAT_ID=         # Your Telegram user/chat ID
+API_KEY=                  # Data API bearer token (required if api.enabled = true)
 ```
 
 For Google Vertex instead of Anthropic, set `GOOGLE_APPLICATION_CREDENTIALS` to the path of your service account JSON and update `config/settings.toml` provider to `"vertex"`.

@@ -36,6 +36,21 @@ max_revisions = 3
 enabled = true
 allowed_user_ids = []
 
+[telegram.notifications]
+# Which events send Telegram alerts (high-frequency events default off)
+# trade_executed = true
+# stop_triggered = true
+# risk_halt = true
+# strategy_deployed = true
+# system_error = true
+# signal_rejected = false
+# scan_complete = false
+
+[api]
+enabled = false               # Enable REST + WebSocket API
+host = "0.0.0.0"
+port = 8080
+
 [fees]
 check_interval_hours = 24
 min_profit_fee_ratio = 3.0

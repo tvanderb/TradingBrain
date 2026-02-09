@@ -2055,3 +2055,245 @@ async def test_scan_results_stored_in_db():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+# --- API ---
+
+@pytest.mark.asyncio
+async def test_api_server_endpoints():
+    """Test REST API endpoints return enveloped JSON responses."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=200.0)
+        portfolio.position_count = 2
+        portfolio.get_portfolio = AsyncMock(return_value=MagicMock(
+            total_value=200.0, cash=180.0, positions={}
+        ))
+        ai = MagicMock()
+        ai.get_daily_usage = MagicMock(return_value={"total_tokens": 1000, "total_cost": 0.01, "by_model": {}})
+        ai.tokens_remaining = 1499000
+        scan_state = {"symbols": {"BTC/USD": {"price": 45000, "rsi": 52, "regime": "ranging"}}, "last_scan": "03:10:00"}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, ws_manager = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            # /v1/system
+            resp = await client.get("/v1/system")
+            assert resp.status == 200
+            body = await resp.json()
+            assert "data" in body
+            assert "meta" in body
+            assert body["meta"]["mode"] == "paper"
+            assert body["data"]["status"] == "running"
+
+            # /v1/portfolio
+            resp = await client.get("/v1/portfolio")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["total_value"] == 200.0
+
+            # /v1/positions
+            resp = await client.get("/v1/positions")
+            assert resp.status == 200
+            body = await resp.json()
+            assert isinstance(body["data"], list)
+
+            # /v1/trades
+            resp = await client.get("/v1/trades?limit=10")
+            assert resp.status == 200
+            body = await resp.json()
+            assert isinstance(body["data"], list)
+
+            # /v1/risk
+            resp = await client.get("/v1/risk")
+            assert resp.status == 200
+            body = await resp.json()
+            assert "limits" in body["data"]
+            assert "current" in body["data"]
+            assert body["data"]["current"]["halted"] is False
+
+            # /v1/market
+            resp = await client.get("/v1/market")
+            assert resp.status == 200
+            body = await resp.json()
+            assert len(body["data"]) == 1
+            assert body["data"][0]["symbol"] == "BTC/USD"
+
+            # /v1/signals
+            resp = await client.get("/v1/signals")
+            assert resp.status == 200
+
+            # /v1/strategy
+            resp = await client.get("/v1/strategy")
+            assert resp.status == 200
+
+            # /v1/ai/usage
+            resp = await client.get("/v1/ai/usage")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["today"]["total_tokens"] == 1000
+
+            # /v1/benchmarks
+            resp = await client.get("/v1/benchmarks")
+            assert resp.status == 200
+
+            # /v1/performance
+            resp = await client.get("/v1/performance")
+            assert resp.status == 200
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_api_auth_required():
+    """Test API rejects requests without valid bearer token when API_KEY is set."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        from src.api import api_key_key
+        app, _ = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+        app[api_key_key] = "test-secret-key"
+
+        async with TestClient(TestServer(app)) as client:
+            # No auth — should 401
+            resp = await client.get("/v1/system")
+            assert resp.status == 401
+
+            # Wrong key — should 401
+            resp = await client.get("/v1/system", headers={"Authorization": "Bearer wrong"})
+            assert resp.status == 401
+
+            # Correct key — should 200
+            resp = await client.get("/v1/system", headers={"Authorization": "Bearer test-secret-key"})
+            assert resp.status == 200
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_api_websocket_connection():
+    """Test WebSocket connects and receives events."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        app, ws_manager = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/v1/events") as ws:
+                assert ws_manager.client_count == 1
+
+                # Broadcast an event
+                await ws_manager.broadcast({
+                    "event": "test_event",
+                    "data": {"msg": "hello"},
+                    "timestamp": "2026-02-09T00:00:00Z",
+                })
+
+                msg = await ws.receive_json()
+                assert msg["event"] == "test_event"
+                assert msg["data"]["msg"] == "hello"
+
+            # After disconnect
+            assert ws_manager.client_count == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_notifier_dual_dispatch():
+    """Test Notifier sends to both WebSocket and Telegram."""
+    from src.api.websocket import WebSocketManager
+    from src.shell.config import NotificationConfig
+    from src.telegram.notifications import Notifier
+
+    # Config: trade_executed on, scan_complete off
+    tg_config = NotificationConfig(trade_executed=True, scan_complete=False)
+    notifier = Notifier(chat_id="123", tg_filter=tg_config)
+
+    ws_manager = WebSocketManager()
+    notifier.set_ws_manager(ws_manager)
+
+    # Mock telegram app
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    # trade_executed — should go to both
+    await notifier.trade_executed({"action": "BUY", "symbol": "BTC/USD", "qty": 0.001, "price": 45000, "fee": 0.5})
+    assert mock_app.bot.send_message.call_count == 1
+
+    mock_app.bot.send_message.reset_mock()
+
+    # scan_complete — should only go to WS (telegram filtered off)
+    await notifier.scan_complete(9, 2)
+    assert mock_app.bot.send_message.call_count == 0
+
+    # risk_halt — should go to telegram (defaults to True)
+    await notifier.risk_halt("Max drawdown exceeded")
+    assert mock_app.bot.send_message.call_count == 1
+
+
+def test_notification_config_loading():
+    """Test notification config loads from settings.toml."""
+    from src.shell.config import load_config
+    config = load_config()
+    # Defaults
+    assert config.telegram.notifications.trade_executed is True
+    assert config.telegram.notifications.scan_complete is False
+    assert config.telegram.notifications.signal_rejected is False
+    assert config.telegram.notifications.strategy_deployed is True
+
+
+def test_api_config_loading():
+    """Test API config loads from settings.toml."""
+    from src.shell.config import load_config
+    config = load_config()
+    assert config.api.enabled is False  # Default off
+    assert config.api.port == 8080
+    assert config.api.host == "0.0.0.0"
