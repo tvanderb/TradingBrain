@@ -404,6 +404,26 @@ class Orchestrator:
                FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC"""
         )
 
+        # Signal drought detection
+        last_signal = await self._db.fetchone(
+            "SELECT created_at FROM signals ORDER BY created_at DESC LIMIT 1"
+        )
+        signals_7d = await self._db.fetchone(
+            "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-7 days')"
+        )
+        signals_30d = await self._db.fetchone(
+            "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-30 days')"
+        )
+        scans_24h = await self._db.fetchone(
+            "SELECT COUNT(*) as count FROM scan_results WHERE created_at >= datetime('now', '-1 day')"
+        )
+        drought_info = {
+            "last_signal_at": last_signal["created_at"] if last_signal else None,
+            "signals_last_7d": signals_7d["count"] if signals_7d else 0,
+            "signals_last_30d": signals_30d["count"] if signals_30d else 0,
+            "scans_last_24h": scans_24h["count"] if scans_24h else 0,
+        }
+
         # Recent observations (last 14 days)
         recent_observations = await self._db.fetchall(
             """SELECT date, market_summary, strategy_assessment, notable_findings
@@ -433,6 +453,7 @@ class Orchestrator:
             "token_usage": usage,
             "active_paper_tests": [dict(t) for t in active_paper_tests],
             "recent_observations": [dict(o) for o in recent_observations],
+            "signal_drought": drought_info,
         }
 
     async def _analyze(self, context: dict) -> dict:
@@ -491,19 +512,29 @@ class Orchestrator:
 
 ---
 
-## USER CONSTRAINTS (risk limits, goals — you cannot change these)
-- Round-trip fees: ~0.65-0.80% (0.25% maker, 0.40% taker) — minimum ~2% move to profit
-- Max trade size: 7% of portfolio (bigger conviction bets)
-- Max position size: 15% of portfolio
-- Max daily loss: 6% of portfolio (hard halt)
-- Max drawdown: 12% (the real safety net — system halts if hit)
-- Max positions: 5
-- Consecutive loss halt: disabled (drawdown protects, not streak length)
+## USER CONSTRAINTS (risk limits — you cannot change these)
+- Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%
+- Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio
+- Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio
+- Max position size: {self._config.risk.max_position_pct * 100:.0f}% of portfolio
+- Max positions: {self._config.risk.max_positions}
+- Max daily loss: {self._config.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts for the day)
+- Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts entirely)
 - Token budget: {context['token_usage'].get('used', 0)} / {context['token_usage'].get('daily_limit', 0)} tokens used today (${context['token_usage'].get('total_cost', 0):.4f})
 
 ---
 
-Cross-reference your market analysis against trade performance. Do trade outcomes correlate with market conditions? Is your analysis capturing what matters?
+## SIGNAL & OBSERVATION STATE
+### Signal Drought Detection:
+{json.dumps(context['signal_drought'], indent=2, default=str)}
+
+### Active Paper Tests:
+{json.dumps(context['active_paper_tests'], indent=2, default=str) if context['active_paper_tests'] else "No active paper tests."}
+
+### Recent Observations (last 14 days):
+{json.dumps(context['recent_observations'], indent=2, default=str) if context['recent_observations'] else "No prior observations."}
+
+---
 
 Analyze and decide. Respond in JSON format."""
 
