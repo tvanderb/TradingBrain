@@ -88,7 +88,7 @@ class Config:
     paper_balance_usd: float = 200.0
     timezone: str = "US/Eastern"
     log_level: str = "INFO"
-    default_slippage_pct: float = 0.0005  # 0.05% — used when signal has no override
+    default_slippage_factor: float = 0.0005  # 0.05% as decimal — used when signal has no override
     symbols: list[str] = field(default_factory=lambda: [
         "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD",
         "ADA/USD", "LINK/USD", "AVAX/USD", "DOT/USD",
@@ -124,7 +124,7 @@ def load_config() -> Config:
         config.paper_balance_usd = general.get("paper_balance_usd", config.paper_balance_usd)
         config.timezone = general.get("timezone", config.timezone)
         config.log_level = general.get("log_level", config.log_level)
-        config.default_slippage_pct = general.get("default_slippage_pct", config.default_slippage_pct)
+        config.default_slippage_factor = general.get("default_slippage_factor", config.default_slippage_factor)
 
         markets = settings.get("markets", {})
         config.symbols = markets.get("symbols", config.symbols)

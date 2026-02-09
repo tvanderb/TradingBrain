@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -111,7 +112,7 @@ class PortfolioTracker:
             entry = p["avg_entry"]
             current = p.get("current_price", entry)
             qty = p["qty"]
-            pnl = (current - entry) * qty if p.get("side", "long") == "long" else (entry - current) * qty
+            pnl = (current - entry) * qty  # Long-only system
             pnl_pct = pnl / (entry * qty) if entry * qty > 0 else 0.0
 
             open_positions.append(OpenPosition(
@@ -166,7 +167,7 @@ class PortfolioTracker:
         """Get slippage as a fraction (e.g. 0.0005). Signal override > config default."""
         if signal.slippage_tolerance is not None:
             return signal.slippage_tolerance
-        return self._config.default_slippage_pct
+        return self._config.default_slippage_factor
 
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
@@ -226,7 +227,7 @@ class PortfolioTracker:
         self._cash -= (qty * fill_price + fee)
         self._fees_today += fee
 
-        # Store position
+        # Store position (including entry fee for accurate P&L on close)
         now = datetime.now().isoformat()
         pos = {
             "symbol": signal.symbol,
@@ -234,6 +235,7 @@ class PortfolioTracker:
             "qty": qty,
             "avg_entry": fill_price,
             "current_price": fill_price,
+            "entry_fee": fee,
             "stop_loss": signal.stop_loss,
             "take_profit": signal.take_profit,
             "intent": signal.intent.value,
@@ -248,6 +250,7 @@ class PortfolioTracker:
             avg = (existing["avg_entry"] * existing["qty"] + fill_price * qty) / total_qty
             pos["qty"] = total_qty
             pos["avg_entry"] = avg
+            pos["entry_fee"] = existing.get("entry_fee", 0.0) + fee
             pos["opened_at"] = existing["opened_at"]
 
         self._positions[signal.symbol] = pos
@@ -309,7 +312,9 @@ class PortfolioTracker:
             slippage = price * self._get_slippage(signal)
             fill_price = price - slippage  # Slippage works against us
         else:
-            result = await self._kraken.place_order(symbol, "sell", "market", qty)
+            order_type = signal.order_type.value.lower()
+            limit_price = signal.limit_price if signal.order_type == OrderType.LIMIT else None
+            result = await self._kraken.place_order(symbol, "sell", order_type, qty, limit_price)
             fill_price = price
             log.info("portfolio.sell_order_placed", result=result)
 
@@ -320,10 +325,15 @@ class PortfolioTracker:
         self._cash += (sale_value - fee)
         self._fees_today += fee
 
-        # Calculate P&L
+        # Calculate P&L (include both entry and exit fees)
         entry = pos["avg_entry"]
-        pnl = (fill_price - entry) * qty - fee
-        pnl_pct = (fill_price - entry) / entry if entry > 0 else 0.0
+        # Apportion entry fee proportionally for partial closes
+        total_entry_fee = pos.get("entry_fee", 0.0)
+        close_fraction = qty / pos["qty"] if pos["qty"] > 0 else 1.0
+        entry_fee_portion = total_entry_fee * close_fraction
+        total_fee = entry_fee_portion + fee
+        pnl = (fill_price - entry) * qty - total_fee
+        pnl_pct = pnl / (entry * qty) if entry * qty > 0 else 0.0
 
         # Record trade
         now = datetime.now().isoformat()
@@ -332,7 +342,7 @@ class PortfolioTracker:
                (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
-             fee, pos.get("intent", "DAY"), None, strategy_regime, pos.get("opened_at", now), now),
+             total_fee, pos.get("intent", "DAY"), None, strategy_regime, pos.get("opened_at", now), now),
         )
 
         # Update or remove position
@@ -342,6 +352,7 @@ class PortfolioTracker:
             await self._db.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
         else:
             pos["qty"] = remaining_qty
+            pos["entry_fee"] = total_entry_fee - entry_fee_portion
             pos["updated_at"] = now
             await self._db.execute(
                 "UPDATE positions SET qty = ?, updated_at = ? WHERE symbol = ?",
@@ -384,20 +395,32 @@ class PortfolioTracker:
 
     async def snapshot_daily(self) -> None:
         """Record end-of-day performance snapshot."""
+        # Use configured timezone for date boundary (not UTC)
+        tz = ZoneInfo(self._config.timezone)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+
         tv = await self.total_value()
         trades = await self._db.fetchall(
-            "SELECT pnl FROM trades WHERE closed_at >= date('now') AND pnl IS NOT NULL"
+            "SELECT pnl, fees FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL",
+            (today,),
         )
         wins = sum(1 for t in trades if t["pnl"] > 0)
         losses = sum(1 for t in trades if t["pnl"] <= 0)
         total = len(trades)
         gross = sum(t["pnl"] for t in trades)
 
+        # gross_pnl = price movement without fees; net_pnl = after fees (already in trade.pnl)
+        # trade.pnl includes both entry + exit fees, so gross = sum(pnl) IS the net figure
+        # Reconstruct true gross by adding fees back: gross_before_fees = net + total_fees
+        net = gross  # trade.pnl already has fees subtracted
+        fees_from_trades = sum(t["fees"] for t in trades if t.get("fees"))
+        gross_before_fees = net + fees_from_trades
+
         await self._db.execute(
             """INSERT OR REPLACE INTO daily_performance
                (date, portfolio_value, cash, total_trades, wins, losses, gross_pnl, net_pnl, fees_total, win_rate)
-               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tv, self._cash, total, wins, losses, gross, gross - self._fees_today,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (today, tv, self._cash, total, wins, losses, gross_before_fees, net,
              self._fees_today, wins / total if total > 0 else 0.0),
         )
         await self._db.commit()

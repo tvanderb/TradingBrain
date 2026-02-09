@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS paper_tests (
     required_days INTEGER NOT NULL,
     started_at TEXT DEFAULT (datetime('now')),
     ends_at TEXT NOT NULL,
-    status TEXT DEFAULT 'running',      -- 'running', 'passed', 'failed'
+    status TEXT DEFAULT 'running',      -- 'running', 'passed', 'failed', 'terminated'
     result TEXT,                         -- JSON
     completed_at TEXT
 );
@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_observations (
     market_summary TEXT,
     strategy_assessment TEXT,
     notable_findings TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(date, cycle_id)
 );
 
 -- Indexes for common queries
@@ -270,8 +271,8 @@ class Database:
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
         return await self.conn.execute(sql, params)
 
-    async def executemany(self, sql: str, params: list[tuple]) -> None:
-        await self.conn.executemany(sql, params)
+    async def executemany(self, sql: str, params: list[tuple]) -> aiosqlite.Cursor:
+        return await self.conn.executemany(sql, params)
 
     async def fetchone(self, sql: str, params: tuple = ()) -> dict | None:
         cursor = await self.conn.execute(sql, params)

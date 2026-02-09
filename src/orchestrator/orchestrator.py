@@ -369,14 +369,21 @@ class Orchestrator:
                 )
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
+            # 0b. Evaluate any paper tests that have completed
+            paper_results = await self._evaluate_paper_tests()
+
             # 1. Gather context
             context = await self._gather_context()
+
+            # Include completed paper test results so Opus can learn from outcomes
+            context["completed_paper_tests"] = paper_results
 
             # 2. Opus analysis
             decision = await self._analyze(context)
 
             # 3. Execute decision
             decision_type = decision.get("decision", "NO_CHANGE")
+            deployed_version = None
 
             if decision_type == "NO_CHANGE":
                 report = f"Orchestrator: No changes. {decision.get('reasoning', '')}"
@@ -386,12 +393,18 @@ class Orchestrator:
                 # Strategy changes: STRATEGY_TWEAK, STRATEGY_RESTRUCTURE, STRATEGY_OVERHAUL
                 # Also handle legacy names: TWEAK, RESTRUCTURE, OVERHAUL
                 report = await self._execute_change(decision, context)
+                # Extract deployed version from report if deploy succeeded
+                if "deployed" in report.lower():
+                    ver_row = await self._db.fetchone(
+                        "SELECT version FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
+                    )
+                    deployed_version = ver_row["version"] if ver_row else None
 
             # 4. Store daily observations
             await self._store_observation(decision)
 
             # 5. Log orchestration
-            await self._log_orchestration(decision)
+            await self._log_orchestration(decision, deployed_version=deployed_version)
 
             # 6. Data maintenance
             await self._data_store.run_nightly_maintenance()
@@ -473,60 +486,89 @@ class Orchestrator:
             else "No strategy document"
         )
 
-        # Performance data
-        performance = await self._reporter.strategy_performance(days=7)
-        daily_perf = await self._db.fetchall(
-            "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 7"
-        )
+        # Performance data (wrapped for graceful degradation)
+        try:
+            performance = await self._reporter.strategy_performance(days=7)
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="performance", error=str(e))
+            performance = {}
 
-        # Recent trades
-        trades = await self._db.fetchall(
-            "SELECT symbol, side, pnl, pnl_pct, fees, intent, strategy_regime, closed_at FROM trades "
-            "WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 50"
-        )
+        try:
+            daily_perf = await self._db.fetchall(
+                "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 7"
+            )
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="daily_perf", error=str(e))
+            daily_perf = []
 
-        # Strategy version history
-        versions = await self._db.fetchall(
-            "SELECT version, description, risk_tier, backtest_result, paper_test_result, market_conditions "
-            "FROM strategy_versions ORDER BY created_at DESC LIMIT 10"
-        )
+        try:
+            trades = await self._db.fetchall(
+                "SELECT symbol, side, pnl, pnl_pct, fees, intent, strategy_regime, closed_at FROM trades "
+                "WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 50"
+            )
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="trades", error=str(e))
+            trades = []
+
+        try:
+            versions = await self._db.fetchall(
+                "SELECT version, description, risk_tier, backtest_result, paper_test_result, market_conditions "
+                "FROM strategy_versions ORDER BY created_at DESC LIMIT 10"
+            )
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="versions", error=str(e))
+            versions = []
 
         # --- 5. OPERATIONAL CONTEXT ---
-        usage = await self._ai.get_daily_usage()
+        try:
+            usage = await self._ai.get_daily_usage()
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="usage", error=str(e))
+            usage = {"models": {}, "total_cost": 0, "daily_limit": 0, "used": 0}
 
-        # Active paper tests
-        active_paper_tests = await self._db.fetchall(
-            """SELECT strategy_version, risk_tier, required_days, started_at, ends_at, status
-               FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC"""
-        )
+        try:
+            active_paper_tests = await self._db.fetchall(
+                """SELECT strategy_version, risk_tier, required_days, started_at, ends_at, status
+                   FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC"""
+            )
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="paper_tests", error=str(e))
+            active_paper_tests = []
 
         # Signal drought detection
-        last_signal = await self._db.fetchone(
-            "SELECT created_at FROM signals ORDER BY created_at DESC LIMIT 1"
-        )
-        signals_7d = await self._db.fetchone(
-            "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-7 days')"
-        )
-        signals_30d = await self._db.fetchone(
-            "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-30 days')"
-        )
-        scans_24h = await self._db.fetchone(
-            "SELECT COUNT(*) as count FROM scan_results WHERE created_at >= datetime('now', '-1 day')"
-        )
-        drought_info = {
-            "last_signal_at": last_signal["created_at"] if last_signal else None,
-            "signals_last_7d": signals_7d["count"] if signals_7d else 0,
-            "signals_last_30d": signals_30d["count"] if signals_30d else 0,
-            "scans_last_24h": scans_24h["count"] if scans_24h else 0,
-        }
+        try:
+            last_signal = await self._db.fetchone(
+                "SELECT created_at FROM signals ORDER BY created_at DESC LIMIT 1"
+            )
+            signals_7d = await self._db.fetchone(
+                "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-7 days')"
+            )
+            signals_30d = await self._db.fetchone(
+                "SELECT COUNT(*) as count FROM signals WHERE created_at >= datetime('now', '-30 days')"
+            )
+            scans_24h = await self._db.fetchone(
+                "SELECT COUNT(*) as count FROM scan_results WHERE created_at >= datetime('now', '-1 day')"
+            )
+            drought_info = {
+                "last_signal_at": last_signal["created_at"] if last_signal else None,
+                "signals_last_7d": signals_7d["count"] if signals_7d else 0,
+                "signals_last_30d": signals_30d["count"] if signals_30d else 0,
+                "scans_last_24h": scans_24h["count"] if scans_24h else 0,
+            }
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="drought", error=str(e))
+            drought_info = {"last_signal_at": None, "signals_last_7d": 0, "signals_last_30d": 0, "scans_last_24h": 0}
 
-        # Recent observations (last 14 days)
-        recent_observations = await self._db.fetchall(
-            """SELECT date, market_summary, strategy_assessment, notable_findings
-               FROM orchestrator_observations
-               WHERE date >= date('now', '-14 days')
-               ORDER BY date DESC"""
-        )
+        try:
+            recent_observations = await self._db.fetchall(
+                """SELECT date, market_summary, strategy_assessment, notable_findings
+                   FROM orchestrator_observations
+                   WHERE date >= date('now', '-14 days')
+                   ORDER BY date DESC"""
+            )
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="observations", error=str(e))
+            recent_observations = []
 
         return {
             # Ground truth (rigid)
@@ -612,7 +654,7 @@ class Orchestrator:
 - Trading pairs: {", ".join(self._config.symbols)}
 - System: Long-only (no short selling, no leverage)
 - Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%
-- Default slippage: {self._config.default_slippage_pct * 100:.2f}% (signals can override per-trade)
+- Default slippage: {self._config.default_slippage_factor * 100:.2f}% (signals can override per-trade)
 - Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio
 - Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio
 - Max position size: {self._config.risk.max_position_pct * 100:.0f}% of portfolio
@@ -629,6 +671,9 @@ class Orchestrator:
 
 ### Active Paper Tests:
 {json.dumps(context["active_paper_tests"], indent=2, default=str) if context["active_paper_tests"] else "No active paper tests."}
+
+### Completed Paper Tests (this cycle):
+{json.dumps(context.get("completed_paper_tests", []), indent=2, default=str) if context.get("completed_paper_tests") else "No paper tests completed this cycle."}
 
 ### Recent Observations (last 14 days):
 {json.dumps(context["recent_observations"], indent=2, default=str) if context["recent_observations"] else "No prior observations."}
@@ -678,10 +723,11 @@ Respond in JSON format."""
                 f"- Trading pairs: {', '.join(self._config.symbols)}\n"
                 f"- Long-only (no short selling, no leverage)\n"
                 f"- Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%\n"
-                f"- Default slippage: {self._config.default_slippage_pct * 100:.2f}%\n"
+                f"- Default slippage: {self._config.default_slippage_factor * 100:.2f}%\n"
                 f"- Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio\n"
                 f"- Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio\n"
                 f"- Max positions: {self._config.risk.max_positions}\n"
+                f"- Max position per symbol: {self._config.risk.max_position_pct * 100:.0f}% of portfolio\n"
                 f"- SymbolData includes maker_fee_pct and taker_fee_pct per pair\n"
                 f"- Signal supports optional slippage_tolerance override (float)"
             )
@@ -742,9 +788,13 @@ Generate the complete strategy.py file."""
                 f"code_gen_{attempt + 1}", "sonnet", gen_prompt[:500], code
             )
 
-            # Strip markdown code fences if present
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
+            # Strip markdown code fences if present (case-insensitive)
+            code_lower = code.lower()
+            if "```python" in code_lower:
+                idx = code_lower.index("```python")
+                code = code[idx + len("```python"):]
+                if "```" in code:
+                    code = code[:code.index("```")]
             elif "```" in code:
                 code = code.split("```")[1].split("```")[0]
             code = code.strip()
@@ -822,21 +872,25 @@ Is this classification correct?
                     )
                     continue
 
+                # Terminate any running paper tests (superseded by new strategy)
+                await self._terminate_running_paper_tests("superseded by new deploy")
+
                 # Deploy to active
-                version = f"v{datetime.now().strftime('%Y%m%d_%H%M')}"
+                version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 code_hash = deploy_strategy(code, version)
 
                 # Record in strategy index with parent version lineage
                 await self._db.execute(
                     """INSERT INTO strategy_versions
-                       (version, parent_version, code_hash, risk_tier, description, market_conditions, deployed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                       (version, parent_version, code_hash, risk_tier, description, backtest_result, market_conditions, deployed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
                     (
                         version,
                         parent_version,
                         code_hash,
                         actual_tier,
                         changes[:500],
+                        backtest_summary[:500],
                         decision.get("market_observations", "")[:500],
                     ),
                 )
@@ -877,6 +931,62 @@ Is this classification correct?
                 changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
 
         return f"Strategy change aborted after {max_revisions} failed attempts."
+
+    async def _terminate_running_paper_tests(self, reason: str = "superseded") -> int:
+        """Terminate all running paper tests. Called before deploying a new strategy."""
+        result = await self._db.execute(
+            "UPDATE paper_tests SET status = 'terminated' WHERE status = 'running'"
+        )
+        await self._db.commit()
+        count = result.rowcount if hasattr(result, 'rowcount') else 0
+        if count:
+            log.info("orchestrator.paper_tests_terminated", count=count, reason=reason)
+        return count
+
+    async def _evaluate_paper_tests(self) -> list[dict]:
+        """Evaluate paper tests that have reached their end date.
+        Returns list of evaluation results for context."""
+        completed = await self._db.fetchall(
+            """SELECT id, strategy_version, risk_tier, started_at, ends_at
+               FROM paper_tests
+               WHERE status = 'running' AND ends_at <= datetime('now')"""
+        )
+        results = []
+        for test in completed:
+            version = test["strategy_version"]
+            # Get trades made during the paper test period
+            trades = await self._db.fetchall(
+                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL",
+                (version,),
+            )
+            total_pnl = sum(t["pnl"] for t in trades) if trades else 0.0
+            trade_count = len(trades)
+            wins = sum(1 for t in trades if t["pnl"] > 0)
+
+            # Simple pass/fail: did it not lose money? (orchestrator can do deeper analysis)
+            passed = total_pnl >= 0 or trade_count == 0  # No trades = inconclusive, pass
+            status = "passed" if passed else "failed"
+
+            await self._db.execute(
+                "UPDATE paper_tests SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?",
+                (status, json.dumps({"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins}), test["id"]),
+            )
+
+            results.append({
+                "version": version,
+                "status": status,
+                "trades": trade_count,
+                "pnl": total_pnl,
+            })
+            log.info(
+                "orchestrator.paper_test_evaluated",
+                version=version, status=status,
+                trades=trade_count, pnl=round(total_pnl, 4),
+            )
+
+        if results:
+            await self._db.commit()
+        return results
 
     async def _execute_analysis_change(self, decision: dict, context: dict) -> str:
         """Execute an analysis module update: generate -> review -> sandbox -> deploy.
@@ -931,9 +1041,13 @@ Generate the complete {module_name}.py file."""
                 code,
             )
 
-            # Strip markdown code fences if present
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
+            # Strip markdown code fences if present (case-insensitive)
+            code_lower = code.lower()
+            if "```python" in code_lower:
+                idx = code_lower.index("```python")
+                code = code[idx + len("```python"):]
+                if "```" in code:
+                    code = code[:code.index("```")]
             elif "```" in code:
                 code = code.split("```")[1].split("```")[0]
             code = code.strip()
@@ -980,7 +1094,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
 
             if review.get("approved"):
                 # Deploy — no paper testing needed (read-only module)
-                version = f"v{datetime.now().strftime('%Y%m%d_%H%M')}"
+                version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 code_hash = deploy_analysis_module(module_name, code, version)
 
                 log.info(
@@ -1019,6 +1133,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
         import sys
         import tempfile
 
+        tmp_path = None
         try:
             # Load the new strategy from code string
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -1079,10 +1194,14 @@ The orchestrator wants to change this module because: {changes[:500]}"""
         finally:
             import os
 
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            # Clean up temp file
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            # Clean up leaked module from sys.modules
+            sys.modules.pop("backtest_strategy", None)
 
     async def _store_observation(self, decision: dict) -> None:
         """Store daily observations in DB table (replaces strategy doc appends).
@@ -1092,7 +1211,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
         """
         try:
             await self._db.execute(
-                """INSERT INTO orchestrator_observations
+                """INSERT OR REPLACE INTO orchestrator_observations
                    (date, cycle_id, market_summary, strategy_assessment, notable_findings)
                    VALUES (date('now'), ?, ?, ?, ?)""",
                 (
@@ -1102,21 +1221,44 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                     decision.get("cross_reference_findings", "")[:2000],
                 ),
             )
+            # Prune observations older than 30 days
+            await self._db.execute(
+                "DELETE FROM orchestrator_observations WHERE date < date('now', '-30 days')"
+            )
             await self._db.commit()
             log.info("orchestrator.observation_stored", cycle_id=self._cycle_id)
         except Exception as e:
             log.warning("orchestrator.observation_store_failed", error=str(e))
 
-    async def _log_orchestration(self, decision: dict) -> None:
+    async def _log_orchestration(
+        self, decision: dict, deployed_version: str | None = None
+    ) -> None:
         """Record orchestration decision in database."""
+        # Get current strategy version as the "from" version
+        current = await self._db.fetchone(
+            "SELECT version FROM strategy_versions WHERE retired_at IS NULL ORDER BY deployed_at DESC LIMIT 1"
+        )
+        version_from = current["version"] if current else None
+
+        # Token usage for this cycle
+        tokens_used = self._ai._daily_tokens_used  # Total for today (includes this cycle)
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE created_at >= date('now')"
+        )
+        cost_today = row["total"] if row else 0.0
+
         await self._db.execute(
             """INSERT INTO orchestrator_log
-               (date, action, analysis, changes)
-               VALUES (date('now'), ?, ?, ?)""",
+               (date, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd)
+               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?)""",
             (
                 decision.get("decision", "UNKNOWN"),
                 json.dumps(decision, default=str),
                 decision.get("specific_changes", ""),
+                version_from,
+                deployed_version,
+                tokens_used,
+                cost_today,
             ),
         )
         await self._db.commit()

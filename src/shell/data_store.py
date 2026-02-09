@@ -41,14 +41,14 @@ class DataStore:
                 float(row.get("volume", 0)),
             ))
 
-        await self._db.executemany(
+        cursor = await self._db.executemany(
             """INSERT OR IGNORE INTO candles
                (symbol, timeframe, timestamp, open, high, low, close, volume)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         await self._db.commit()
-        return len(rows)
+        return cursor.rowcount if cursor else len(rows)
 
     async def get_candles(
         self, symbol: str, timeframe: str, limit: int | None = None
@@ -204,10 +204,16 @@ class DataStore:
         )
         await self._db.commit()
 
-        # Also prune old token usage logs (aggregate after 3 months)
+        # Prune old token usage logs (aggregate after 3 months)
         token_cutoff = (datetime.now() - timedelta(days=90)).isoformat()
         await self._db.execute(
             "DELETE FROM token_usage WHERE created_at < ?",
+            (token_cutoff,),
+        )
+
+        # Prune old fee schedule entries (keep last 90 days)
+        await self._db.execute(
+            "DELETE FROM fee_schedule WHERE checked_at < ?",
             (token_cutoff,),
         )
 

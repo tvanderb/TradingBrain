@@ -14,6 +14,7 @@ Tests that analysis code:
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import importlib.util
 import sys
@@ -21,9 +22,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiosqlite
 import structlog
 
 from src.shell.contract import AnalysisBase
+from src.shell.database import SCHEMA
+from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
 
 log = structlog.get_logger()
 
@@ -39,7 +43,7 @@ FORBIDDEN_IMPORTS = {
 # - pathlib: blocked (filesystem access)
 FORBIDDEN_IMPORTS.update({"os", "sqlite3", "aiosqlite", "pathlib"})
 
-FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "print"}
+FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile", "print"}
 
 
 @dataclass
@@ -132,6 +136,15 @@ def validate_analysis_module(code: str, module_name: str) -> AnalysisSandboxResu
         if len(params) < 2:
             errors.append(f"analyze() must accept (db, schema), got {params}")
 
+        # Step 6: Test-run analyze() against an empty in-memory DB
+        if not errors:
+            try:
+                result = _test_analyze(instance)
+                if not isinstance(result, dict):
+                    errors.append(f"analyze() must return dict, got {type(result).__name__}")
+            except Exception as e:
+                errors.append(f"analyze() crashed on test DB: {type(e).__name__}: {e}")
+
     except Exception as e:
         errors.append(f"Runtime error: {type(e).__name__}: {e}")
     finally:
@@ -145,3 +158,34 @@ def validate_analysis_module(code: str, module_name: str) -> AnalysisSandboxResu
 
     log.info("analysis_sandbox.passed", module=module_name, warnings=len(warnings))
     return AnalysisSandboxResult(True, [], warnings)
+
+
+def _test_analyze(instance: AnalysisBase) -> dict:
+    """Run analyze() against an in-memory DB with schema but no data.
+
+    Catches modules that crash on empty tables (common bug).
+    Runs in a fresh event loop to avoid nesting issues.
+    """
+
+    async def _run() -> dict:
+        async with aiosqlite.connect(":memory:") as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.executescript(SCHEMA)
+            ro_db = ReadOnlyDB(conn)
+            schema = get_schema_description()
+            return await instance.analyze(ro_db, schema)
+
+    # Use asyncio.run if no loop is running, otherwise run in thread
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        return asyncio.run(_run())
+    else:
+        # Already inside an async context — run in a new thread to avoid nested loop
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result(timeout=10)

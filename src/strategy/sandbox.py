@@ -35,7 +35,9 @@ FORBIDDEN_IMPORTS = {
     "sqlite3", "aiosqlite", "pathlib",
 }
 
-FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "eval", "exec", "__import__"}
+FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "os.environ", "os.path"}
+
+FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile"}
 
 
 @dataclass
@@ -45,8 +47,19 @@ class SandboxResult:
     warnings: list[str]
 
 
+def _get_dotted_name(node: ast.expr) -> str | None:
+    """Reconstruct dotted attribute name from AST node (e.g., os.system)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _get_dotted_name(node.value)
+        if parent:
+            return f"{parent}.{node.attr}"
+    return None
+
+
 def check_imports(code: str) -> list[str]:
-    """Check for forbidden imports in the strategy code."""
+    """Check for forbidden imports, calls, and attribute access in strategy code."""
     errors = []
     try:
         tree = ast.parse(code)
@@ -67,19 +80,32 @@ def check_imports(code: str) -> list[str]:
                     errors.append(f"Forbidden import: from {node.module}")
 
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "__import__"):
+            if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
                 errors.append(f"Forbidden function call: {node.func.id}()")
+            # Check dotted attribute calls like os.system()
+            elif isinstance(node.func, ast.Attribute):
+                dotted = _get_dotted_name(node.func)
+                if dotted and dotted in FORBIDDEN_ATTRS:
+                    errors.append(f"Forbidden attribute call: {dotted}()")
 
     return errors
 
 
 def _make_sample_data() -> tuple[dict[str, SymbolData], Portfolio, RiskLimits]:
     """Create sample data for sandbox testing."""
-    symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
+    symbols = [
+        "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD",
+        "ADA/USD", "LINK/USD", "AVAX/USD", "DOT/USD",
+    ]
+    _base_prices = {
+        "BTC/USD": 70000, "ETH/USD": 2000, "SOL/USD": 80,
+        "XRP/USD": 0.50, "DOGE/USD": 0.15, "ADA/USD": 0.40,
+        "LINK/USD": 15.0, "AVAX/USD": 25.0, "DOT/USD": 5.0,
+    }
     markets = {}
 
     for sym in symbols:
-        base_price = {"BTC/USD": 70000, "ETH/USD": 2000, "SOL/USD": 80}[sym]
+        base_price = _base_prices[sym]
         n = 100
         dates = pd.date_range(end=datetime.now(), periods=n, freq="5min")
         prices = base_price + np.random.randn(n).cumsum() * (base_price * 0.001)

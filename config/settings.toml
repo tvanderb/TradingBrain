@@ -3,7 +3,7 @@ mode = "paper"              # "paper" or "live"
 paper_balance_usd = 200.0   # Starting balance for paper trading
 timezone = "US/Eastern"
 log_level = "INFO"
-default_slippage_pct = 0.0005  # 0.05% — signal can override per-trade
+default_slippage_factor = 0.0005  # 0.05% as decimal factor — signal can override per-trade
 
 [kraken]
 rest_url = "https://api.kraken.com"

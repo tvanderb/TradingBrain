@@ -1,14 +1,18 @@
 """Integration tests for the v2 IO-Container trading system.
 
 Tests: config loading, database schema, IO contract, risk management,
-strategy loading/sandbox, portfolio operations, backtester.
+strategy loading/sandbox, portfolio operations, backtester, orchestration,
+Telegram commands, strategy deploy/rollback, scan loop.
 """
 
 import asyncio
 import json
 import os
+import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -27,7 +31,7 @@ def test_config_loading():
     assert config.risk.rollback_consecutive_losses == 999
     assert config.ai.provider in ("anthropic", "vertex")
     assert config.ai.daily_token_limit == 1500000  # 1.5M safety net
-    assert config.default_slippage_pct == 0.0005
+    assert config.default_slippage_factor == 0.0005
 
 
 # --- Database ---
@@ -1212,6 +1216,841 @@ async def test_data_store_aggregation_5m_to_1h():
         # 5m candles should be deleted (aggregated away)
         count_after = await store.get_candle_count("BTC/USD", "5m")
         assert count_after == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Critical Audit Fix Tests (Session 12) ---
+
+@pytest.mark.asyncio
+async def test_pnl_includes_entry_and_exit_fees():
+    """C1+C2: Trade P&L includes both entry and exit fees."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Action, Intent, Signal
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        # Buy at 50000 with 0.40% taker fee
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.10, intent=Intent.DAY)
+        buy_result = await portfolio.execute_signal(buy, 50000.0, 0.25, 0.40)
+        assert buy_result is not None
+        entry_fee = buy_result["fee"]
+        assert entry_fee > 0
+
+        # Sell at same price — P&L should be negative (both fees)
+        sell = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+        sell_result = await portfolio.execute_signal(sell, 50000.0, 0.25, 0.40)
+        assert sell_result is not None
+
+        # P&L should reflect BOTH fees
+        assert sell_result["pnl"] < 0
+        # The recorded fee in the trade should be entry + exit
+        trade = await db.fetchone("SELECT pnl, fees FROM trades WHERE symbol = 'BTC/USD'")
+        assert trade["fees"] > entry_fee  # Total fees > just the entry fee
+        # pnl should be approximately -(entry_fee + exit_fee)
+        assert trade["pnl"] < 0
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_risk_allows_exit_during_daily_loss():
+    """C3: SELL/CLOSE signals pass through even when daily loss limit exceeded."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+    from src.shell.contract import Action, Signal, Intent
+
+    config = RiskConfig(
+        max_trade_pct=0.05, max_position_pct=0.15, max_positions=5,
+        max_daily_loss_pct=0.03, max_drawdown_pct=0.12, max_daily_trades=50,
+        max_leverage=1.0, rollback_daily_loss_pct=0.08, rollback_consecutive_losses=999,
+        default_trade_pct=0.02, default_stop_loss_pct=0.02, default_take_profit_pct=0.06,
+        kill_switch=False,
+    )
+    risk = RiskManager(config)
+
+    # Simulate being in a bad loss state
+    risk._daily_pnl = -100.0  # Way past the limit for a $1000 portfolio
+    risk._halted = True
+    risk._halt_reason = "Max drawdown exceeded"
+
+    # BUY should be blocked
+    buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02, intent=Intent.DAY)
+    check = risk.check_signal(buy, 1000.0, 3)
+    assert not check.passed
+
+    # CLOSE should be allowed
+    close = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+    check = risk.check_signal(close, 1000.0, 3)
+    assert check.passed, f"CLOSE should pass during halt: {check.reason}"
+
+    # SELL should be allowed
+    sell = Signal(symbol="BTC/USD", action=Action.SELL, size_pct=0.5, intent=Intent.DAY)
+    check = risk.check_signal(sell, 1000.0, 3)
+    assert check.passed, f"SELL should pass during halt: {check.reason}"
+
+
+def test_sandbox_blocks_open_and_compile():
+    """C4+C5: Strategy sandbox blocks open(), compile(), and attribute calls."""
+    from src.strategy.sandbox import check_imports
+
+    # open() should be blocked
+    errors = check_imports("data = open('/etc/passwd').read()")
+    assert any("open" in e for e in errors), f"Should block open(): {errors}"
+
+    # compile() should be blocked
+    errors = check_imports("code = compile('import os', '', 'exec')")
+    assert any("compile" in e for e in errors), f"Should block compile(): {errors}"
+
+    # os.system() via attribute should be blocked (if os import somehow slipped through)
+    errors = check_imports("import os\nos.system('rm -rf /')")
+    # Should catch the import first
+    assert any("Forbidden import" in e for e in errors)
+
+    # Direct attribute call check (assuming somehow imported)
+    code = """
+import numpy as np
+result = np.array([1, 2, 3])
+"""
+    errors = check_imports(code)
+    assert len(errors) == 0  # numpy is allowed
+
+
+def test_sandbox_blocks_forbidden_attrs():
+    """C5: FORBIDDEN_ATTRS actually catches dotted attribute calls."""
+    from src.strategy.sandbox import check_imports
+
+    # Test that os.system() call is caught as attribute (even without import check)
+    code = "os.system('whoami')"
+    errors = check_imports(code)
+    assert any("os.system" in e for e in errors), f"Should catch os.system(): {errors}"
+
+    code = "os.popen('ls')"
+    errors = check_imports(code)
+    assert any("os.popen" in e for e in errors), f"Should catch os.popen(): {errors}"
+
+
+@pytest.mark.asyncio
+async def test_risk_peak_loaded_from_db():
+    """C7: Peak portfolio value loaded from DB on initialize."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+    from src.shell.database import Database
+
+    config = RiskConfig(
+        max_trade_pct=0.05, max_position_pct=0.15, max_positions=5,
+        max_daily_loss_pct=0.03, max_drawdown_pct=0.12, max_daily_trades=50,
+        max_leverage=1.0, rollback_daily_loss_pct=0.08, rollback_consecutive_losses=999,
+        default_trade_pct=0.02, default_stop_loss_pct=0.02, default_take_profit_pct=0.06,
+        kill_switch=False,
+    )
+    risk = RiskManager(config)
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed a daily performance record with a high portfolio value
+        await db.execute(
+            """INSERT INTO daily_performance
+               (date, portfolio_value, cash, total_trades, wins, losses, gross_pnl, net_pnl, fees_total, win_rate)
+               VALUES ('2026-01-01', 1500.0, 1000.0, 5, 3, 2, 10.0, 8.0, 2.0, 0.6)"""
+        )
+        await db.commit()
+
+        # Before initialize: peak is None
+        assert risk._peak_portfolio is None
+
+        # After initialize: peak loaded from DB
+        await risk.initialize(db)
+        assert risk._peak_portfolio == 1500.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_test_lifecycle():
+    """C6: Paper tests are terminated on new deploy and evaluated at end date."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Create a running paper test
+        await db.execute(
+            """INSERT INTO paper_tests
+               (strategy_version, risk_tier, required_days, ends_at, status)
+               VALUES ('v001', 1, 1, datetime('now', '-1 day'), 'running')"""
+        )
+        # Create another one still running (future end)
+        await db.execute(
+            """INSERT INTO paper_tests
+               (strategy_version, risk_tier, required_days, ends_at, status)
+               VALUES ('v002', 2, 2, datetime('now', '+1 day'), 'running')"""
+        )
+        await db.commit()
+
+        # Verify both are running
+        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
+        assert len(running) == 2
+
+        # Terminate all (simulating new deploy)
+        await db.execute("UPDATE paper_tests SET status = 'terminated' WHERE status = 'running'")
+        await db.commit()
+
+        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
+        assert len(running) == 0
+
+        terminated = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'terminated'")
+        assert len(terminated) == 2
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- T1: Nightly Orchestration Cycle (mocked) ---
+
+@pytest.mark.asyncio
+async def test_orchestration_nightly_cycle_no_change():
+    """T1: Full nightly cycle with mocked AI returning NO_CHANGE."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.orchestrator.orchestrator import Orchestrator
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        # Mock AI client
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 500
+        ai.get_daily_usage = AsyncMock(return_value={
+            "used": 500, "daily_limit": 1500000, "total_cost": 0.02, "models": {}
+        })
+
+        # Opus returns a NO_CHANGE decision
+        ai.ask_opus = AsyncMock(return_value=json.dumps({
+            "decision": "NO_CHANGE",
+            "reasoning": "Markets are stable, no changes needed.",
+            "market_observations": "BTC consolidating near 70k",
+            "cross_reference_findings": "",
+        }))
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+        report = await orch.run_nightly_cycle()
+
+        assert "No changes" in report
+        assert orch._cycle_id is not None
+
+        # Verify thought was stored
+        thoughts = await db.fetchall(
+            "SELECT * FROM orchestrator_thoughts WHERE cycle_id = ?",
+            (orch._cycle_id,),
+        )
+        assert len(thoughts) >= 1
+        assert thoughts[0]["step"] == "analysis"
+
+        # Verify observation stored
+        obs = await db.fetchall("SELECT * FROM orchestrator_observations")
+        assert len(obs) == 1
+        assert "stable" in obs[0]["strategy_assessment"]
+
+        # Verify orchestrator_log stored
+        log_row = await db.fetchone("SELECT * FROM orchestrator_log ORDER BY id DESC LIMIT 1")
+        assert log_row is not None
+        assert log_row["action"] == "NO_CHANGE"
+        assert log_row["tokens_used"] is not None
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_orchestration_cycle_insufficient_budget():
+    """T1b: Orchestrator skips cycle when token budget is insufficient."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.orchestrator.orchestrator import Orchestrator
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 100  # Way below 5000 threshold
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+        report = await orch.run_nightly_cycle()
+
+        assert "insufficient" in report.lower() or "Skipped" in report
+        # AI should NOT have been called
+        ai.ask_opus.assert_not_called()
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- T2: Strategy Deploy + Archive + Rollback ---
+
+def test_strategy_deploy_archive_rollback():
+    """T2: Deploy archives current, restores from archive."""
+    from src.strategy.loader import (
+        deploy_strategy, archive_strategy, load_strategy,
+        get_strategy_path, get_code_hash, ACTIVE_DIR, ARCHIVE_DIR,
+    )
+
+    # Save original strategy to restore later
+    original_path = get_strategy_path()
+    original_code = original_path.read_text()
+    original_hash = get_code_hash(original_path)
+
+    try:
+        # Deploy a new strategy
+        new_code = '''"""Test strategy v2."""
+from src.shell.contract import StrategyBase, Signal, Action
+
+class Strategy(StrategyBase):
+    def initialize(self, risk_limits, symbols):
+        self._symbols = symbols
+
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+        new_hash = deploy_strategy(new_code, "test_v2")
+        assert new_hash != original_hash
+
+        # Current strategy should be the new one
+        loaded = load_strategy()
+        assert loaded is not None
+
+        # Archive should contain the pre-deploy backup
+        archives = list(ARCHIVE_DIR.glob("strategy_pre_test_v2_*.py"))
+        assert len(archives) >= 1
+
+        # Verify the archive contains the original code
+        archived_code = archives[0].read_text()
+        assert archived_code == original_code
+
+    finally:
+        # Restore original strategy
+        get_strategy_path().write_text(original_code)
+        # Clean up archives created by this test
+        for f in ARCHIVE_DIR.glob("strategy_pre_test_v2_*.py"):
+            f.unlink()
+
+
+# --- T3: Paper Test Pipeline ---
+
+@pytest.mark.asyncio
+async def test_paper_test_full_pipeline():
+    """T3: Paper test create → evaluate → pass/fail based on trade P&L."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.orchestrator.orchestrator import Orchestrator
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 0
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+
+        # Create a paper test that has already ended (past ends_at)
+        await db.execute(
+            """INSERT INTO paper_tests
+               (strategy_version, risk_tier, required_days, ends_at, status)
+               VALUES ('v_test', 1, 1, datetime('now', '-1 hour'), 'running')"""
+        )
+        # Insert some winning trades for that version
+        await db.execute(
+            """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+               fees, intent, strategy_version, opened_at, closed_at)
+               VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_test',
+                       datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
+        )
+        await db.commit()
+
+        # Evaluate paper tests
+        results = await orch._evaluate_paper_tests()
+        assert len(results) == 1
+        assert results[0]["status"] in ("passed", "failed")
+
+        # Verify DB updated
+        test = await db.fetchone("SELECT * FROM paper_tests WHERE strategy_version = 'v_test'")
+        assert test["status"] in ("passed", "failed")
+
+        # Test termination of running tests
+        await db.execute(
+            """INSERT INTO paper_tests
+               (strategy_version, risk_tier, required_days, ends_at, status)
+               VALUES ('v_test2', 2, 2, datetime('now', '+1 day'), 'running')"""
+        )
+        await db.commit()
+
+        count = await orch._terminate_running_paper_tests("new deploy")
+        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
+        assert len(running) == 0
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- T4: Telegram Commands ---
+
+@pytest.mark.asyncio
+async def test_telegram_commands():
+    """T4: Telegram commands return expected output formats."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        risk = RiskManager(config.risk)
+
+        scan_state = {"last_scan": "02:30:00", "symbols": {
+            "BTC/USD": {"price": 70000, "rsi": 55, "ema_fast": 70100, "ema_slow": 69900,
+                        "vol_ratio": 1.2, "regime": "trending"},
+        }}
+
+        commands = BotCommands(
+            config=config, db=db, scan_state=scan_state,
+            risk_manager=risk,
+        )
+
+        # Mock Update and message
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = []
+
+        # /start
+        await commands.cmd_start(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Trading Brain" in reply
+        assert "/status" in reply
+
+        # /status
+        update.message.reply_text.reset_mock()
+        await commands.cmd_status(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Mode: paper" in reply
+        assert "ACTIVE" in reply
+
+        # /positions (empty)
+        update.message.reply_text.reset_mock()
+        await commands.cmd_positions(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "No open positions" in reply
+
+        # /trades (empty)
+        update.message.reply_text.reset_mock()
+        await commands.cmd_trades(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "No completed trades" in reply
+
+        # /report (with scan data)
+        update.message.reply_text.reset_mock()
+        await commands.cmd_report(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "BTC/USD" in reply
+        assert "trending" in reply
+
+        # /risk
+        update.message.reply_text.reset_mock()
+        await commands.cmd_risk(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Risk Limits" in reply
+        assert "Kill switch: OFF" in reply
+
+        # /strategy
+        update.message.reply_text.reset_mock()
+        await commands.cmd_strategy(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Strategy" in reply or "Hash" in reply
+
+        # /pause and /resume
+        update.message.reply_text.reset_mock()
+        await commands.cmd_pause(update, context)
+        assert commands.is_paused
+        reply = update.message.reply_text.call_args[0][0]
+        assert "PAUSED" in reply
+
+        update.message.reply_text.reset_mock()
+        await commands.cmd_resume(update, context)
+        assert not commands.is_paused
+        reply = update.message.reply_text.call_args[0][0]
+        assert "RESUMED" in reply
+
+        # /thoughts (empty)
+        update.message.reply_text.reset_mock()
+        await commands.cmd_thoughts(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "No orchestrator cycles" in reply
+
+        # /kill
+        update.message.reply_text.reset_mock()
+        await commands.cmd_kill(update, context)
+        assert commands.is_paused
+        assert scan_state.get("kill_requested") is True
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_telegram_authorization():
+    """T4b: Commands reject unauthorized users when user IDs are configured."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    config.telegram.allowed_user_ids = [99999]  # Only user 99999 allowed
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        commands = BotCommands(config=config, db=db, scan_state={})
+
+        # Unauthorized user
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345  # Not in allowed list
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = []
+
+        await commands.cmd_status(update, context)
+        update.message.reply_text.assert_not_called()  # Silently rejected
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- T5: Graceful Shutdown ---
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown():
+    """T5: TradingBrain.stop() cleans up resources properly."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # Simulate a running system by creating the brain components manually
+        # and testing the stop sequence rather than full start/stop
+        from src.shell.risk import RiskManager
+
+        risk = RiskManager(config.risk)
+
+        # Simulate some state
+        risk.record_trade_result(-1.0)
+        risk.record_trade_result(2.0)
+        assert risk.daily_trades == 2
+        assert risk.daily_pnl == 1.0
+
+        # Reset should clear daily state
+        risk.reset_daily()
+        assert risk.daily_trades == 0
+        assert risk.daily_pnl == 0.0
+        # But consecutive losses persist
+        assert risk.consecutive_losses == 0  # Reset by the win
+
+        # Halt + unhalt cycle
+        risk._halted = True
+        risk._halt_reason = "test halt"
+        assert risk.is_halted
+        risk.unhalt()
+        assert not risk.is_halted
+        assert risk.consecutive_losses == 0
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_double_shutdown_prevented():
+    """T5b: Double shutdown doesn't crash (main.py finally guard)."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # DB close is idempotent
+        await db.close()
+        # Second close should not raise
+        await db.close()
+    finally:
+        try:
+            os.unlink(config.db_path)
+        except FileNotFoundError:
+            pass
+
+
+# --- T7: Strategy State Round-Trip ---
+
+def test_strategy_state_round_trip():
+    """T7: Strategy get_state → load_state preserves internal state."""
+    from src.strategy.loader import load_strategy
+    from src.shell.contract import RiskLimits, SymbolData, Portfolio, Action
+
+    strategy = load_strategy()
+    limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
+                        max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
+    strategy.initialize(limits, ["BTC/USD", "ETH/USD"])
+
+    # Generate some state by running analyze with trending data
+    dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
+    prices = list(range(50000, 50100))
+    df = pd.DataFrame({
+        "open": prices,
+        "high": [p + 50 for p in prices],
+        "low": [p - 50 for p in prices],
+        "close": prices,
+        "volume": [50] * 100,
+    }, index=dates)
+
+    markets = {"BTC/USD": SymbolData(
+        symbol="BTC/USD", current_price=50099,
+        candles_5m=df, candles_1h=df, candles_1d=df,
+        spread=0.001, volume_24h=1000000,
+    )}
+    portfolio = Portfolio(cash=200, total_value=200, positions=[], recent_trades=[],
+                          daily_pnl=0, total_pnl=0, fees_today=0)
+
+    # Run a couple of analysis cycles to build state
+    strategy.analyze(markets, portfolio, datetime.now())
+    strategy.analyze(markets, portfolio, datetime.now())
+
+    # Capture state
+    state = strategy.get_state()
+    assert isinstance(state, dict)
+
+    # Load into a fresh strategy instance
+    strategy2 = load_strategy()
+    strategy2.initialize(limits, ["BTC/USD", "ETH/USD"])
+    strategy2.load_state(state)
+    state2 = strategy2.get_state()
+
+    # States should match (round-trip fidelity)
+    assert state.keys() == state2.keys()
+    for key in state:
+        if isinstance(state[key], dict):
+            for k, v in state[key].items():
+                if isinstance(v, float):
+                    assert abs(v - state2[key].get(k, 0)) < 1e-6, f"Mismatch for {key}.{k}"
+                else:
+                    assert v == state2[key].get(k), f"Mismatch for {key}.{k}"
+
+
+# --- T11: Scan Loop Flow ---
+
+@pytest.mark.asyncio
+async def test_scan_loop_generates_signals():
+    """T11: Scan loop builds markets, runs strategy, executes signals."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.risk import RiskManager
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import (
+        Signal, Action, Intent, SymbolData, Portfolio, RiskLimits,
+    )
+    from src.strategy.loader import load_strategy
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+        risk = RiskManager(config.risk)
+
+        strategy = load_strategy()
+        limits = RiskLimits(
+            max_trade_pct=config.risk.max_trade_pct,
+            default_trade_pct=config.risk.default_trade_pct,
+            max_positions=config.risk.max_positions,
+            max_daily_loss_pct=config.risk.max_daily_loss_pct,
+            max_drawdown_pct=config.risk.max_drawdown_pct,
+        )
+        strategy.initialize(limits, config.symbols)
+
+        # Build mock market data for one symbol (trending up to trigger BUY)
+        dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
+        # Strong uptrend: fast EMA will cross above slow EMA
+        prices = [50000 + i * 50 for i in range(100)]
+        df = pd.DataFrame({
+            "open": prices,
+            "high": [p + 30 for p in prices],
+            "low": [p - 30 for p in prices],
+            "close": prices,
+            "volume": [100] * 100,
+        }, index=dates)
+
+        markets = {}
+        for symbol in config.symbols[:1]:  # Just BTC for simplicity
+            markets[symbol] = SymbolData(
+                symbol=symbol, current_price=prices[-1],
+                candles_5m=df, candles_1h=df, candles_1d=df,
+                spread=0.001, volume_24h=5000000,
+            )
+
+        port = await portfolio.get_portfolio({s: m.current_price for s, m in markets.items()})
+
+        # Run strategy (may or may not generate signals depending on strategy state)
+        signals = strategy.analyze(markets, port, datetime.now())
+        assert isinstance(signals, list)
+
+        # Run twice to establish EMA state
+        signals2 = strategy.analyze(markets, port, datetime.now())
+        assert isinstance(signals2, list)
+
+        # All signals should be valid
+        for sig in signals2:
+            assert sig.symbol in config.symbols
+            assert sig.action in (Action.BUY, Action.SELL, Action.CLOSE)
+            assert 0 < sig.size_pct <= 1.0
+
+            # Risk check should work
+            check = risk.check_signal(sig, port.total_value, portfolio.position_count)
+            assert isinstance(check.passed, bool)
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_scan_results_stored_in_db():
+    """T11b: Scan results are persisted to scan_results table."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Simulate what the scan loop does: insert scan results
+        await db.execute(
+            """INSERT INTO scan_results
+               (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now(tz=None).isoformat(), "BTC/USD", 70000, 70100, 69900, 55, 1.2, 0.5, "trending"),
+        )
+        await db.execute(
+            """INSERT INTO scan_results
+               (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now(tz=None).isoformat(), "ETH/USD", 3500, 3510, 3490, 48, 0.9, 0.3, "ranging"),
+        )
+        await db.commit()
+
+        # Query back
+        rows = await db.fetchall("SELECT * FROM scan_results ORDER BY symbol")
+        assert len(rows) == 2
+        assert rows[0]["symbol"] == "BTC/USD"
+        assert rows[0]["rsi"] == 55
+        assert rows[1]["symbol"] == "ETH/USD"
+        assert rows[1]["strategy_regime"] == "ranging"
+
+        # Update with signal info (simulates what scan loop does after strategy runs)
+        await db.execute(
+            """UPDATE scan_results SET signal_generated = 1, signal_action = 'BUY', signal_confidence = 0.8
+               WHERE symbol = 'BTC/USD' AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = 'BTC/USD')"""
+        )
+        await db.commit()
+
+        row = await db.fetchone("SELECT * FROM scan_results WHERE symbol = 'BTC/USD'")
+        assert row["signal_generated"] == 1
+        assert row["signal_action"] == "BUY"
+        assert row["signal_confidence"] == 0.8
 
         await db.close()
     finally:

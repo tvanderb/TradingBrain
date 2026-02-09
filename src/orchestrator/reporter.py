@@ -75,7 +75,7 @@ class Reporter:
         )
 
         trades = await self._db.fetchall(
-            "SELECT * FROM trades WHERE closed_at >= ?",
+            "SELECT * FROM trades WHERE closed_at >= ? ORDER BY closed_at ASC",
             (week_ago,),
         )
 
@@ -171,5 +171,5 @@ class Reporter:
             "expectancy": expectancy,
             "net_pnl": sum(pnls),
             "total_fees": sum(t.get("fees", 0) for t in trades),
-            "profit_factor": sum(wins) / sum(abs(l) for l in losses) if losses else float("inf"),
+            "profit_factor": sum(wins) / sum(abs(l) for l in losses) if losses else None,
         }

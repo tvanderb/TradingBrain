@@ -6,6 +6,7 @@ Tracks token usage and costs.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -32,19 +33,31 @@ class AIClient:
         self._daily_tokens_used: int = 0
 
     async def initialize(self) -> None:
-        """Initialize the appropriate API client."""
+        """Initialize the appropriate API client and seed token counter from DB."""
         if self._config.provider == "vertex":
             from anthropic import AsyncAnthropicVertex
             self._client = AsyncAnthropicVertex(
                 project_id=self._config.vertex_project_id,
                 region=self._config.vertex_region,
+                timeout=300.0,
             )
             log.info("ai.initialized", provider="vertex",
                      project=self._config.vertex_project_id, region=self._config.vertex_region)
         else:
             from anthropic import AsyncAnthropic
-            self._client = AsyncAnthropic(api_key=self._config.anthropic_api_key)
+            self._client = AsyncAnthropic(
+                api_key=self._config.anthropic_api_key,
+                timeout=300.0,
+            )
             log.info("ai.initialized", provider="anthropic")
+
+        # Seed daily token counter from DB to survive restarts
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) as total FROM token_usage WHERE created_at >= date('now')"
+        )
+        if row and row["total"]:
+            self._daily_tokens_used = row["total"]
+            log.info("ai.tokens_seeded", used_today=self._daily_tokens_used)
 
     @property
     def tokens_remaining(self) -> int:
@@ -95,7 +108,23 @@ class AIClient:
         if system:
             kwargs["system"] = system
 
-        response = await self._client.messages.create(**kwargs)
+        # Retry with exponential backoff for transient errors
+        max_retries = 3
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.messages.create(**kwargs)
+                break
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # Retry on transient errors (network, rate limit, server errors)
+                is_transient = any(k in error_str for k in ("timeout", "rate", "429", "500", "502", "503", "529", "overloaded", "connection"))
+                if not is_transient or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                log.warning("ai.retry", attempt=attempt + 1, error=str(e), wait=wait)
+                await asyncio.sleep(wait)
 
         # Extract text
         text = ""

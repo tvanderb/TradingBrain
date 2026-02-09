@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import structlog
 
@@ -113,6 +114,7 @@ class Backtester:
             return BacktestResult()
 
         prev_day = None
+        day_start_value = cash
 
         for ts in timestamps:
             # Build SymbolData for each symbol at this point
@@ -171,7 +173,7 @@ class Backtester:
                 cash=cash, total_value=total_value,
                 positions=open_positions,
                 recent_trades=[],
-                daily_pnl=total_value - self._starting_cash,
+                daily_pnl=total_value - day_start_value,
                 total_pnl=total_value - self._starting_cash,
                 fees_today=0.0,
             )
@@ -200,6 +202,7 @@ class Backtester:
                     cash -= (trade_value + fee)
                     positions[signal.symbol] = {
                         "qty": qty, "avg_entry": price,
+                        "entry_fee": fee,
                         "stop_loss": signal.stop_loss, "take_profit": signal.take_profit,
                         "opened_at": ts,
                     }
@@ -209,9 +212,11 @@ class Backtester:
                     pos = positions[signal.symbol]
                     qty = pos["qty"]
                     sale = qty * price
-                    fee = sale * fee_pct
+                    exit_fee = sale * fee_pct
+                    entry_fee = pos.get("entry_fee", 0.0)
+                    fee = entry_fee + exit_fee
                     pnl = (price - pos["avg_entry"]) * qty - fee
-                    pnl_pct = (price - pos["avg_entry"]) / pos["avg_entry"]
+                    pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
                     cash += (sale - fee)
 
                     all_trades.append(BacktestTrade(
@@ -223,9 +228,11 @@ class Backtester:
                     self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
                     del positions[signal.symbol]
 
-            # Check stop-loss / take-profit on existing positions
+            # Check stop-loss / take-profit on existing positions (skip same-bar entries)
             for sym in list(positions.keys()):
                 pos = positions[sym]
+                if pos.get("opened_at") == ts:
+                    continue  # Don't trigger SL/TP on the same bar as entry
                 price = prices.get(sym)
                 if price is None:
                     continue
@@ -239,9 +246,11 @@ class Backtester:
                 if triggered:
                     qty = pos["qty"]
                     sale = qty * price
-                    fee = sale * (self._get_taker_fee(sym) / 100)
+                    exit_fee = sale * (self._get_taker_fee(sym) / 100)
+                    entry_fee = pos.get("entry_fee", 0.0)
+                    fee = entry_fee + exit_fee
                     pnl = (price - pos["avg_entry"]) * qty - fee
-                    pnl_pct = (price - pos["avg_entry"]) / pos["avg_entry"]
+                    pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
                     cash += (sale - fee)
                     all_trades.append(BacktestTrade(
                         symbol=sym, action="CLOSE", qty=qty, price=price,
@@ -255,6 +264,7 @@ class Backtester:
             if current_day and current_day != prev_day:
                 daily_values.append(total_value)
                 peak_value = max(peak_value, total_value)
+                day_start_value = total_value
                 prev_day = current_day
 
         # Compute metrics
@@ -297,9 +307,8 @@ class Backtester:
             result.daily_returns = returns
 
             if returns and len(returns) > 1:
-                import numpy as np
                 mean_r = np.mean(returns)
                 std_r = np.std(returns)
-                result.sharpe = (mean_r / std_r * (252 ** 0.5)) if std_r > 0 else 0
+                result.sharpe = (mean_r / std_r * (365 ** 0.5)) if std_r > 0 else 0  # crypto: 365 days
 
         return result

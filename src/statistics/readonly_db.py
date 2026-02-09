@@ -15,9 +15,12 @@ log = structlog.get_logger()
 
 # Patterns that indicate a write operation
 _WRITE_PATTERNS = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*=)",
+    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*=|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)",
     re.IGNORECASE,
 )
+
+# Strip SQL block comments (/* ... */) and line comments (--)
+_SQL_COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 
 
 class ReadOnlyDB:
@@ -28,8 +31,10 @@ class ReadOnlyDB:
 
     def _check_readonly(self, sql: str) -> None:
         """Raise ValueError if the SQL is not a read-only query."""
+        # Strip comments to prevent bypass via /* comment */ DROP TABLE
+        cleaned = _SQL_COMMENT.sub("", sql)
         # Check each statement to prevent multi-statement bypass (e.g. "SELECT 1; DROP TABLE")
-        for statement in sql.split(";"):
+        for statement in cleaned.split(";"):
             statement = statement.strip()
             if statement and _WRITE_PATTERNS.match(statement):
                 raise ValueError(f"Write operation blocked in read-only mode: {statement[:80]}")
@@ -75,7 +80,7 @@ def get_schema_description() -> dict:
             "description": "Completed trades with P&L",
             "columns": {
                 "symbol": "Trading pair",
-                "side": "'long' or 'short'",
+                "side": "'long' (system is long-only)",
                 "qty": "Quantity traded",
                 "entry_price": "Entry fill price",
                 "exit_price": "Exit fill price",
@@ -140,7 +145,7 @@ def get_schema_description() -> dict:
             "description": "Currently open positions",
             "columns": {
                 "symbol": "Trading pair",
-                "side": "'long' or 'short'",
+                "side": "'long' (system is long-only)",
                 "qty": "Position size",
                 "avg_entry": "Average entry price",
                 "current_price": "Last known price",

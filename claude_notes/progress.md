@@ -484,9 +484,84 @@ Replaced monolithic `ANALYSIS_SYSTEM` with three-layer framework:
 
 **Test updated**: `test_analysis_code_gen_prompts_exist` → checks new constants (identity, mandate, Layer 2 content)
 
-### Current Status
+### Current Status (after Session 11)
 - Branch: v2-io-container
 - Tests: 35/35 passing
 - System NOT running (stopped for development)
 - All audit fixes + pre-prompt features + prompt writing COMPLETE
 - **Next**: End-to-end review and test
+
+## Session 12 (2026-02-09) — Full System Audit
+
+### Audit Scope
+All 29 source files, 1 test file, 2 config files, active strategy/statistics modules, skills library, strategy document. Four parallel audit agents. 59 total findings.
+
+### Critical Fixes (7/7)
+- **C1**: Trade P&L now includes entry fee (portfolio.py + backtester.py) — was overstating profits by 0.25-0.40%
+- **C2**: Net P&L no longer double-counts exit fees in daily snapshots
+- **C3**: SELL/CLOSE always pass through ALL risk checks (was trapped in losing positions)
+- **C4**: Strategy sandbox blocks `open()`
+- **C5**: FORBIDDEN_ATTRS now checked via `ast.Attribute` visitor (os.system, os.popen)
+- **C6**: Paper test lifecycle implemented (terminate + evaluate)
+- **C7**: Peak portfolio loaded from DB on restart (drawdown protection continuity)
+
+### Medium Fixes (18/20, 2 deferred)
+M1-M16, M18-M19 fixed. M17 (stats sandbox test analyze) and M20 (orchestrator log completeness) deferred.
+
+Key fixes: timezone-aware daily snapshots, API timeout, token budget persistence, code fence case-insensitive stripping, per-query error handling in gather_context, observation pruning, backtest result storage, live sell respects order_type, on_fill called for exits, message chunking.
+
+### Low Fixes (10/14)
+- L3: Scan interval updated after strategy hot-swap
+- L4: Version strings include seconds (prevent collision)
+- L6: fee_schedule pruned after 90 days
+- L7: Scan results use UTC timestamps
+- L10: Removed duplicate _release_lock registration
+- L11: Backtest module cleaned from sys.modules
+- L12: ReadOnlyDB strips SQL comments before checking write patterns
+- L14: _run_backtest tmp_path safe from UnboundLocalError
+- L1, L2, L13: Fixed in batch 2
+
+Skipped: L5 (overcounted inserts — logging only), L9 (duplicate observations — bounded by pruning)
+False positive: L8 (get_candles not dead code)
+
+### Cosmetic Fixes (2/5)
+- X1: ReadOnlyDB schema reflects long-only system
+- X5: Removed dead short-side P&L ternary
+
+### Tests
+41/41 passing. 6 new tests added for critical fixes.
+
+### Batch 4: Previously-Deferred + Remaining Fixes
+- M17: Stats sandbox now test-runs analyze() against in-memory DB
+- M20: orchestrator_log stores version_from, deployed_version, tokens_used, cost_usd
+- L5: store_candles returns actual insert count via cursor.rowcount
+- L9: orchestrator_observations has UNIQUE(date, cycle_id), uses INSERT OR REPLACE
+- X2: Renamed default_slippage_pct → default_slippage_factor
+- X3: JSON_LOGS env var toggles JSONRenderer for VPS
+- X4: numpy import moved to top-level in backtester
+
+### Batch 5: Test Coverage (11 new tests)
+- T1: Nightly orchestration cycle (2 tests: NO_CHANGE + insufficient budget)
+- T2: Strategy deploy/archive/rollback (1 test)
+- T3: Paper test pipeline with evaluation (1 test)
+- T4: Telegram commands (2 tests: 10+ commands + authorization)
+- T5: Graceful shutdown (2 tests: risk lifecycle + double close)
+- T7: Strategy state round-trip (1 test)
+- T11: Scan loop flow (2 tests: strategy run + DB persistence)
+
+### Batch 6: End-to-End Review (Session 13)
+Full system review with 4 parallel agents examining all 29 source files + 3 active modules.
+
+**Verified issues fixed (4):**
+1. reporter.py: `profit_factor` returned `float("inf")` → now returns `None` (JSON-safe)
+2. orchestrator.py: Paper test results (`_evaluate_paper_tests()`) now passed into Opus context via `completed_paper_tests` key
+3. ai_client.py: Added exponential backoff retry (3 attempts, 1s/2s/4s) for transient API errors (timeout, rate limit, 5xx)
+4. main.py: Strategy hash initialized on startup → prevents unnecessary strategy reload on first nightly cycle
+
+**False positives dismissed (7):** Markdown stripping (correct), cash going negative (guarded), Signal mutation (not frozen), self._ai null (always created), delete-before-commit (commits inside store_candles), daily token reset (called at midnight), zero-trade paper test pass (deliberate design).
+
+### Current Status
+- Branch: v2-io-container
+- Tests: **52/52 passing**
+- **ALL audit findings RESOLVED** + **end-to-end review complete**
+- System ready for first real run

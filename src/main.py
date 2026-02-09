@@ -9,12 +9,11 @@ Shutdown: stop scheduler -> save strategy state -> cancel orders -> stop WS -> s
 from __future__ import annotations
 
 import asyncio
-import atexit
 import json
 import os
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import structlog
@@ -84,6 +83,7 @@ class TradingBrain:
         self._portfolio = PortfolioTracker(self._config, self._db, self._kraken)
         self._data_store = DataStore(self._db, self._config.data)
         await self._portfolio.initialize()
+        await self._risk.initialize(self._db)
 
         # 3b. Bootstrap historical data if DB is sparse
         await self._bootstrap_historical_data()
@@ -107,6 +107,9 @@ class TradingBrain:
             if state_row:
                 self._strategy.load_state(json.loads(state_row["state_json"]))
                 log.info("strategy.state_restored")
+
+            # Initialize strategy hash so first nightly cycle doesn't trigger unnecessary reload
+            self._scan_state["strategy_hash"] = get_code_hash(get_strategy_path())
         except Exception as e:
             log.error("strategy.load_failed", error=str(e))
             raise
@@ -335,7 +338,7 @@ class TradingBrain:
                         """INSERT INTO scan_results
                            (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (datetime.now().isoformat(), symbol, price,
+                        (datetime.now(timezone.utc).isoformat(), symbol, price,
                          indicators.get("ema_fast"), indicators.get("ema_slow"),
                          indicators.get("rsi"), indicators.get("vol_ratio"),
                          spread, indicators.get("regime")),
@@ -401,10 +404,9 @@ class TradingBrain:
                             result["symbol"], result["pnl"], result.get("pnl_pct", 0)
                         )
 
-                    if signal.action == Action.BUY:
-                        self._strategy.on_fill(
-                            signal.symbol, Action.BUY, result["qty"], result["price"], signal.intent
-                        )
+                    self._strategy.on_fill(
+                        signal.symbol, signal.action, result["qty"], result["price"], signal.intent
+                    )
 
                     # Notify
                     await self._notifier.trade_executed(result)
@@ -554,6 +556,18 @@ class TradingBrain:
                 )
                 self._strategy.initialize(risk_limits, self._config.symbols)
                 self._scan_state["strategy_hash"] = new_hash
+
+                # Update scan interval if strategy changed it
+                new_interval = self._strategy.scan_interval_minutes
+                try:
+                    job = self._scheduler.get_job("scan")
+                    if job:
+                        self._scheduler.reschedule_job(
+                            "scan", trigger=IntervalTrigger(minutes=new_interval)
+                        )
+                        log.info("strategy.scan_interval_updated", minutes=new_interval)
+                except Exception:
+                    pass  # Scheduler job may not exist yet
                 log.info("strategy.reloaded_after_orchestration")
 
             await self._notifier.daily_summary(report)
@@ -664,8 +678,8 @@ def _acquire_lock() -> None:
             # Stale lockfile — previous process died without cleanup
             log.warning("lockfile.stale", old_pid=old_pid)
 
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text(str(os.getpid()))
-    atexit.register(_release_lock)
 
 
 def _release_lock() -> None:
@@ -696,7 +710,8 @@ async def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        await brain.stop()
+        if brain._running:
+            await brain.stop()
         _release_lock()
 
 
