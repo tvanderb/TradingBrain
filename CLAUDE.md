@@ -27,7 +27,7 @@ To enhance learning and collaboration:
 6. **Ask for Feedback**: Always end by asking questions to refine.
 
 ### Note-Taking Mechanism
-**IMPORTANT**: Use the `claude_notes/` directory at the project root for ALL note-taking. Do NOT use Claude's built-in auto-memory system.
+**IMPORTANT**: Use the `docs/dev_notes/` directory at the project root for ALL note-taking. Do NOT use Claude's built-in auto-memory system.
 
 **Frequency**: Update notes EVERY interaction — not just on major milestones. Treat these notes as a continuous engineering journal, not a changelog.
 
@@ -40,11 +40,11 @@ To enhance learning and collaboration:
 - **Lessons learned**: What went wrong, what was the fix, how to avoid it next time
 
 **File organization**:
-- `claude_notes/progress.md` — Build progress, what's done/working/broken
-- `claude_notes/decisions.md` — Key technical and architectural decisions with rationale
-- `claude_notes/architecture.md` — System architecture, data flow, component relationships
-- `claude_notes/discussions.md` — Ongoing conversation threads, design direction, user preferences, open questions
-- `claude_notes/gotchas.md` — Technical gotchas, bugs, and their fixes (reference for future sessions)
+- `docs/dev_notes/progress.md` — Build progress, what's done/working/broken
+- `docs/dev_notes/decisions.md` — Key technical and architectural decisions with rationale
+- `docs/dev_notes/architecture.md` — System architecture, data flow, component relationships
+- `docs/dev_notes/discussions.md` — Ongoing conversation threads, design direction, user preferences, open questions
+- `docs/dev_notes/gotchas.md` — Technical gotchas, bugs, and their fixes (reference for future sessions)
 
 **Quality bar**: An engineer picking up this project mid-stream should be able to read the notes and understand not just WHAT was built, but WHY, what the user cares about, what's been discussed, and where the project is heading. Notes should be concise but complete — scannable headers, bullet points, not walls of text. Update existing content rather than only appending. Review notes at the start of each session.
 

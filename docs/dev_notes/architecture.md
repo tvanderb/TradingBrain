@@ -135,7 +135,11 @@ trading-brain/
 │   └── brain.db                   # SQLite database
 ├── reports/                       # Orchestrator-generated reports
 ├── tests/
-├── claude_notes/                  # Engineering notes (this directory)
+├── docs/
+│   ├── DEPLOY.md                  # Admin deployment guide
+│   └── dev_notes/                 # Engineering notes (this directory)
+├── Dockerfile
+├── docker-compose.yml
 ├── pyproject.toml
 ├── .env.example
 ├── .gitignore

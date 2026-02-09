@@ -1,0 +1,14 @@
+services:
+  trading-brain:
+    build: .
+    container_name: trading-brain
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ./strategy/active:/app/strategy/active
+      - ./statistics/active:/app/statistics/active
+    environment:
+      - TZ=US/Eastern
+      - JSON_LOGS=1

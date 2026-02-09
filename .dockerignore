@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.claude
+.DS_Store
+__pycache__
+*.pyc
+node_modules
+data/*.db*
+data/brain.pid
+reports/
+tests/
+docs/
+.pytest_cache
+CLAUDE.md
+README.md

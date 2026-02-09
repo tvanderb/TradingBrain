@@ -9,7 +9,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
-build/
 *.egg
 
 # Runtime data
@@ -33,10 +32,10 @@ reports/*.json
 .DS_Store
 Thumbs.db
 
-# Node (from initial setup)
-node_modules/
-pnpm-lock.yaml
-package.json
+# Runtime
+data/brain.pid
+data/*.db-shm
+data/*.db-wal
 
 # Logs
 *.log

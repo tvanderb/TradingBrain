@@ -565,3 +565,30 @@ Full system review with 4 parallel agents examining all 29 source files + 3 acti
 - Tests: **52/52 passing**
 - **ALL audit findings RESOLVED** + **end-to-end review complete**
 - System ready for first real run
+
+---
+
+## Session 14 (2026-02-09) — Cleanup, Docker, Deployment Docs
+
+### Cleanup
+- Deleted `build/` (old v1 build artifacts)
+- Deleted `package.json`, `pnpm-lock.yaml`, `node_modules/` (Node.js dev tooling)
+- Cleaned runtime artifacts: `brain.pid`, `brain.db-shm`, `brain.db-wal`
+
+### Directory Reorganization
+- Moved `claude_notes/` → `docs/dev_notes/` (preserves history context)
+- Created `docs/DEPLOY.md` — admin deployment guide
+- Updated all `claude_notes/` references in CLAUDE.md and MEMORY.md
+
+### Docker
+- Created `Dockerfile` — `python:3.12-slim`, minimal deps, single entrypoint
+- Created `docker-compose.yml` — volume mounts for data, config, strategy, statistics
+- Created `.dockerignore` — excludes dev files from build context
+
+### .gitignore Updates
+- Removed `build/`, `package.json`, `pnpm-lock.yaml` entries (files deleted)
+- Added runtime artifact patterns (`brain.pid`, `*.db-shm`, `*.db-wal`)
+
+### Verification
+- **52/52 tests passing** (unchanged)
+- Docker not installed on dev machine (VPS-only) — files validated structurally
