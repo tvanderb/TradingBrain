@@ -60,23 +60,12 @@ class TelegramBot:
         await self._app.initialize()
         await self._app.start()
 
-        # Clear any stale webhook from a previous instance before polling.
+        # Clear any stale webhook and wait for the previous instance's
+        # long-poll to expire on Telegram's servers (up to 30s).
         await self._app.bot.delete_webhook(drop_pending_updates=True)
+        log.info("telegram.waiting_for_session_release", wait=10)
+        await asyncio.sleep(10)
 
-        # Retry polling startup — on container restart, the previous instance's
-        # long-poll may still be alive on Telegram's servers for a few seconds.
-        for attempt in range(3):
-            try:
-                await self._app.updater.start_polling(drop_pending_updates=True)
-                log.info("telegram.started")
-                return
-            except Conflict:
-                wait = 3 * (attempt + 1)
-                log.warning("telegram.conflict", attempt=attempt + 1, retry_in=wait,
-                            note="Previous polling session still active on Telegram servers")
-                await asyncio.sleep(wait)
-
-        # Final attempt — let it raise if it still fails
         await self._app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram.started")
 
