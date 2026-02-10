@@ -1085,8 +1085,33 @@ ansible-playbook playbook.yml --tags caddy
 ssh -i keys/trading-brain trading@<host> "docker compose -f /srv/trading-brain/docker-compose.yml logs --tail=50"
 ```
 
+### Telegram Conflict Resolved
+- New bot token deployed via `ansible-playbook playbook.yml --tags secrets`
+- Discovered `docker compose restart` does NOT re-read `.env` — only `up -d --force-recreate` works
+- Fixed playbook handler permanently: `restart container` now uses `up -d --force-recreate`
+- With new token + recreated container: zero Conflict errors, commands working
+
+### First Orchestrator Cycle (from Arch dev box)
+- Reviewed CSV exports from DataGrip (orchestrator ran on dev box before VPS deployment)
+- **Analysis (Opus)**: Identified 4 fundamental flaws in v001 — restrictive volume filter (>1.2x), noisy 5m EMA crossover, RSI filter conflicts, 2% stop too tight for crypto. Decided STRATEGY_RESTRUCTURE tier 2.
+- **Code Gen (Sonnet)**: Generated v002 — Hourly Trend-Following with Pullback Entry. 1h timeframe, pullback to EMA9 support, RSI 40-65, volume >0.8x, 4% SL / 8% TP (2:1 R:R), SWING intent.
+- **Code Review (Opus)**: Approved with 4 minor notes. Clean restructure, long-only compliant, proper guards.
+- Total cycle time: ~49 seconds. System working exactly as designed.
+
+### VPS Health Check (Session 17)
+- **Zero errors** in entire log since deployment
+- Scan loop: 9 symbols every 5 min, no misses
+- DB healthy: 16K+ candles (5m/1h/1d), 81 scan results, fee schedule populated
+- API: All 11 endpoints responding through Caddy reverse proxy
+- Resources: 0.12% CPU, 100MB RAM — very lean
+- WebSocket: Connected to Kraken
+- Telegram: Working, no Conflict errors
+- Strategy state: Persisting every scan cycle
+- `strategy_version_count: 0` expected — orchestrator hasn't run on VPS yet (first cycle tonight 12-3am EST)
+
 ### Current State
 - VPS running at 178.156.216.93, paper mode, $100 portfolio
-- Caddy reverse proxy on port 80
-- Telegram Conflict error under investigation (user creating new bot to test)
-- All deployment files committed
+- Caddy reverse proxy on port 80, all API endpoints accessible
+- Telegram working with new bot token
+- Zero errors, all subsystems green
+- Awaiting first VPS orchestrator cycle tonight
