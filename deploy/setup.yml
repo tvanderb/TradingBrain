@@ -275,6 +275,13 @@
     # PHASE 6: Harden SSH
     # =========================================================
 
+    - name: Remove deprecated ChallengeResponseAuthentication directive
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?ChallengeResponseAuthentication"
+        state: absent
+      notify: restart sshd
+
     - name: Harden sshd_config
       lineinfile:
         path: /etc/ssh/sshd_config
@@ -285,8 +292,8 @@
       loop:
         - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin no" }
         - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
-        - { regexp: "^#?ChallengeResponseAuthentication", line: "ChallengeResponseAuthentication no" }
-        - { regexp: "^#?UsePAM", line: "UsePAM no" }
+        - { regexp: "^#?KbdInteractiveAuthentication", line: "KbdInteractiveAuthentication no" }
+        - { regexp: "^#?UsePAM", line: "UsePAM yes" }
         - { regexp: "^#?X11Forwarding", line: "X11Forwarding no" }
         - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 3" }
         - { regexp: "^#?AllowUsers", line: "AllowUsers {{ deploy_user }}" }
@@ -399,6 +406,18 @@
     # =========================================================
     # PHASE 10: Verify
     # =========================================================
+
+    - name: Validate full sshd config before restart
+      command: sshd -t
+      changed_when: false
+
+    # CRITICAL: Flush handlers NOW so sshd restarts with the new
+    # config BEFORE we test connectivity. Without this, the verify
+    # step tests against the OLD sshd config, passes, then the
+    # handler restarts sshd with the new config — potentially
+    # locking us out if the new config has issues.
+    - name: Apply pending service restarts before verification
+      meta: flush_handlers
 
     - name: Verify SSH key login works
       delegate_to: localhost

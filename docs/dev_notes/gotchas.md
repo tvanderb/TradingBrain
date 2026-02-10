@@ -64,6 +64,11 @@ while running:
 **Fix**: PID lockfile at `data/brain.pid`. On startup, checks if PID is alive with `os.kill(pid, 0)`. Uses `ProcessLookupError` + `PermissionError` exceptions (NOT `ProcessNotFoundError` — that doesn't exist in Python). Auto-cleaned via `atexit` and explicit cleanup in `finally` block.
 **Note**: `pkill -f` may not terminate processes — use `kill -9 <pid>` if needed. After force-killing, also delete `brain.db-wal` and `brain.db-shm` (stale WAL files cause `disk I/O error`).
 
+## Ansible Handler Ordering (SSH Lockout)
+**Problem**: Ansible handlers run at END of play, AFTER all tasks. If you harden sshd_config and `notify: restart sshd`, the SSH verify task runs against the OLD config (passes), then the handler restarts sshd with the new config — if the new config is broken, you're locked out.
+**Fix**: Add `meta: flush_handlers` before any verify/connectivity-test tasks. Also run `sshd -t` before flushing to catch config errors while still connected.
+**Also**: `UsePAM no` breaks Debian's sshd (compiled against PAM). `ChallengeResponseAuthentication` is deprecated in OpenSSH 8.7+ — use `KbdInteractiveAuthentication` instead.
+
 ## Shell Escaping in Inline Python
 **Problem**: Running Python one-liners with `$` in f-strings gets eaten by bash substitution
 **Fix**: Use standalone `.py` test files instead of inline scripts
