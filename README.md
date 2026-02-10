@@ -1,6 +1,6 @@
 # Trading Brain
 
-An autonomous crypto trading system with AI-driven strategy evolution. A rigid **shell** handles execution, risk management, and exchange communication while an AI **orchestrator** rewrites the flexible trading strategy nightly.
+An autonomous crypto trading fund managed by AI. During the day, the system trades on its own — scanning markets, generating signals, and executing trades within hard risk limits. Every night, an AI orchestrator reviews performance and market conditions and decides whether the trading strategy should evolve. Most nights, it doesn't change anything. When it does, the new code goes through generation, review, backtesting, and paper testing before deployment.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ An autonomous crypto trading system with AI-driven strategy evolution. A rigid *
 
 **Strategy Module** (flexible): A single Python file (`strategy/active/strategy.py`) that the orchestrator can rewrite. Communicates with the shell through a strict IO contract: receives market data and portfolio state, returns trading signals.
 
-**Orchestrator** (nightly): Runs between 12am-3am EST. Claude Opus analyzes performance + market conditions, decides whether to modify the strategy, then Claude Sonnet generates code, Opus reviews it, and it's backtested and paper-tested before deployment.
+**Orchestrator** (nightly): Runs between 12am-3am EST. Claude Opus reviews ground-truth benchmarks, market analysis, and trade performance, then decides: do nothing, tweak the strategy, restructure it, or update the analysis modules. When it decides to change something, Sonnet generates code, Opus reviews it, and it's sandboxed, backtested, and paper-tested before deployment.
 
 ## Key Features
 
