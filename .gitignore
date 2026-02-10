@@ -42,6 +42,7 @@ data/*.db-wal
 
 # Ansible (contains secrets)
 deploy/inventory.yml
+deploy/keys/
 
 # Ansible retry files
 *.retry

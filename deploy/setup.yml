@@ -1,0 +1,236 @@
+---
+# Initial VPS setup and hardening.
+# Run ONCE on a fresh VPS with root + password access:
+#
+#   ansible-playbook setup.yml -e "vps_host=1.2.3.4 root_password=changeme"
+#
+# After this playbook runs:
+# - A deploy user exists with sudo + SSH key auth
+# - Password auth and root login are disabled
+# - Firewall allows only SSH (22) and API (8080)
+# - Swap is configured (2GB)
+# - SSH key is saved locally at deploy/keys/trading-brain
+#
+# Then update inventory.yml with the new user and key path.
+
+- name: Setup and Secure VPS
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    deploy_user: trading
+    ssh_port: 22
+    swap_size_mb: 2048
+    local_key_dir: "{{ playbook_dir }}/keys"
+
+  tasks:
+    # --- Generate SSH Key Locally ---
+
+    - name: Create local keys directory
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ local_key_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate SSH key pair
+      delegate_to: localhost
+      become: false
+      community.crypto.openssh_keypair:
+        path: "{{ local_key_dir }}/trading-brain"
+        type: ed25519
+        comment: "trading-brain-deploy"
+      register: ssh_key
+
+    - name: Read public key
+      delegate_to: localhost
+      become: false
+      slurp:
+        src: "{{ local_key_dir }}/trading-brain.pub"
+      register: pubkey
+
+    # --- System Updates ---
+
+    - name: Update package cache (Arch)
+      pacman:
+        update_cache: true
+      when: ansible_os_family == "Archlinux"
+
+    - name: Update package cache (Debian/Ubuntu)
+      apt:
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Install essential packages (Arch)
+      pacman:
+        name:
+          - openssh
+          - ufw
+          - sudo
+        state: present
+      when: ansible_os_family == "Archlinux"
+
+    - name: Install essential packages (Debian/Ubuntu)
+      apt:
+        name:
+          - openssh-server
+          - ufw
+          - sudo
+        state: present
+      when: ansible_os_family == "Debian"
+
+    # --- Deploy User ---
+
+    - name: Create deploy user
+      user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        groups: sudo,wheel
+        append: true
+        create_home: true
+        state: present
+
+    - name: Allow wheel group passwordless sudo (Arch)
+      lineinfile:
+        path: /etc/sudoers.d/wheel
+        line: "%wheel ALL=(ALL) NOPASSWD: ALL"
+        create: true
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: ansible_os_family == "Archlinux"
+
+    - name: Allow deploy user passwordless sudo (Debian/Ubuntu)
+      lineinfile:
+        path: "/etc/sudoers.d/{{ deploy_user }}"
+        line: "{{ deploy_user }} ALL=(ALL) NOPASSWD: ALL"
+        create: true
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: ansible_os_family == "Debian"
+
+    - name: Set up authorized key for deploy user
+      authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ pubkey.content | b64decode }}"
+        state: present
+        exclusive: true
+
+    # --- Harden SSH ---
+
+    - name: Harden sshd_config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        validate: "sshd -t -f %s"
+      loop:
+        - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin no" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
+        - { regexp: "^#?ChallengeResponseAuthentication", line: "ChallengeResponseAuthentication no" }
+        - { regexp: "^#?UsePAM", line: "UsePAM no" }
+        - { regexp: "^#?X11Forwarding", line: "X11Forwarding no" }
+        - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 3" }
+        - { regexp: "^#?AllowUsers", line: "AllowUsers {{ deploy_user }}" }
+        - { regexp: "^#?Port ", line: "Port {{ ssh_port }}" }
+      notify: restart sshd
+
+    # --- Firewall ---
+
+    - name: Reset UFW to defaults
+      ufw:
+        state: reset
+
+    - name: Set UFW default deny incoming
+      ufw:
+        direction: incoming
+        policy: deny
+
+    - name: Set UFW default allow outgoing
+      ufw:
+        direction: outgoing
+        policy: allow
+
+    - name: Allow SSH through firewall
+      ufw:
+        rule: allow
+        port: "{{ ssh_port | string }}"
+        proto: tcp
+
+    - name: Allow API port through firewall
+      ufw:
+        rule: allow
+        port: "8080"
+        proto: tcp
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # --- Swap ---
+
+    - name: Check if swap file exists
+      stat:
+        path: /swapfile
+      register: swap_check
+
+    - name: Create swap file
+      when: not swap_check.stat.exists
+      block:
+        - name: Allocate swap file
+          command: "dd if=/dev/zero of=/swapfile bs=1M count={{ swap_size_mb }}"
+
+        - name: Set swap file permissions
+          file:
+            path: /swapfile
+            mode: "0600"
+
+        - name: Format swap file
+          command: mkswap /swapfile
+
+        - name: Enable swap file
+          command: swapon /swapfile
+
+        - name: Add swap to fstab
+          lineinfile:
+            path: /etc/fstab
+            line: "/swapfile none swap sw 0 0"
+
+    # --- Verify ---
+
+    - name: Verify SSH key login works
+      delegate_to: localhost
+      become: false
+      command: >
+        ssh -o StrictHostKeyChecking=no
+        -i {{ local_key_dir }}/trading-brain
+        {{ deploy_user }}@{{ ansible_host }}
+        echo "SSH key auth working"
+      register: ssh_verify
+      changed_when: false
+
+    - name: Display SSH verification
+      debug:
+        msg: "{{ ssh_verify.stdout }}"
+
+    - name: Print next steps
+      debug:
+        msg:
+          - "VPS setup complete."
+          - ""
+          - "SSH key saved to: {{ local_key_dir }}/trading-brain"
+          - "Deploy user: {{ deploy_user }}"
+          - ""
+          - "Update deploy/inventory.yml:"
+          - "  ansible_host: {{ ansible_host }}"
+          - "  ansible_user: {{ deploy_user }}"
+          - "  ansible_ssh_private_key_file: {{ local_key_dir }}/trading-brain"
+          - ""
+          - "Then run: ansible-playbook playbook.yml"
+
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
