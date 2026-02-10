@@ -74,6 +74,13 @@
         append: true
       tags: [setup]
 
+    - name: Install sqlite3 (for monitoring and debugging)
+      apt:
+        name: sqlite3
+        state: present
+      when: ansible_os_family == "Debian"
+      tags: [setup]
+
     # --- Directory Structure ---
 
     - name: Create deployment directories

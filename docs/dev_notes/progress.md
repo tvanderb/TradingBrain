@@ -1109,9 +1109,35 @@ ssh -i keys/trading-brain trading@<host> "docker compose -f /srv/trading-brain/d
 - Strategy state: Persisting every scan cycle
 - `strategy_version_count: 0` expected — orchestrator hasn't run on VPS yet (first cycle tonight 12-3am EST)
 
+### Stale Indicators Bug Found and Fixed
+- After 8 hours of running, all indicators (RSI, EMA, volume_ratio) were frozen at startup values
+- Prices updated fine (from WebSocket ticker), but candles were never refreshed after bootstrap
+- Root cause: scan loop only fetched fresh candles if DB had < 30 rows. After bootstrap (1000+ rows), it never fetched again.
+- Fix: fetch fresh 5m candles from Kraken REST every scan, 1h every hour, 1d every day. `INSERT OR IGNORE` handles duplicates.
+- WebSocket OHLC subscription exists but callback was never registered — REST approach is simpler and more reliable.
+
+### Security Incident — libprocesshider.so on VPS
+- Discovered `/etc/ld.so.preload` referencing `libprocesshider.so` — a known rootkit process-hiding library
+- Library file itself was missing but the preload entry remained, printing errors to stderr on every process
+- This corrupted SSH stdout/SCP/rsync/Ansible output (binary protocol streams polluted by error messages)
+- VPS was a Hetzner cloud instance — likely a tainted base image or previous tenant artifacts
+- **VPS shut down immediately**. All keys must be rotated (Kraken, Anthropic, Telegram, API).
+
+### Security Hardening (complete rewrite of deploy scripts)
+- **setup.yml Phase 1**: Integrity verification before doing anything else
+  - Checks `/etc/ld.so.preload` — fails if non-empty
+  - Scans for SUID/SGID binaries outside standard paths
+  - Checks for rogue root cron jobs, unexpected listening ports, unexpected users
+- **Scoped sudo**: Deploy user can only run docker, systemctl, apt-get, ufw — not full root
+- **System upgrades**: `apt upgrade` during setup + `unattended-upgrades` for ongoing security patches
+- **fail2ban**: SSH jail — bans after 5 failed attempts for 1 hour
+- **Firewall**: Only ports 22, 80, 443 open (removed port 8080 — API only via Caddy)
+- **SSH hardening**: Added `LoginGraceTime 30`, `ClientAliveInterval 300`, `ClientAliveCountMax 2`
+- **Docker hardening**: Non-root user in Dockerfile, `no-new-privileges`, `read_only` filesystem, tmpfs for /tmp
+- **Removed old broad sudoers files**: wheel, cloud-init-users
+
 ### Current State
-- VPS running at 178.156.216.93, paper mode, $100 portfolio
-- Caddy reverse proxy on port 80, all API endpoints accessible
-- Telegram working with new bot token
-- Zero errors, all subsystems green
-- Awaiting first VPS orchestrator cycle tonight
+- Old VPS shut down, keys need rotation
+- New Hetzner instance needed — will run setup.yml (with integrity checks) → playbook.yml
+- All security fixes committed, stale indicators fix committed
+- 58/58 tests passing

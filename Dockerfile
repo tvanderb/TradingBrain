@@ -17,8 +17,13 @@ COPY strategy/ strategy/
 COPY statistics/ statistics/
 COPY config/ config/
 
-# Create runtime directories
-RUN mkdir -p data reports
+# Create runtime directories and non-root user
+RUN groupadd -r brain && useradd -r -g brain -d /app brain && \
+    mkdir -p data reports && \
+    chown -R brain:brain /app
+
+# Drop to non-root user
+USER brain
 
 # Environment
 ENV PYTHONUNBUFFERED=1

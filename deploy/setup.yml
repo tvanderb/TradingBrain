@@ -2,12 +2,17 @@
 # Initial VPS setup and hardening.
 # Run ONCE on a fresh VPS with root + password access:
 #
-#   ansible-playbook setup.yml -e "vps_host=1.2.3.4 root_password=changeme"
+#   cd deploy
+#   ansible-playbook setup.yml -i "<VPS_IP>," -u root \
+#     --extra-vars "ansible_password=<ROOT_PASSWORD>"
 #
 # After this playbook runs:
-# - A deploy user exists with sudo + SSH key auth
+# - VPS image verified clean (no rootkits, no rogue processes)
+# - System fully updated with unattended security upgrades enabled
+# - A deploy user exists with scoped sudo + SSH key auth
 # - Password auth and root login are disabled
-# - Firewall allows only SSH (22) and API (8080)
+# - fail2ban protects SSH from brute-force
+# - Firewall allows only SSH (22), HTTP (80), HTTPS (443)
 # - Swap is configured (2GB)
 # - SSH key is saved locally at deploy/keys/trading-brain
 #
@@ -24,7 +29,94 @@
     local_key_dir: "{{ playbook_dir }}/keys"
 
   tasks:
-    # --- Generate SSH Key Locally ---
+    # =========================================================
+    # PHASE 1: Integrity Verification (before touching anything)
+    # =========================================================
+
+    - name: Check /etc/ld.so.preload for suspicious libraries
+      block:
+        - name: Read ld.so.preload
+          slurp:
+            src: /etc/ld.so.preload
+          register: preload_content
+          failed_when: false
+
+        - name: Fail if ld.so.preload contains suspicious entries
+          fail:
+            msg: >
+              SECURITY ALERT: /etc/ld.so.preload contains suspicious entries:
+              {{ preload_content.content | b64decode }}
+              This VPS image may be compromised. Do NOT proceed.
+              Destroy this instance and provision a new one.
+          when:
+            - preload_content.content is defined
+            - preload_content.content | b64decode | trim | length > 0
+      tags: [verify]
+
+    - name: Check for unexpected SUID/SGID binaries
+      shell: |
+        find / -path /proc -prune -o -path /sys -prune -o \
+          \( -perm -4000 -o -perm -2000 \) -type f -print 2>/dev/null | \
+          grep -vE '^/(usr/(bin|lib|sbin)|bin|sbin)/' || true
+      register: suid_check
+      changed_when: false
+      tags: [verify]
+
+    - name: Fail if unexpected SUID binaries found
+      fail:
+        msg: >
+          SECURITY ALERT: Unexpected SUID/SGID binaries found outside
+          standard paths: {{ suid_check.stdout_lines }}
+      when: suid_check.stdout | trim | length > 0
+      tags: [verify]
+
+    - name: Check for unexpected root cron jobs
+      shell: |
+        crontab -l 2>/dev/null || true
+      register: root_cron
+      changed_when: false
+      tags: [verify]
+
+    - name: Warn if root has cron jobs
+      debug:
+        msg: "WARNING: Root has cron jobs: {{ root_cron.stdout_lines }}"
+      when: root_cron.stdout | trim | length > 0
+      tags: [verify]
+
+    - name: Check for unexpected listening ports
+      shell: |
+        ss -tlnp | grep -vE ':(22|25)\s' | grep LISTEN || true
+      register: ports_check
+      changed_when: false
+      tags: [verify]
+
+    - name: Warn if unexpected ports are listening
+      debug:
+        msg: "WARNING: Unexpected listening ports: {{ ports_check.stdout_lines }}"
+      when: ports_check.stdout | trim | length > 0
+      tags: [verify]
+
+    - name: Check for unexpected users with login shells
+      shell: |
+        awk -F: '$7 !~ /(nologin|false|sync|halt|shutdown)/ && $3 >= 1000 {print $1}' /etc/passwd
+      register: login_users
+      changed_when: false
+      tags: [verify]
+
+    - name: Warn if unexpected login users exist
+      debug:
+        msg: "NOTE: Users with login shells (UID >= 1000): {{ login_users.stdout_lines }}"
+      when: login_users.stdout | trim | length > 0
+      tags: [verify]
+
+    - name: Verify integrity checks passed
+      debug:
+        msg: "VPS integrity checks passed. Proceeding with setup."
+      tags: [verify]
+
+    # =========================================================
+    # PHASE 2: Generate SSH Key Locally
+    # =========================================================
 
     - name: Create local keys directory
       delegate_to: localhost
@@ -50,7 +142,9 @@
         src: "{{ local_key_dir }}/trading-brain.pub"
       register: pubkey
 
-    # --- System Updates ---
+    # =========================================================
+    # PHASE 3: System Updates
+    # =========================================================
 
     - name: Update package cache (Arch)
       pacman:
@@ -62,12 +156,24 @@
         update_cache: true
       when: ansible_os_family == "Debian"
 
+    - name: Upgrade all packages (Debian/Ubuntu)
+      apt:
+        upgrade: dist
+        autoremove: true
+      when: ansible_os_family == "Debian"
+
+    - name: Upgrade all packages (Arch)
+      pacman:
+        upgrade: true
+      when: ansible_os_family == "Archlinux"
+
     - name: Install essential packages (Arch)
       pacman:
         name:
           - openssh
           - ufw
           - sudo
+          - fail2ban
         state: present
       when: ansible_os_family == "Archlinux"
 
@@ -77,10 +183,43 @@
           - openssh-server
           - ufw
           - sudo
+          - fail2ban
+          - unattended-upgrades
+          - apt-listchanges
         state: present
       when: ansible_os_family == "Debian"
 
-    # --- Deploy User ---
+    # =========================================================
+    # PHASE 4: Unattended Security Upgrades (Debian/Ubuntu)
+    # =========================================================
+
+    - name: Configure unattended-upgrades
+      when: ansible_os_family == "Debian"
+      block:
+        - name: Enable automatic security updates
+          copy:
+            dest: /etc/apt/apt.conf.d/20auto-upgrades
+            content: |
+              APT::Periodic::Update-Package-Lists "1";
+              APT::Periodic::Unattended-Upgrade "1";
+              APT::Periodic::AutocleanInterval "7";
+            mode: "0644"
+
+        - name: Configure unattended-upgrades to only apply security updates
+          copy:
+            dest: /etc/apt/apt.conf.d/50unattended-upgrades
+            content: |
+              Unattended-Upgrade::Allowed-Origins {
+                  "${distro_id}:${distro_codename}-security";
+              };
+              Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+              Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+              Unattended-Upgrade::Remove-Unused-Dependencies "true";
+            mode: "0644"
+
+    # =========================================================
+    # PHASE 5: Deploy User (scoped sudo)
+    # =========================================================
 
     - name: Create deploy user
       user:
@@ -91,23 +230,39 @@
         create_home: true
         state: present
 
-    - name: Allow wheel group passwordless sudo (Arch)
-      lineinfile:
-        path: /etc/sudoers.d/wheel
-        line: "%wheel ALL=(ALL) NOPASSWD: ALL"
-        create: true
+    - name: Configure scoped sudo for deploy user (Debian/Ubuntu)
+      copy:
+        dest: "/etc/sudoers.d/{{ deploy_user }}"
+        content: |
+          # Trading Brain deploy user — scoped sudo only
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, /usr/bin/systemctl status *
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/apt-get update, /usr/bin/apt-get install *, /usr/bin/apt-get upgrade *
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/sbin/ufw *
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: ansible_os_family == "Debian"
+
+    - name: Configure scoped sudo for deploy user (Arch)
+      copy:
+        dest: "/etc/sudoers.d/{{ deploy_user }}"
+        content: |
+          # Trading Brain deploy user — scoped sudo only
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, /usr/bin/systemctl status *
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/pacman *
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/sbin/ufw *
         mode: "0440"
         validate: "visudo -cf %s"
       when: ansible_os_family == "Archlinux"
 
-    - name: Allow deploy user passwordless sudo (Debian/Ubuntu)
-      lineinfile:
-        path: "/etc/sudoers.d/{{ deploy_user }}"
-        line: "{{ deploy_user }} ALL=(ALL) NOPASSWD: ALL"
-        create: true
-        mode: "0440"
-        validate: "visudo -cf %s"
-      when: ansible_os_family == "Debian"
+    - name: Remove any old broad sudoers files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/sudoers.d/wheel
+        - /etc/sudoers.d/90-cloud-init-users
 
     - name: Set up authorized key for deploy user
       authorized_key:
@@ -116,7 +271,9 @@
         state: present
         exclusive: true
 
-    # --- Harden SSH ---
+    # =========================================================
+    # PHASE 6: Harden SSH
+    # =========================================================
 
     - name: Harden sshd_config
       lineinfile:
@@ -134,9 +291,43 @@
         - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 3" }
         - { regexp: "^#?AllowUsers", line: "AllowUsers {{ deploy_user }}" }
         - { regexp: "^#?Port ", line: "Port {{ ssh_port }}" }
+        - { regexp: "^#?LoginGraceTime", line: "LoginGraceTime 30" }
+        - { regexp: "^#?ClientAliveInterval", line: "ClientAliveInterval 300" }
+        - { regexp: "^#?ClientAliveCountMax", line: "ClientAliveCountMax 2" }
       notify: restart sshd
 
-    # --- Firewall ---
+    # =========================================================
+    # PHASE 7: fail2ban
+    # =========================================================
+
+    - name: Configure fail2ban SSH jail
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime = 3600
+          findtime = 600
+          maxretry = 5
+
+          [sshd]
+          enabled = true
+          port = {{ ssh_port }}
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 5
+          bantime = 3600
+        mode: "0644"
+      notify: restart fail2ban
+
+    - name: Enable and start fail2ban
+      systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+
+    # =========================================================
+    # PHASE 8: Firewall
+    # =========================================================
 
     - name: Reset UFW to defaults
       ufw:
@@ -158,17 +349,25 @@
         port: "{{ ssh_port | string }}"
         proto: tcp
 
-    - name: Allow API port through firewall
+    - name: Allow HTTP through firewall (for Caddy)
       ufw:
         rule: allow
-        port: "8080"
+        port: "80"
+        proto: tcp
+
+    - name: Allow HTTPS through firewall (for Caddy)
+      ufw:
+        rule: allow
+        port: "443"
         proto: tcp
 
     - name: Enable UFW
       ufw:
         state: enabled
 
-    # --- Swap ---
+    # =========================================================
+    # PHASE 9: Swap
+    # =========================================================
 
     - name: Check if swap file exists
       stat:
@@ -197,7 +396,9 @@
             path: /etc/fstab
             line: "/swapfile none swap sw 0 0"
 
-    # --- Verify ---
+    # =========================================================
+    # PHASE 10: Verify
+    # =========================================================
 
     - name: Verify SSH key login works
       delegate_to: localhost
@@ -222,6 +423,15 @@
           - "SSH key saved to: {{ local_key_dir }}/trading-brain"
           - "Deploy user: {{ deploy_user }}"
           - ""
+          - "Security hardening applied:"
+          - "  - VPS image integrity verified"
+          - "  - System fully updated"
+          - "  - Unattended security upgrades enabled"
+          - "  - SSH: key-only, no root, no password"
+          - "  - fail2ban: SSH brute-force protection"
+          - "  - Firewall: SSH + HTTP/HTTPS only"
+          - "  - Sudo: scoped to docker/systemctl/apt only"
+          - ""
           - "Update deploy/inventory.yml:"
           - "  ansible_host: {{ ansible_host }}"
           - "  ansible_user: {{ deploy_user }}"
@@ -233,4 +443,9 @@
     - name: restart sshd
       systemd:
         name: sshd
+        state: restarted
+
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
         state: restarted

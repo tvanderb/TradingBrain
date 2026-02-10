@@ -14,6 +14,11 @@ services:
     environment:
       - TZ=America/New_York
       - JSON_LOGS=1
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
     logging:
       driver: json-file
       options:

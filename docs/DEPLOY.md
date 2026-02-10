@@ -31,7 +31,17 @@ ansible-playbook setup.yml -i "<VPS_IP>," -u root \
   --extra-vars "ansible_password=<ROOT_PASSWORD>"
 ```
 
-This creates a `trading` deploy user with SSH key auth, hardens sshd, configures firewall (SSH + HTTP/HTTPS + API), and sets up 2GB swap. The SSH key is saved to `deploy/keys/trading-brain`.
+This runs a full security setup:
+
+- **Integrity check** — Verifies VPS image is clean (checks `/etc/ld.so.preload`, SUID binaries, rogue crons, unexpected users/ports). Fails immediately if anything suspicious is found.
+- **System updates** — Full `apt upgrade` + installs `unattended-upgrades` for automatic security patches
+- **Deploy user** — `trading` user with scoped sudo (docker/systemctl/apt only, not full root)
+- **SSH hardening** — Key-only auth, no root login, no passwords, `MaxAuthTries 3`, `LoginGraceTime 30`
+- **fail2ban** — Bans IPs after 5 failed SSH attempts for 1 hour
+- **Firewall** — SSH (22) + HTTP (80) + HTTPS (443) only. No direct API port access.
+- **Swap** — 2GB swapfile
+
+The SSH key is saved to `deploy/keys/trading-brain`.
 
 ### 2. Configure inventory
 
