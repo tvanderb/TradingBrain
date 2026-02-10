@@ -56,6 +56,11 @@ class TelegramBot:
 
         await self._app.initialize()
         await self._app.start()
+
+        # Explicitly clear any stale webhook/polling session from a previous
+        # instance (e.g. container restart) before starting our own polling.
+        await self._app.bot.delete_webhook(drop_pending_updates=True)
+
         await self._app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram.started")
 

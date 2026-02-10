@@ -821,6 +821,7 @@ LOCK_FILE = Path(__file__).resolve().parent.parent / "data" / "brain.pid"
 
 def _acquire_lock() -> None:
     """Ensure only one instance runs. Write PID to lockfile."""
+    current_pid = os.getpid()
     if LOCK_FILE.exists():
         try:
             old_pid = int(LOCK_FILE.read_text().strip())
@@ -830,16 +831,20 @@ def _acquire_lock() -> None:
             old_pid = None
 
         if old_pid is not None:
-            try:
-                os.kill(old_pid, 0)  # signal 0 = just check existence
-                print(f"ERROR: Another instance is running (PID {old_pid}). Exiting.", file=sys.stderr)
-                sys.exit(1)
-            except (ProcessLookupError, PermissionError):
-                # Stale lockfile — previous process died without cleanup
-                log.warning("lockfile.stale", old_pid=old_pid)
+            if old_pid == current_pid:
+                # Container restart — same PID (typically 1), stale lock
+                log.warning("lockfile.stale_container_restart", old_pid=old_pid)
+            else:
+                try:
+                    os.kill(old_pid, 0)  # signal 0 = just check existence
+                    print(f"ERROR: Another instance is running (PID {old_pid}). Exiting.", file=sys.stderr)
+                    sys.exit(1)
+                except (ProcessLookupError, PermissionError):
+                    # Stale lockfile — previous process died without cleanup
+                    log.warning("lockfile.stale", old_pid=old_pid)
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(str(os.getpid()))
+    LOCK_FILE.write_text(str(current_pid))
 
 
 def _release_lock() -> None:
