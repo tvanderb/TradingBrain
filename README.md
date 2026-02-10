@@ -49,9 +49,9 @@ An autonomous crypto trading system with AI-driven strategy evolution. A rigid *
 - **Hard risk limits** enforced by the shell (max position size, daily loss halt, drawdown halt, trade limits)
 - **Strategy sandbox** with AST-based import analysis blocks dangerous code before execution
 - **Paper and live modes** with identical logic paths
-- **Telegram observability** with 14 commands for monitoring, plus an emergency kill switch
+- **Telegram observability** with 15 commands for monitoring, plus an emergency kill switch
 - **REST API** (11 endpoints) and **WebSocket** event stream for programmatic access
-- **Truth benchmarks**: 17 rigid metrics computed from raw DB data (not AI-generated)
+- **Truth benchmarks**: 21 rigid metrics computed from raw DB data (not AI-generated)
 - **Full audit trail**: every signal, trade, orchestrator decision, and AI response is recorded
 
 ## Quick Start
@@ -90,7 +90,7 @@ src/
 │   ├── kraken.py            # Kraken REST + WebSocket v2 client
 │   ├── portfolio.py         # Position tracking, trade execution, P&L
 │   ├── risk.py              # Hard risk limit enforcement
-│   ├── truth.py             # 17 truth benchmark metrics
+│   ├── truth.py             # 21 truth benchmark metrics
 │   └── data_store.py        # Candle storage and aggregation
 ├── orchestrator/            # Nightly AI-driven strategy evolution
 │   ├── orchestrator.py      # Full nightly cycle (analyze → generate → review → deploy)
@@ -108,7 +108,7 @@ src/
 │   ├── routes.py            # 11 REST endpoints
 │   └── websocket.py         # WebSocket event stream
 └── telegram/                # Telegram bot
-    ├── commands.py           # 14 bot commands
+    ├── commands.py           # 15 bot commands
     └── notifications.py      # Dual dispatch (Telegram + WebSocket)
 
 strategy/active/             # AI-rewritable strategy module
@@ -122,6 +122,7 @@ docs/                        # Deployment guide and dev notes
 
 | Command | Description |
 |---------|-------------|
+| `/start` | System intro and command list |
 | `/status` | System mode, portfolio value, daily P&L |
 | `/positions` | Open positions with entry price, P&L, stops |
 | `/trades` | Last 10 completed trades |
@@ -130,7 +131,9 @@ docs/                        # Deployment guide and dev notes
 | `/performance` | Daily performance summary |
 | `/strategy` | Active strategy version and description |
 | `/tokens` | AI token usage and cost breakdown |
+| `/ask` | On-demand question to Claude |
 | `/thoughts` | Browse orchestrator reasoning spool |
+| `/thought` | View full AI response for a specific cycle step |
 | `/pause` / `/resume` | Pause/resume trading |
 | `/kill` | Emergency stop — close all positions and shut down |
 
@@ -140,7 +143,7 @@ Bearer token auth. Set `API_KEY` in `.env`.
 
 **REST** (11 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, market, signals, strategy, ai/usage, benchmarks.
 
-**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (19 event types).
+**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (18 event types).
 
 All responses use an envelope format: `{data: ..., meta: {timestamp, mode, version}}`.
 
