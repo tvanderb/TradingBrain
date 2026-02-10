@@ -230,31 +230,18 @@
         create_home: true
         state: present
 
-    - name: Configure scoped sudo for deploy user (Debian/Ubuntu)
+    - name: Configure passwordless sudo for deploy user
       copy:
         dest: "/etc/sudoers.d/{{ deploy_user }}"
         content: |
-          # Trading Brain deploy user — scoped sudo only
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, /usr/bin/systemctl status *
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/apt-get update, /usr/bin/apt-get install *, /usr/bin/apt-get upgrade *
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/sbin/ufw *
+          # Trading Brain automation user — passwordless sudo
+          # Security boundary is SSH key auth (no password, no root login)
+          # Scoped sudo is incompatible with Ansible's become mechanism
+          # (Ansible wraps commands in 'sudo /bin/sh -c ...' which doesn't
+          # match specific command paths in sudoers)
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: ALL
         mode: "0440"
         validate: "visudo -cf %s"
-      when: ansible_os_family == "Debian"
-
-    - name: Configure scoped sudo for deploy user (Arch)
-      copy:
-        dest: "/etc/sudoers.d/{{ deploy_user }}"
-        content: |
-          # Trading Brain deploy user — scoped sudo only
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, /usr/bin/systemctl status *
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/pacman *
-          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/sbin/ufw *
-        mode: "0440"
-        validate: "visudo -cf %s"
-      when: ansible_os_family == "Archlinux"
 
     - name: Remove any old broad sudoers files
       file:
