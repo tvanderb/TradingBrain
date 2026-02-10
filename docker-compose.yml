@@ -10,9 +10,9 @@ services:
       - ./strategy/active:/app/strategy/active
       - ./statistics/active:/app/statistics/active
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      - TZ=US/Eastern
+      - TZ=America/New_York
       - JSON_LOGS=1
     logging:
       driver: json-file

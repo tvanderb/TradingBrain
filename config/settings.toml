@@ -1,7 +1,7 @@
 [general]
 mode = "paper"              # "paper" or "live"
-paper_balance_usd = 200.0   # Starting balance for paper trading
-timezone = "US/Eastern"
+paper_balance_usd = 100.0   # Starting balance for paper trading
+timezone = "America/New_York"
 log_level = "INFO"
 default_slippage_factor = 0.0005  # 0.05% as decimal factor — signal can override per-trade
 
@@ -17,7 +17,7 @@ symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "ADA/USD", "L
 
 [ai]
 provider = "anthropic"       # "anthropic" or "vertex"
-sonnet_model = "claude-sonnet-4-5-20250929"
+sonnet_model = "claude-sonnet-4-5"
 opus_model = "claude-opus-4-6"
 daily_token_limit = 1500000  # Safety net (10x expected), orchestrator self-regulates
 
