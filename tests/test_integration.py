@@ -53,7 +53,7 @@ async def test_database_schema():
                      "strategy_versions", "orchestrator_log", "orchestrator_thoughts",
                      "orchestrator_observations",
                      "token_usage", "fee_schedule", "strategy_state", "paper_tests",
-                     "scan_results"]
+                     "scan_results", "capital_events"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -339,6 +339,8 @@ async def test_paper_trade_cycle():
         assert result is not None
         assert result["action"] == "BUY"
         assert result["qty"] > 0
+        assert "tag" in result
+        assert result["tag"].startswith("auto_")
         assert portfolio.position_count == 1
 
         # Sell BTC at profit
@@ -348,6 +350,7 @@ async def test_paper_trade_cycle():
         result2 = await portfolio.execute_signal(sell_signal, 51000, 0.25, 0.40)
         assert result2 is not None
         assert result2["pnl"] > 0  # Should be profitable (2% move minus fees)
+        assert "tag" in result2
         assert portfolio.position_count == 0
 
         # Check trade recorded in DB
@@ -2481,3 +2484,525 @@ def test_api_config_loading():
     assert config.api.enabled is True
     assert config.api.port == 8080
     assert config.api.host == "0.0.0.0"
+
+
+# --- Position System: Tags + MODIFY ---
+
+def test_contract_modify_action():
+    """Action.MODIFY exists and Signal accepts tag field."""
+    from src.shell.contract import Action, Signal, Intent
+
+    assert Action.MODIFY.value == "MODIFY"
+
+    # Signal with tag
+    sig = Signal(symbol="BTC/USD", action=Action.MODIFY, size_pct=0.0,
+                 stop_loss=48000, tag="my_position_1")
+    assert sig.tag == "my_position_1"
+    assert sig.action == Action.MODIFY
+
+    # Signal without tag defaults to None
+    sig2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
+    assert sig2.tag is None
+
+
+@pytest.mark.asyncio
+async def test_portfolio_modify():
+    """MODIFY updates SL/TP without fees."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Buy BTC
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                     stop_loss=49000, take_profit=55000, intent=Intent.DAY)
+        result = await portfolio.execute_signal(buy, 50000, 0.25, 0.40)
+        assert result is not None
+        tag = result["tag"]
+
+        cash_after_buy = portfolio.cash
+
+        # Modify SL/TP
+        modify = Signal(symbol="BTC/USD", action=Action.MODIFY, size_pct=0.0,
+                        stop_loss=48000, take_profit=56000, tag=tag)
+        mod_result = await portfolio.execute_signal(modify, 50000, 0.25, 0.40)
+        assert mod_result is not None
+        assert mod_result["action"] == "MODIFY"
+        assert mod_result["fee"] == 0
+        assert mod_result["changes"]["stop_loss"] == 48000
+        assert mod_result["changes"]["take_profit"] == 56000
+
+        # Cash unchanged (zero fees)
+        assert portfolio.cash == cash_after_buy
+
+        # Position still exists with updated SL/TP
+        assert portfolio.position_count == 1
+        pos_row = await db.fetchone("SELECT * FROM positions WHERE tag = ?", (tag,))
+        assert pos_row["stop_loss"] == 48000
+        assert pos_row["take_profit"] == 56000
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_modify_no_tag():
+    """MODIFY without tag returns None (ambiguous)."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Buy BTC
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        await portfolio.execute_signal(buy, 50000, 0.25, 0.40)
+
+        # MODIFY without tag should fail
+        modify = Signal(symbol="BTC/USD", action=Action.MODIFY, size_pct=0.0,
+                        stop_loss=48000)
+        result = await portfolio.execute_signal(modify, 50000, 0.25, 0.40)
+        assert result is None
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_multi_position():
+    """Two BUY signals for same symbol with different tags create separate positions."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Two buys for BTC — no tags, should auto-generate different ones
+        buy1 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.DAY)
+        r1 = await portfolio.execute_signal(buy1, 50000, 0.25, 0.40)
+        assert r1 is not None
+
+        buy2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.SWING)
+        r2 = await portfolio.execute_signal(buy2, 51000, 0.25, 0.40)
+        assert r2 is not None
+
+        # Should have 2 separate positions
+        assert portfolio.position_count == 2
+        assert r1["tag"] != r2["tag"]
+
+        # Both in DB
+        rows = await db.fetchall("SELECT * FROM positions WHERE symbol = 'BTC/USD'")
+        assert len(rows) == 2
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_close_by_tag():
+    """Close one position by tag, leave others."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Open two positions
+        r1 = await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.DAY),
+            50000, 0.25, 0.40)
+        r2 = await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.SWING),
+            51000, 0.25, 0.40)
+
+        assert portfolio.position_count == 2
+
+        # Close only the first by tag
+        close = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0,
+                       intent=Intent.DAY, tag=r1["tag"])
+        result = await portfolio.execute_signal(close, 52000, 0.25, 0.40)
+        assert result is not None
+        assert result["tag"] == r1["tag"]
+        assert portfolio.position_count == 1
+
+        # Second position still exists
+        rows = await db.fetchall("SELECT * FROM positions")
+        assert len(rows) == 1
+        assert rows[0]["tag"] == r2["tag"]
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_close_all_no_tag():
+    """Close all positions for symbol when no tag specified."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Open two positions
+        await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.DAY),
+            50000, 0.25, 0.40)
+        await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.SWING),
+            51000, 0.25, 0.40)
+
+        assert portfolio.position_count == 2
+
+        # Close all BTC with no tag — returns list
+        close = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+        result = await portfolio.execute_signal(close, 52000, 0.25, 0.40)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert portfolio.position_count == 0
+
+        # Both trades recorded
+        trades = await db.fetchall("SELECT * FROM trades")
+        assert len(trades) == 2
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_sell_oldest_no_tag():
+    """SELL without tag hits oldest position (FIFO)."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Open two positions
+        r1 = await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.DAY),
+            50000, 0.25, 0.40)
+        r2 = await portfolio.execute_signal(
+            Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.SWING),
+            51000, 0.25, 0.40)
+
+        # SELL without tag — should sell from oldest position
+        sell = Signal(symbol="BTC/USD", action=Action.SELL, size_pct=0.01, intent=Intent.DAY)
+        result = await portfolio.execute_signal(sell, 52000, 0.25, 0.40)
+        assert result is not None
+        assert result["tag"] == r1["tag"]  # Oldest position
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_auto_tag():
+    """BUY without tag generates auto tag."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        result = await portfolio.execute_signal(buy, 50000, 0.25, 0.40)
+        assert result is not None
+        assert result["tag"].startswith("auto_BTCUSD_")
+        assert result["tag"] == "auto_BTCUSD_001"
+
+        # Second auto-tag increments
+        buy2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03, intent=Intent.SWING)
+        result2 = await portfolio.execute_signal(buy2, 51000, 0.25, 0.40)
+        assert result2["tag"] == "auto_BTCUSD_002"
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_average_in_same_tag():
+    """BUY with existing tag averages in (increases qty, recalculates avg entry)."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # First buy with explicit tag
+        buy1 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                      intent=Intent.DAY, tag="btc_swing_1")
+        r1 = await portfolio.execute_signal(buy1, 50000, 0.25, 0.40)
+        assert r1 is not None
+        assert r1["tag"] == "btc_swing_1"
+        qty1 = r1["qty"]
+
+        # Second buy with same tag — averages in
+        buy2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                      intent=Intent.DAY, tag="btc_swing_1")
+        r2 = await portfolio.execute_signal(buy2, 52000, 0.25, 0.40)
+        assert r2 is not None
+        assert r2["tag"] == "btc_swing_1"
+
+        # Still one position, but with increased qty
+        assert portfolio.position_count == 1
+        pos = await db.fetchone("SELECT * FROM positions WHERE tag = 'btc_swing_1'")
+        assert pos["qty"] > qty1  # Qty increased
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_capital_events_table():
+    """capital_events table exists and accepts inserts."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            "INSERT INTO capital_events (type, amount, notes) VALUES (?, ?, ?)",
+            ("deposit", 500.0, "Initial funding"),
+        )
+        await db.commit()
+
+        rows = await db.fetchall("SELECT * FROM capital_events")
+        assert len(rows) == 1
+        assert rows[0]["type"] == "deposit"
+        assert rows[0]["amount"] == 500.0
+        assert rows[0]["notes"] == "Initial funding"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_positions_tag_unique():
+    """Tag uniqueness is enforced on positions table."""
+    from src.shell.database import Database
+    import aiosqlite
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES (?, ?, ?, ?)",
+            ("BTC/USD", "unique_tag_1", 0.01, 50000),
+        )
+        await db.commit()
+
+        # Same tag should fail
+        with pytest.raises(aiosqlite.IntegrityError):
+            await db.execute(
+                "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES (?, ?, ?, ?)",
+                ("ETH/USD", "unique_tag_1", 1.0, 3000),
+            )
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_positions_symbol_not_unique():
+    """Multiple positions for the same symbol are allowed."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES (?, ?, ?, ?)",
+            ("BTC/USD", "tag_a", 0.01, 50000),
+        )
+        await db.execute(
+            "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES (?, ?, ?, ?)",
+            ("BTC/USD", "tag_b", 0.02, 51000),
+        )
+        await db.commit()
+
+        rows = await db.fetchall("SELECT * FROM positions WHERE symbol = 'BTC/USD'")
+        assert len(rows) == 2
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_db_migration_backfills_tags():
+    """Existing positions (without tag column) get auto-generated tags after migration."""
+    import aiosqlite
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        # Create an old-schema DB manually (positions with UNIQUE(symbol), no tag column)
+        conn = await aiosqlite.connect(db_path)
+        await conn.execute("""
+            CREATE TABLE positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                side TEXT NOT NULL DEFAULT 'long',
+                qty REAL NOT NULL,
+                avg_entry REAL NOT NULL,
+                current_price REAL DEFAULT 0,
+                unrealized_pnl REAL DEFAULT 0,
+                stop_loss REAL,
+                take_profit REAL,
+                intent TEXT NOT NULL DEFAULT 'DAY',
+                opened_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO positions (symbol, qty, avg_entry) VALUES (?, ?, ?)",
+            ("BTC/USD", 0.01, 50000),
+        )
+        await conn.execute(
+            "INSERT INTO positions (symbol, qty, avg_entry) VALUES (?, ?, ?)",
+            ("ETH/USD", 1.0, 3000),
+        )
+        await conn.commit()
+        await conn.close()
+
+        # Now open with the Database class — migration should run
+        from src.shell.database import Database
+        db = Database(db_path)
+        await db.connect()
+
+        # Positions should now have tags
+        rows = await db.fetchall("SELECT * FROM positions ORDER BY symbol")
+        assert len(rows) == 2
+        for row in rows:
+            assert "tag" in dict(row)
+            tag = row["tag"]
+            assert tag.startswith("auto_")
+            assert len(tag) > 0
+
+        # Tags should be unique
+        tags = [row["tag"] for row in rows]
+        assert len(set(tags)) == 2
+
+        await db.close()
+    finally:
+        os.unlink(db_path)

@@ -96,8 +96,8 @@ class RiskManager:
     ) -> RiskCheck:
         """Validate a signal against all risk limits. Returns pass/fail with reason."""
 
-        # Always allow SELL/CLOSE — must be able to exit positions under any conditions
-        is_exit = signal.action in (Action.SELL, Action.CLOSE)
+        # Always allow SELL/CLOSE/MODIFY — must be able to exit or adjust positions under any conditions
+        is_exit = signal.action in (Action.SELL, Action.CLOSE, Action.MODIFY)
 
         # Kill switch (only blocks new entries)
         if self._config.kill_switch and not is_exit:
@@ -120,12 +120,11 @@ class RiskManager:
         if signal.action == Action.BUY and open_position_count >= self._config.max_positions:
             return RiskCheck(False, f"Max positions: {open_position_count}/{self._config.max_positions}")
 
-        # Basic signal validation
-        if signal.size_pct <= 0:
-            return RiskCheck(False, f"Invalid size_pct: {signal.size_pct}")
-
-        # Per-trade size limit (only for new entries — exits can close any amount)
+        # Per-trade size limit (only for new entries — exits/modifies can have size_pct=0)
         if not is_exit:
+            # Basic signal validation (entries must have positive size)
+            if signal.size_pct <= 0:
+                return RiskCheck(False, f"Invalid size_pct: {signal.size_pct}")
             trade_value = portfolio_value * signal.size_pct
             max_trade = portfolio_value * self._config.max_trade_pct
             if trade_value > max_trade:

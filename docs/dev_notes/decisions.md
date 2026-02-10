@@ -206,3 +206,52 @@
 - **Why**: Fee wall (0.65-0.80% round-trip) naturally favors fewer, bigger trades. Over-constraining early prevents the system from finding its edge.
 - **Risk limit changes**: max_trade_pct 5%→7%, max_position_pct 10%→15%, max_daily_loss 3%→6%, max_drawdown 10%→12%, consecutive_losses 10→disabled (999), rollback_daily_loss 5%→8%, default_trade_pct 2%→3%, default_take_profit 4%→6%.
 - **Note**: The specific numeric *goals* from Session 6 (profit factor >1.2, avg_win/avg_loss >2.0) were subsequently scrapped in Sessions 7-8 in favor of the fund mandate. The risk *limits* above remain in config.
+
+### Decision: Position System Redesign (Session 19)
+
+**Context**: Audit of the position system revealed several gaps that constrain the orchestrator and don't align with the "maximize awareness, minimize direction" philosophy.
+
+#### D1: Add Action.MODIFY
+- **What**: New signal action that adjusts SL/TP/intent on an existing position without closing it.
+- **Why**: Without MODIFY, the strategy must CLOSE + re-BUY to move a stop-loss, paying double fees and slippage. A fund manager trailing stops should be a zero-cost operation.
+- **Behavior**: MODIFY allowed even when halted (same bypass as CLOSE). Must specify tag to target a specific position.
+
+#### D2: Multi-Position Per Symbol (Tags)
+- **What**: Remove UNIQUE constraint on positions.symbol. Add a `tag` field. Multiple positions per symbol, identified by tag.
+- **Why**: The fund should be able to hold a long-term BTC core position AND take short-term BTC swings simultaneously. The one-position-per-symbol constraint forces averaging in and prevents multi-timeframe strategies.
+- **Tag rules**:
+  - BUY with new tag → new position
+  - BUY with existing tag → average into that position
+  - BUY with no tag → auto-generate tag (e.g., "btc_usd_1")
+  - CLOSE/SELL with tag → close that specific position
+  - CLOSE/SELL with no tag → close ALL positions for that symbol
+  - MODIFY with tag → update that position's SL/TP/intent
+  - MODIFY with no tag → error (must be explicit)
+  - Tag unique per symbol (UNIQUE on (symbol, tag))
+- **Risk aggregation**: max_position_pct sums across all tags for a symbol. max_positions counts total open positions.
+
+#### D3: Intent Stays Informational (No Mechanical Enforcement)
+- **What**: Keep DAY/SWING/POSITION as metadata labels. The shell does NOT enforce different behavior per intent.
+- **Why**: Enforcing auto-close on DAY trades or wider stops on POSITION trades is directive — it's the shell telling the strategy what to do. The strategy manages its own exit logic. "Maximize awareness, minimize direction."
+- **Value**: Intent provides useful analytics ("my DAY trades have X win rate"), appears in trade history, communicates strategy reasoning. The orchestrator must be told intent is informational only.
+
+#### D4: Exchange-Native Orders on Kraken
+- **What**: Place actual stop-loss and take-profit orders on Kraken instead of client-side price monitoring.
+- **Why**: Client-side monitoring (every 30s) means if the server goes down, SL/TP don't execute. Exchange-native orders survive server downtime and execute at exchange speed. Critical for scaling and long-term reliability.
+- **Implementation**: After entry fill, place separate SL and TP orders. Monitor their status. When one fills, cancel the other. On MODIFY, cancel old orders and place new ones.
+- **Kraken support**: Spot API supports stop-loss, take-profit, trailing-stop, stop-loss-limit, take-profit-limit, trailing-stop-limit order types. No native OCO — we manage the cancel-other logic ourselves.
+- **Paper mode**: Continue simulating SL/TP with price checking (no exchange orders).
+
+#### D5: Risk Limits — Trust the Aligned Agent
+- **What**: Widen hard limits to emergency-only backstops. Default max_drawdown from 12% to 40%.
+- **Why**: 12% max drawdown halts the system during normal crypto volatility. A BTC drawdown of 20% in a bull market is routine. The orchestrator should self-regulate via strategy design, with hard limits only as emergency circuit breakers.
+- **Future**: Orchestrator-writable risk profile (separate session). The orchestrator sets operating parameters within hard ceilings.
+
+#### D6: Capital Events Table
+- **What**: New `capital_events` table tracking deposits and withdrawals with timestamps and notes.
+- **Why**: Without this, a $500 cash injection into a $200 portfolio looks like 250% returns. Return calculations need to know the correct capital base.
+- **Fields**: id, type (deposit/withdrawal), amount, note, created_at.
+
+#### D7: Order Fill Confirmation (Live Mode)
+- **What**: Poll Kraken for actual fill prices instead of assuming market price.
+- **Why**: The existing TODO ("actual fill may differ") becomes critical with exchange-native orders. We need real fill data for accurate P&L and to confirm SL/TP order execution.

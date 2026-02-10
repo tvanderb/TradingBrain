@@ -82,9 +82,11 @@ class Notifier:
         price = trade.get("price", 0)
         fee = trade.get("fee", 0)
         intent = trade.get("intent", "DAY")
+        tag = trade.get("tag", "")
 
+        tag_str = f" [{tag}]" if tag else ""
         lines = [
-            f"Trade: {action} {symbol}",
+            f"Trade: {action} {symbol}{tag_str}",
             f"Qty: {qty:.6f} @ ${price:,.2f}",
             f"Fee: ${fee:.4f}",
             f"Intent: {intent}",
@@ -95,11 +97,12 @@ class Notifier:
 
         await self._dispatch("trade_executed", trade, "\n".join(lines))
 
-    async def stop_triggered(self, symbol: str, reason: str, price: float) -> None:
+    async def stop_triggered(self, symbol: str, reason: str, price: float, tag: str = "") -> None:
+        tag_str = f" [{tag}]" if tag else ""
         await self._dispatch(
             "stop_triggered",
-            {"symbol": symbol, "reason": reason, "price": price},
-            f"Stop Triggered: {symbol}\nReason: {reason}\nPrice: ${price:,.2f}",
+            {"symbol": symbol, "reason": reason, "price": price, "tag": tag},
+            f"Stop Triggered: {symbol}{tag_str}\nReason: {reason}\nPrice: ${price:,.2f}",
         )
 
     async def signal_rejected(self, symbol: str, action: str, reason: str) -> None:

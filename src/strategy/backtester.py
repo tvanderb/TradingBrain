@@ -80,12 +80,37 @@ class Backtester:
         self._starting_cash = starting_cash
         self._per_pair_fees = per_pair_fees or {}
         self._slippage = slippage_factor  # applied to fill prices (buy higher, sell lower)
+        self._tag_counter: dict[str, int] = {}  # symbol -> counter for auto-tags
+
+    def _bt_tag(self, symbol: str) -> str:
+        """Generate a unique backtest tag for a new position."""
+        clean = symbol.replace("/", "")
+        self._tag_counter[clean] = self._tag_counter.get(clean, 0) + 1
+        return f"bt_{clean}_{self._tag_counter[clean]:03d}"
 
     def _get_taker_fee(self, symbol: str) -> float:
         """Get taker fee for symbol (per-pair if available, else global)."""
         if symbol in self._per_pair_fees:
             return self._per_pair_fees[symbol][1]
         return self._taker_fee
+
+    def _resolve_position(self, signal: Signal, positions: dict[str, dict]) -> tuple[str, dict] | None:
+        """Resolve position by tag (explicit) or oldest for symbol."""
+        if signal.tag and signal.tag in positions:
+            return (signal.tag, positions[signal.tag])
+        # No tag — find oldest for this symbol
+        matches = [
+            (tag, pos) for tag, pos in positions.items()
+            if pos.get("symbol") == signal.symbol
+        ]
+        if matches:
+            matches.sort(key=lambda x: x[1].get("opened_at", ""))
+            return matches[0]
+        return None
+
+    def _has_position_for_symbol(self, symbol: str, positions: dict[str, dict]) -> bool:
+        """Check if any position exists for the given symbol."""
+        return any(pos.get("symbol") == symbol for pos in positions.values())
 
     def run(self, candle_data: dict[str, pd.DataFrame], timeframe: str = "1h") -> BacktestResult:
         """Run backtest on historical data.
@@ -99,10 +124,11 @@ class Backtester:
         """
         # Initialize
         cash = self._starting_cash
-        positions: dict[str, dict] = {}
+        positions: dict[str, dict] = {}  # tag -> position dict
         all_trades: list[BacktestTrade] = []
         daily_values: list[float] = []
         peak_value = cash
+        self._tag_counter = {}
 
         self._strategy.initialize(self._risk_limits, self._symbols)
 
@@ -161,7 +187,8 @@ class Backtester:
 
             # Build portfolio snapshot
             open_positions = []
-            for sym, pos in positions.items():
+            for tag, pos in positions.items():
+                sym = pos.get("symbol", "")
                 cp = prices.get(sym, pos["avg_entry"])
                 pnl = (cp - pos["avg_entry"]) * pos["qty"]
                 pnl_pct = (cp - pos["avg_entry"]) / pos["avg_entry"] if pos["avg_entry"] > 0 else 0
@@ -172,11 +199,12 @@ class Backtester:
                     intent=Intent.DAY, stop_loss=pos.get("stop_loss"),
                     take_profit=pos.get("take_profit"),
                     opened_at=pos.get("opened_at", ts),
+                    tag=tag,
                 ))
 
             total_value = cash + sum(
-                pos["qty"] * prices.get(sym, pos["avg_entry"])
-                for sym, pos in positions.items()
+                pos["qty"] * prices.get(pos.get("symbol", ""), pos["avg_entry"])
+                for pos in positions.values()
             )
 
             portfolio = Portfolio(
@@ -203,7 +231,7 @@ class Backtester:
 
                 fee_pct = self._get_taker_fee(signal.symbol) / 100
 
-                if signal.action == Action.BUY and signal.symbol not in positions:
+                if signal.action == Action.BUY and not self._has_position_for_symbol(signal.symbol, positions):
                     # Enforce max_positions
                     if len(positions) >= self._risk_limits.max_positions:
                         continue
@@ -216,16 +244,24 @@ class Backtester:
                     qty = trade_value / fill_price
                     fee = trade_value * fee_pct
                     cash -= (trade_value + fee)
-                    positions[signal.symbol] = {
+                    tag = signal.tag or self._bt_tag(signal.symbol)
+                    positions[tag] = {
+                        "symbol": signal.symbol,
                         "qty": qty, "avg_entry": fill_price,
                         "entry_fee": fee,
                         "stop_loss": signal.stop_loss, "take_profit": signal.take_profit,
                         "opened_at": ts,
                     }
-                    self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent)
+                    try:
+                        self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent, tag=tag)
+                    except TypeError:
+                        self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent)
 
-                elif signal.action in (Action.SELL, Action.CLOSE) and signal.symbol in positions:
-                    pos = positions[signal.symbol]
+                elif signal.action in (Action.SELL, Action.CLOSE):
+                    resolved = self._resolve_position(signal, positions)
+                    if not resolved:
+                        continue
+                    tag, pos = resolved
                     fill_price = price * (1 - self._slippage)  # slippage: sell lower
                     qty = pos["qty"]
                     sale = qty * fill_price
@@ -241,13 +277,29 @@ class Backtester:
                         qty=qty, price=fill_price, fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
                     ))
 
-                    self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
-                    self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
-                    del positions[signal.symbol]
+                    try:
+                        self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent, tag=tag)
+                    except TypeError:
+                        self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
+                    try:
+                        self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct, tag=tag)
+                    except TypeError:
+                        self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
+                    del positions[tag]
+
+                elif signal.action == Action.MODIFY:
+                    # In-place modification of SL/TP
+                    if signal.tag and signal.tag in positions:
+                        pos = positions[signal.tag]
+                        if signal.stop_loss is not None:
+                            pos["stop_loss"] = signal.stop_loss
+                        if signal.take_profit is not None:
+                            pos["take_profit"] = signal.take_profit
 
             # Check stop-loss / take-profit on existing positions (skip same-bar entries)
-            for sym in list(positions.keys()):
-                pos = positions[sym]
+            for tag in list(positions.keys()):
+                pos = positions[tag]
+                sym = pos.get("symbol", "")
                 if pos.get("opened_at") == ts:
                     continue  # Don't trigger SL/TP on the same bar as entry
 
@@ -284,8 +336,11 @@ class Backtester:
                         symbol=sym, action="CLOSE", qty=qty, price=fill_price,
                         fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
                     ))
-                    self._strategy.on_position_closed(sym, pnl, pnl_pct)
-                    del positions[sym]
+                    try:
+                        self._strategy.on_position_closed(sym, pnl, pnl_pct, tag=tag)
+                    except TypeError:
+                        self._strategy.on_position_closed(sym, pnl, pnl_pct)
+                    del positions[tag]
 
             # Track daily values
             current_day = ts.date() if hasattr(ts, 'date') else None

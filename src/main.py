@@ -196,13 +196,15 @@ class TradingBrain:
         self._scheduler.start()
 
         # 10. Portfolio peak tracking — refresh prices first to avoid stale baseline
+        startup_prices = {}
         for symbol in self._config.symbols:
-            if symbol in self._portfolio._positions:
-                try:
-                    ticker = await self._kraken.get_ticker(symbol)
-                    self._portfolio._positions[symbol]["current_price"] = float(ticker["c"][0])
-                except Exception as e:
-                    log.warning("startup.price_refresh_failed", symbol=symbol, error=str(e))
+            try:
+                ticker = await self._kraken.get_ticker(symbol)
+                startup_prices[symbol] = float(ticker["c"][0])
+            except Exception as e:
+                log.warning("startup.price_refresh_failed", symbol=symbol, error=str(e))
+        if startup_prices:
+            self._portfolio.refresh_prices(startup_prices)
         portfolio_value = await self._portfolio.total_value()
         self._risk.update_portfolio_peak(portfolio_value)
 
@@ -455,9 +457,9 @@ class TradingBrain:
                     if self._risk.is_halted:
                         await self._notifier.risk_halt(self._risk.halt_reason)
                     await self._db.execute(
-                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None, check.reason),
+                         signal.intent.value, signal.reasoning, None, signal.tag, check.reason),
                     )
                     continue
 
@@ -470,7 +472,7 @@ class TradingBrain:
                     log.warning("scan.invalid_price", symbol=signal.symbol, price=price)
                     continue
                 sym_fees = self._pair_fees.get(signal.symbol)
-                result = await self._portfolio.execute_signal(
+                raw_result = await self._portfolio.execute_signal(
                     signal, price,
                     sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                     sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
@@ -478,29 +480,52 @@ class TradingBrain:
                     strategy_version=self._scan_state.get("strategy_version"),
                 )
 
-                if result:
+                # Normalize to list (multi-close returns list)
+                if raw_result is None:
+                    results = []
+                elif isinstance(raw_result, list):
+                    results = raw_result
+                else:
+                    results = [raw_result]
+
+                if results:
                     # Record signal
+                    result_tag = results[0].get("tag") if len(results) == 1 else signal.tag
                     await self._db.execute(
-                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None),
+                         signal.intent.value, signal.reasoning, None, result_tag),
                     )
 
-                    # Track P&L
-                    if result.get("pnl") is not None:
-                        self._risk.record_trade_result(result["pnl"])
-                        self._strategy.on_position_closed(
-                            result["symbol"], result["pnl"], result.get("pnl_pct", 0)
-                        )
+                    for result in results:
+                        # Track P&L
+                        if result.get("pnl") is not None:
+                            self._risk.record_trade_result(result["pnl"])
+                            try:
+                                self._strategy.on_position_closed(
+                                    result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                                    tag=result.get("tag", ""),
+                                )
+                            except TypeError:
+                                self._strategy.on_position_closed(
+                                    result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                                )
 
-                    self._strategy.on_fill(
-                        signal.symbol, signal.action, result["qty"], result["price"], signal.intent
-                    )
+                        try:
+                            self._strategy.on_fill(
+                                signal.symbol, signal.action, result["qty"], result["price"],
+                                signal.intent, tag=result.get("tag", ""),
+                            )
+                        except TypeError:
+                            self._strategy.on_fill(
+                                signal.symbol, signal.action, result["qty"], result["price"],
+                                signal.intent,
+                            )
 
-                    # Notify
-                    await self._notifier.trade_executed(result)
+                        # Notify
+                        await self._notifier.trade_executed(result)
 
-                    # Check rollback triggers
+                    # Check rollback triggers (once after all results)
                     new_value = await self._portfolio.total_value()
                     rollback = self._risk.check_rollback_triggers(
                         new_value, self._portfolio.daily_start_value
@@ -585,6 +610,7 @@ class TradingBrain:
         triggered = await self._portfolio.update_prices(prices)
         for t in triggered:
             symbol = t["symbol"]
+            tag = t["tag"]
             reason = t["reason"]
             price = t["price"]
 
@@ -592,6 +618,7 @@ class TradingBrain:
                 symbol=symbol, action=Action.CLOSE, size_pct=1.0,
                 intent=Intent.DAY, confidence=1.0,
                 reasoning=f"{reason} triggered at ${price:.2f}",
+                tag=tag,
             )
             sym_fees = self._pair_fees.get(symbol)
             result = await self._portfolio.execute_signal(
@@ -600,21 +627,33 @@ class TradingBrain:
                 sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                 strategy_regime=None,
             )
-            if result:
+            if result and not isinstance(result, list):
                 if result.get("pnl") is not None:
                     self._risk.record_trade_result(result["pnl"])
-                await self._notifier.stop_triggered(symbol, reason, price)
+                await self._notifier.stop_triggered(symbol, reason, price, tag=tag)
                 await self._notifier.trade_executed(result)
 
                 # Strategy callbacks (match scan loop behavior)
                 if result.get("pnl") is not None and self._strategy:
-                    self._strategy.on_position_closed(
-                        result["symbol"], result["pnl"], result.get("pnl_pct", 0)
-                    )
+                    try:
+                        self._strategy.on_position_closed(
+                            result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                            tag=result.get("tag", ""),
+                        )
+                    except TypeError:
+                        self._strategy.on_position_closed(
+                            result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                        )
                 if self._strategy:
-                    self._strategy.on_fill(
-                        symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY
-                    )
+                    try:
+                        self._strategy.on_fill(
+                            symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY,
+                            tag=result.get("tag", ""),
+                        )
+                    except TypeError:
+                        self._strategy.on_fill(
+                            symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY,
+                        )
 
                 # Rollback triggers + peak update
                 new_value = await self._portfolio.total_value()
@@ -728,6 +767,7 @@ class TradingBrain:
                     signal = Signal(
                         symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
                         intent=Intent.DAY, confidence=1.0, reasoning="Emergency stop",
+                        tag=pos.get("tag"),
                     )
                     sym_fees = self._pair_fees.get(pos["symbol"])
                     await self._portfolio.execute_signal(

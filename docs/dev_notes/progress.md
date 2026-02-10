@@ -1269,3 +1269,101 @@ After removing the hard-coded indicator pipeline (Session 18), redesigned Telegr
 
 ### Test Results
 - **61/61 passing** (3 new tests added)
+
+## Session A (2026-02-10) — Position System Redesign: MODIFY + Tags + Capital Events
+
+### Context
+Implementing D1 (Action.MODIFY), D2 (Multi-position tags), and D6 (Capital events table) from the Session 19 position system audit. These changes rekey positions from `symbol` (one per symbol) to `tag` (globally unique identifier), enabling multiple positions per symbol and in-place SL/TP modification.
+
+**Scope**: D1, D2, D3 (no changes needed), D6
+**Deferred**: D4 (Exchange-native orders), D5 (Risk limit widening), D7 (Order fill confirmation)
+
+### Changes Made
+
+#### 1. Contract Types (`src/shell/contract.py`)
+- Added `Action.MODIFY` to enum
+- Added `tag: Optional[str] = None` to Signal (for multi-position targeting)
+- Added `tag: str = ""` to OpenPosition (position identifier)
+- Added `tag: str = ""` to StrategyBase.on_fill() and on_position_closed()
+
+#### 2. Database Schema (`src/shell/database.py`)
+- Positions table: removed `UNIQUE(symbol)`, added `tag TEXT NOT NULL` with `UNIQUE(tag)`
+- New table: `capital_events` (id, type, amount, timestamp, notes)
+- New indexes: `idx_positions_tag`, `idx_positions_symbol` — created after special migrations
+- Migrations: tag columns on trades and signals tables
+- Special migration: recreates positions table (only way to remove UNIQUE in SQLite), backfills existing positions with auto-generated tags (`auto_{SYMBOL}_001`)
+- **Bug found during testing**: Position indexes referenced `tag` column before migration could run. Moved index creation to after `_run_special_migrations()` in `connect()`.
+
+#### 3. Portfolio Tracker (`src/shell/portfolio.py`) — LARGEST CHANGE
+- `_positions` dict rekeyed from `symbol -> dict` to `tag -> dict`
+- New: `_generate_tag(symbol)` — auto-generates `auto_{SYMBOL}_001` (incrementing)
+- New: `_resolve_position(signal)` — returns `(tag, pos)` by tag or oldest for symbol
+- New: `_get_positions_for_symbol(symbol)` — all positions sorted by opened_at
+- New: `refresh_prices(prices)` — public method for price updates by symbol
+- New: `_execute_modify(signal)` — validates tag, updates SL/TP/intent, zero fees
+- BUY: existing tag = average in (UPDATE), no tag = new position (INSERT, auto-tag)
+- SELL: no tag = oldest (FIFO), with tag = specific position
+- CLOSE: no tag = close ALL for symbol (returns list for multi, dict for single), with tag = specific
+- `execute_signal()` returns `dict | list[dict] | None`
+
+#### 4. Risk Manager (`src/shell/risk.py`)
+- MODIFY added to `is_exit` bypass set (allowed during halt)
+- `size_pct <= 0` validation moved inside `not is_exit` block (MODIFY has size_pct=0)
+
+#### 5. Main Application (`src/main.py`)
+- Startup price refresh: uses new `refresh_prices()` public method
+- Scan loop: normalizes `execute_signal` result to list, includes tag in signal DB inserts
+- Strategy callbacks wrapped in try/except for backwards compat with `tag` param
+- Position monitor: uses `tag` from triggered list in CLOSE signals
+- Emergency stop: includes `tag` in CLOSE signals
+
+#### 6. Backtester (`src/strategy/backtester.py`)
+- Mirrors all portfolio changes: tag-based positions, auto-tag generation, resolve logic
+- MODIFY support: in-place SL/TP updates
+- OpenPosition includes `tag` field
+
+#### 7. Orchestrator Prompts (`src/orchestrator/orchestrator.py`)
+- LAYER_2_SYSTEM: Position system section (tags, MODIFY, multi-position rules)
+- CODE_GEN_SYSTEM: MODIFY action, tag field, tag rules, examples
+- CODE_REVIEW_SYSTEM: Tag hygiene check
+
+#### 8. Peripheral Updates
+- `commands.py`: Tag display in /positions
+- `notifications.py`: Tag in trade_executed and stop_triggered
+- `routes.py`: Tag in positions API response
+- `readonly_db.py`: Schema descriptions updated (tag, MODIFY, capital_events)
+- `strategy.py`: Callback signatures updated with `tag: str = ""`
+
+#### 9. Tests (`tests/test_integration.py`)
+13 new tests added:
+- `test_contract_modify_action` — Action.MODIFY exists, Signal accepts tag
+- `test_portfolio_modify` — MODIFY updates SL/TP without fees
+- `test_portfolio_modify_no_tag` — MODIFY without tag returns None
+- `test_portfolio_multi_position` — Two BUY signals create separate positions
+- `test_portfolio_close_by_tag` — Close one, leave others
+- `test_portfolio_close_all_no_tag` — Close all for symbol (returns list)
+- `test_portfolio_sell_oldest_no_tag` — SELL hits oldest (FIFO)
+- `test_portfolio_auto_tag` — Auto-tag generation (auto_BTCUSD_001, _002)
+- `test_portfolio_average_in_same_tag` — BUY with existing tag averages in
+- `test_capital_events_table` — Table exists, accepts inserts
+- `test_positions_tag_unique` — Tag uniqueness enforced
+- `test_positions_symbol_not_unique` — Multiple same-symbol positions allowed
+- `test_db_migration_backfills_tags` — Old DB positions get auto tags
+
+Existing test updates:
+- `test_database_schema`: Added `capital_events` to required tables
+- `test_paper_trade_cycle`: Added tag assertions on BUY and CLOSE results
+
+### Key Design Decisions
+| Decision | Rationale |
+|----------|-----------|
+| Tag as primary key | Simpler dict lookup, globally unique |
+| Auto-tag: `auto_{SYMBOL}_001` | Human-readable, sortable, unique per symbol |
+| CLOSE no-tag = close ALL | Most intuitive — "close everything in BTC" |
+| SELL no-tag = oldest (FIFO) | Least surprising behavior |
+| MODIFY no-tag = error | Ambiguous — must specify which position |
+| try/except on callbacks | Backwards compat for old strategies missing `tag` param |
+| Index creation after migration | Prevents failure when old DB lacks `tag` column |
+
+### Test Results
+- **74/74 passing** (13 new + existing 61)

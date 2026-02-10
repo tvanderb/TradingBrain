@@ -1288,3 +1288,72 @@ The `CODE_GEN_SYSTEM` and `CODE_REVIEW_SYSTEM` prompts were stale relative to co
 - `tests/test_integration.py` — Updated `test_analysis_code_gen_prompts_exist` to import/check new constants
 
 ### Test Count: 35/35 passing
+
+---
+
+## Session 19 — Position System Audit & Redesign
+
+### Context
+After implementing the Telegram command redesign (/status, /health, /outlook, /ask), user asked: "are there any oversights with positions? does this align with our crypto hedge fund strategy?"
+
+This triggered a deep audit of the position system that revealed several significant gaps.
+
+### Position System Audit Findings
+
+**1. No position modification (critical)**
+- Strategy can't adjust SL/TP without closing and reopening — paying double fees + slippage
+- A fund manager trailing stops should be a zero-cost operation
+- Decision: Add `Action.MODIFY`
+
+**2. Intent is decorative (misleading)**
+- DAY/SWING/POSITION exist as enums but have ZERO mechanical effect
+- decisions.md line 24 says "Different exit logic per intent" but this was never implemented
+- DAY trades don't auto-close, POSITION trades get same 30s monitoring as scalps
+- Decision: Keep as informational labels (enforcing is directive), but tell orchestrator truth
+
+**3. Orchestrator awareness gap (violates core philosophy)**
+- Layer 2 doesn't mention: can't modify positions, no trailing stops, intent is decorative, averaging-in behavior
+- The orchestrator could write strategies that try to trail stops by generating new BUY signals with updated SL, not knowing it's paying double fees for what should be free
+- Decision: After all changes, comprehensive Layer 2 rewrite. Going forward, every system change must include awareness update.
+
+**4. One position per symbol (limiting)**
+- UNIQUE constraint forces averaging in — can't have long-term BTC hold + short-term BTC trade
+- User: "I don't like this constraint, let's get rid of it"
+- Decision: Tags system for multi-position per symbol
+
+**5. Risk limits too tight / too directive**
+- 12% max drawdown on crypto is very aggressive — BTC alone has 20%+ drawdowns in bull markets
+- User philosophy: "trust the aligned agent" — identity + awareness should replace hard rules
+- Claude response shared by user: suggests volatility-based stops, ATR, tiered approaches
+- Decision: Widen to 40% max drawdown. Future: orchestrator-writable risk profile.
+
+**6. Client-side SL/TP monitoring (fragile at scale)**
+- 30-second polling means server downtime = unprotected positions
+- Kraken supports native stop-loss, take-profit, trailing-stop order types
+- User: "even at small scale I want this, best option for scalability and long-term stability"
+- Decision: Exchange-native orders. Paper mode continues with price simulation.
+
+**7. No capital injection tracking**
+- Depositing cash looks like trading profit
+- Decision: capital_events table for deposits/withdrawals
+
+### User Philosophy Reinforcement
+- "Let's prioritize longevity in very long terms — giving it the ability to gracefully scale WITHOUT intervention"
+- "We need to maximize awareness. After changes we make to this system, we need to ensure that it is MAXIMALLY AWARE of EVERYTHING"
+- "I want to lean towards trusting the aligned agent. How can we minimize hard gates?"
+- User thinks about scaling: $1K → $10K → $100K from trading AND cash injections
+
+### Implementation Sequencing (agreed)
+- **Session A**: Action.MODIFY + multi-position tags + capital_events + remove UNIQUE — contract and portfolio changes
+- **Session B**: Exchange-native orders on Kraken + position monitor rewrite
+- **Session C**: Risk profile system + widen hard limits + full Layer 2 rewrite
+
+### What the Orchestrator Needs to Know (after all changes)
+Full awareness update required:
+- MODIFY action exists and is free (no fees/slippage)
+- Tags enable multi-position per symbol
+- Intent is informational only — strategy manages its own exit logic
+- Exchange-native SL/TP orders (survive server downtime, execute at exchange speed)
+- Risk limits are emergency backstops, not operational constraints
+- One conditional close per entry (no native OCO — system manages cancel-other)
+- Paper mode simulates everything; live mode places real orders

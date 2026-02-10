@@ -254,8 +254,10 @@ class BotCommands:
             pnl = (current - entry) * qty
             pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
 
+            tag = p.get("tag", "")
+            tag_str = f" [{tag}]" if tag else ""
             lines.append(
-                f"\n{p['symbol']} ({p.get('intent', 'DAY')})\n"
+                f"\n{p['symbol']}{tag_str} ({p.get('intent', 'DAY')})\n"
                 f"  Qty: {qty:.6f} @ ${entry:.2f}\n"
                 f"  Now: ${current:.2f} ({pnl_pct:+.1f}%)\n"
                 f"  P&L: ${pnl:+.2f}\n"

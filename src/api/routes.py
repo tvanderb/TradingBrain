@@ -111,6 +111,7 @@ async def positions_handler(request: web.Request) -> web.Response:
 
         positions.append({
             "symbol": symbol,
+            "tag": row.get("tag", ""),
             "qty": qty,
             "entry_price": entry_price,
             "current_price": current_price,

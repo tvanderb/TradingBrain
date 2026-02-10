@@ -22,10 +22,11 @@ CREATE TABLE IF NOT EXISTS candles (
     UNIQUE(symbol, timeframe, timestamp)
 );
 
--- Open positions
+-- Open positions (keyed by tag, multiple positions per symbol allowed)
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    tag TEXT NOT NULL,
     side TEXT NOT NULL DEFAULT 'long',
     qty REAL NOT NULL,
     avg_entry REAL NOT NULL,
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS positions (
     intent TEXT NOT NULL DEFAULT 'DAY',
     strategy_version TEXT,
     opened_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(tag)
 );
 
 -- Completed trades
@@ -204,7 +206,17 @@ CREATE TABLE IF NOT EXISTS orchestrator_observations (
     UNIQUE(date, cycle_id)
 );
 
+-- Capital events (deposits, withdrawals, adjustments)
+CREATE TABLE IF NOT EXISTS capital_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    timestamp TEXT DEFAULT (datetime('now')),
+    notes TEXT
+);
+
 -- Indexes for common queries
+-- Note: idx_positions_tag and idx_positions_symbol created after special migrations
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol, closed_at);
 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
@@ -228,6 +240,9 @@ MIGRATIONS = [
     ("positions", "entry_fee", "ALTER TABLE positions ADD COLUMN entry_fee REAL DEFAULT 0"),
     # Persist strategy_version on positions (for SL/TP trade attribution)
     ("positions", "strategy_version", "ALTER TABLE positions ADD COLUMN strategy_version TEXT"),
+    # Tag columns for multi-position support
+    ("trades", "tag", "ALTER TABLE trades ADD COLUMN tag TEXT"),
+    ("signals", "tag", "ALTER TABLE signals ADD COLUMN tag TEXT"),
 ]
 
 
@@ -243,6 +258,10 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
         await self._run_migrations()
+        await self._run_special_migrations()
+        # Position indexes created after special migrations (tag column may not exist before)
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
         await self._conn.commit()
         log.info("database.connected", path=self._path)
 
@@ -255,6 +274,70 @@ class Database:
             if column not in columns:
                 await self._conn.execute(sql)
                 log.info("database.migration", table=table, column=column)
+
+    async def _run_special_migrations(self) -> None:
+        """Handle migrations that can't be done with simple ALTER TABLE.
+
+        - Positions table: remove UNIQUE(symbol), add tag column with UNIQUE(tag).
+          SQLite doesn't support DROP CONSTRAINT, so we recreate the table.
+        """
+        # Check if positions table needs migration (has tag column?)
+        cursor = await self._conn.execute("PRAGMA table_info(positions)")
+        columns = {row[1]: row for row in await cursor.fetchall()}
+
+        if "tag" not in columns:
+            log.info("database.special_migration", migration="positions_add_tag")
+
+            # Read existing positions
+            existing = await self._conn.execute("SELECT * FROM positions")
+            rows = [dict(r) for r in await existing.fetchall()]
+
+            # Drop old table and indexes
+            await self._conn.execute("DROP TABLE IF EXISTS positions")
+
+            # Recreate with new schema (from SCHEMA above, already has tag + UNIQUE(tag))
+            await self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    side TEXT NOT NULL DEFAULT 'long',
+                    qty REAL NOT NULL,
+                    avg_entry REAL NOT NULL,
+                    current_price REAL DEFAULT 0,
+                    unrealized_pnl REAL DEFAULT 0,
+                    entry_fee REAL DEFAULT 0,
+                    stop_loss REAL,
+                    take_profit REAL,
+                    intent TEXT NOT NULL DEFAULT 'DAY',
+                    strategy_version TEXT,
+                    opened_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(tag)
+                );
+                CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag);
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+            """)
+
+            # Backfill existing positions with auto-generated tags
+            tag_counters: dict[str, int] = {}
+            for row in rows:
+                symbol = row["symbol"]
+                tag_counters[symbol] = tag_counters.get(symbol, 0) + 1
+                tag = f"auto_{symbol.replace('/', '')}_{tag_counters[symbol]:03d}"
+                await self._conn.execute(
+                    """INSERT INTO positions
+                       (symbol, tag, side, qty, avg_entry, current_price, unrealized_pnl,
+                        entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (symbol, tag, row.get("side", "long"), row["qty"], row["avg_entry"],
+                     row.get("current_price", 0), row.get("unrealized_pnl", 0),
+                     row.get("entry_fee", 0), row.get("stop_loss"), row.get("take_profit"),
+                     row.get("intent", "DAY"), row.get("strategy_version"),
+                     row.get("opened_at"), row.get("updated_at")),
+                )
+            log.info("database.special_migration.complete",
+                     migration="positions_add_tag", backfilled=len(rows))
 
     async def close(self) -> None:
         if self._conn:

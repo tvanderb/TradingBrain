@@ -112,10 +112,18 @@ These hard constraints cannot be bypassed, modified, or overridden:
 - **Long-only**: Only long positions. Short selling is unavailable — Kraken margin trading is not accessible from Canada. No leverage.
 - **Code pipeline**: All generated code must pass sandbox validation, Opus code review, and backtesting before deployment.
 
+### Position System
+Positions are identified by **tags** (globally unique identifiers). Multiple positions per symbol are supported.
+- **Tags**: Each position has a unique tag (e.g., `auto_BTCUSD_001`). Auto-generated when not specified.
+- **MODIFY action**: Updates SL/TP/intent on an existing position without closing it. Zero fees. Requires a tag.
+- **CLOSE without tag**: Closes ALL positions for that symbol. CLOSE with tag closes only that position.
+- **SELL without tag**: Sells from the oldest position for that symbol (FIFO).
+- **BUY with existing tag**: Averages into that position. BUY without tag creates a new position.
+
 ### Independent Processes
 Running continuously without your involvement:
-- **Scan loop** (every 5 min): Collects market data from Kraken, computes indicators, runs the active strategy, stores scan results, acts on signals that pass risk checks.
-- **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions.
+- **Scan loop** (every 5 min): Collects market data from Kraken, runs the active strategy, stores scan results, acts on signals that pass risk checks.
+- **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions by tag.
 - **Data maintenance** (nightly, after your cycle): Aggregates and prunes candles beyond retention windows.
 - **Paper trading**: All trades execute with configurable slippage and real fee calculations.
 - **Failure alerting**: If your nightly cycle fails, a system error alert is sent automatically via Telegram.
@@ -136,7 +144,7 @@ All timeframes are bootstrapped from Kraken on cold start — the strategy has r
 - 1-hour candles: last 1 year per symbol
 - Daily candles: up to 7 years per symbol
 - Scan results: raw indicator values stored every scan
-- Trades and signals: tagged with strategy version and strategy regime
+- Trades and signals: tagged with strategy version, strategy regime, and position tag
 
 ### Response Format
 Respond in JSON:
@@ -174,7 +182,16 @@ The strategy receives:
 - portfolio: Portfolio with cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today
 - timestamp: datetime
 
-Return list[Signal] with: symbol, action (BUY/SELL/CLOSE), size_pct, order_type, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override)
+Return list[Signal] with: symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct, order_type, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override), tag (optional str — position identifier)
+
+Position tags:
+- Each position has a unique tag. Access via OpenPosition.tag in portfolio.positions.
+- BUY without tag creates a new position. BUY with an existing tag averages in.
+- SELL/CLOSE without tag targets the oldest position for that symbol.
+- MODIFY requires a tag — updates SL/TP/intent without closing. Use size_pct=0.
+
+Example MODIFY signal:
+  Signal(symbol="BTC/USD", action=Action.MODIFY, size_pct=0, tag="auto_BTCUSD_001", stop_loss=95000.0)
 
 Output ONLY the Python code. No markdown, no explanation, just the code."""
 
@@ -186,6 +203,7 @@ CODE_REVIEW_SYSTEM = """You are a code reviewer for a trading strategy. Check fo
 4. Risk management — stop losses set, position sizing within limits
 5. Risk tier accuracy — is the self-assessed tier correct?
 6. Long-only compliance — no SHORT signals (system has no margin access)
+7. Tag hygiene — MODIFY signals must include a tag. MODIFY without tag will be rejected.
 
 Respond in JSON:
 {

@@ -1,7 +1,8 @@
 """Portfolio Tracker — position management and P&L tracking.
 
 Handles both paper and live trading. Part of the rigid shell.
-Maintains positions, executes signals, tracks performance.
+Maintains positions keyed by tag (globally unique identifier),
+supporting multiple positions per symbol.
 """
 
 from __future__ import annotations
@@ -32,13 +33,17 @@ def _safe_intent(value: str) -> Intent:
 
 
 class PortfolioTracker:
-    """Tracks positions, executes trades, computes P&L."""
+    """Tracks positions, executes trades, computes P&L.
+
+    Positions are keyed by tag (globally unique). Multiple positions
+    per symbol are supported. Tags are auto-generated when not provided.
+    """
 
     def __init__(self, config: Config, db: Database, kraken: KrakenREST) -> None:
         self._config = config
         self._db = db
         self._kraken = kraken
-        self._positions: dict[str, dict] = {}  # symbol -> position dict
+        self._positions: dict[str, dict] = {}  # tag -> position dict
         self._cash: float = config.paper_balance_usd if config.is_paper() else 0.0
         self._starting_cash: float = self._cash
         self._fees_today: float = 0.0
@@ -56,11 +61,56 @@ class PortfolioTracker:
     def daily_start_value(self) -> float:
         return self._daily_start_value
 
+    def _generate_tag(self, symbol: str) -> str:
+        """Auto-generate a unique tag for a new position: auto_{SYMBOL}_001."""
+        clean = symbol.replace("/", "")
+        existing = [
+            t for t in self._positions
+            if t.startswith(f"auto_{clean}_")
+        ]
+        idx = len(existing) + 1
+        tag = f"auto_{clean}_{idx:03d}"
+        # Handle collision (shouldn't happen, but be safe)
+        while tag in self._positions:
+            idx += 1
+            tag = f"auto_{clean}_{idx:03d}"
+        return tag
+
+    def _resolve_position(self, signal: Signal) -> tuple[str, dict] | None:
+        """Resolve which position a signal targets.
+
+        - If signal.tag is set and exists, return that position.
+        - If signal.tag is set but doesn't exist, return None.
+        - If no tag: for SELL, return oldest position for symbol.
+        - If no tag: for CLOSE, handled by caller (close all).
+        - If no tag: for MODIFY, return None (ambiguous).
+        """
+        if signal.tag:
+            pos = self._positions.get(signal.tag)
+            if pos:
+                return (signal.tag, pos)
+            return None
+
+        # No tag — find oldest position for this symbol
+        symbol_positions = self._get_positions_for_symbol(signal.symbol)
+        if symbol_positions:
+            return symbol_positions[0]  # oldest first
+        return None
+
+    def _get_positions_for_symbol(self, symbol: str) -> list[tuple[str, dict]]:
+        """Return all (tag, pos) pairs for a symbol, sorted by opened_at."""
+        matches = [
+            (tag, pos) for tag, pos in self._positions.items()
+            if pos["symbol"] == symbol
+        ]
+        matches.sort(key=lambda x: x[1].get("opened_at", ""))
+        return matches
+
     async def initialize(self) -> None:
         """Load positions from DB on startup."""
         rows = await self._db.fetchall("SELECT * FROM positions")
         for row in rows:
-            self._positions[row["symbol"]] = dict(row)
+            self._positions[row["tag"]] = dict(row)
         log.info("portfolio.loaded", positions=len(self._positions), cash=self._cash)
 
         # Load cash from last daily snapshot if available
@@ -95,20 +145,27 @@ class PortfolioTracker:
         return self._cash + position_value
 
     def get_position_value(self, symbol: str) -> float:
-        pos = self._positions.get(symbol)
-        if not pos:
-            return 0.0
-        return pos["qty"] * pos.get("current_price", pos["avg_entry"])
+        """Aggregate position value across all tags for a symbol."""
+        total = 0.0
+        for pos in self._positions.values():
+            if pos["symbol"] == symbol:
+                total += pos["qty"] * pos.get("current_price", pos["avg_entry"])
+        return total
+
+    def refresh_prices(self, prices: dict[str, float]) -> None:
+        """Update current_price on all positions matching symbols."""
+        for tag, pos in self._positions.items():
+            symbol = pos["symbol"]
+            if symbol in prices:
+                pos["current_price"] = prices[symbol]
 
     async def get_portfolio(self, prices: dict[str, float]) -> Portfolio:
         """Build a Portfolio snapshot for the Strategy Module."""
-        # Update prices
-        for symbol, price in prices.items():
-            if symbol in self._positions:
-                self._positions[symbol]["current_price"] = price
+        # Update prices by symbol across all tags
+        self.refresh_prices(prices)
 
         open_positions = []
-        for sym, p in self._positions.items():
+        for tag, p in self._positions.items():
             entry = p["avg_entry"]
             current = p.get("current_price", entry)
             qty = p["qty"]
@@ -116,7 +173,7 @@ class PortfolioTracker:
             pnl_pct = pnl / (entry * qty) if entry * qty > 0 else 0.0
 
             open_positions.append(OpenPosition(
-                symbol=sym,
+                symbol=p["symbol"],
                 side=p.get("side", "long"),
                 qty=qty,
                 avg_entry=entry,
@@ -127,6 +184,7 @@ class PortfolioTracker:
                 stop_loss=p.get("stop_loss"),
                 take_profit=p.get("take_profit"),
                 opened_at=datetime.fromisoformat(p["opened_at"]) if p.get("opened_at") else datetime.now(),
+                tag=tag,
             ))
 
         # Recent trades
@@ -172,15 +230,37 @@ class PortfolioTracker:
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
-    ) -> dict | None:
-        """Execute a signal. Returns trade info dict or None if failed."""
+    ) -> dict | list[dict] | None:
+        """Execute a signal. Returns trade info dict, list (multi-close), or None if failed.
 
+        Returns list[dict] only when CLOSE has no tag (closes all positions for symbol).
+        """
         if signal.action == Action.BUY:
             return await self._execute_buy(signal, current_price, maker_fee, taker_fee, strategy_version)
         elif signal.action == Action.SELL:
             return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
         elif signal.action == Action.CLOSE:
-            return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
+            # No-tag CLOSE = close ALL positions for this symbol
+            if not signal.tag:
+                symbol_positions = self._get_positions_for_symbol(signal.symbol)
+                if not symbol_positions:
+                    log.warning("portfolio.no_position_to_close", symbol=signal.symbol)
+                    return None
+                if len(symbol_positions) == 1:
+                    # Single position — return dict (not list) for backwards compat
+                    tag, pos = symbol_positions[0]
+                    return await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+                # Multiple positions — close all, return list
+                results = []
+                for tag, pos in symbol_positions:
+                    r = await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+                    if r:
+                        results.append(r)
+                return results if results else None
+            else:
+                return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
+        elif signal.action == Action.MODIFY:
+            return await self._execute_modify(signal)
         return None
 
     async def _execute_buy(
@@ -208,7 +288,6 @@ class PortfolioTracker:
             fee = trade_value * (fee_pct / 100)
         else:
             # Live: place order on Kraken
-            # For limit orders, use slippage tolerance to set price above market
             limit_price = price if signal.order_type == OrderType.LIMIT else None
             if signal.order_type == OrderType.LIMIT and limit_price and not signal.limit_price:
                 limit_price = price * (1 + self._get_slippage(signal))
@@ -221,7 +300,6 @@ class PortfolioTracker:
                 qty,
                 limit_price,
             )
-            # TODO: Poll order status for actual fill price. Currently assumes market price.
             fill_price = price
             log.warning("portfolio.live_fill_assumed", symbol=signal.symbol,
                         assumed_price=price, note="Actual fill may differ")
@@ -230,93 +308,117 @@ class PortfolioTracker:
         self._cash -= (qty * fill_price + fee)
         self._fees_today += fee
 
-        # Store position (including entry fee for accurate P&L on close)
-        now = datetime.now().isoformat()
-        pos = {
-            "symbol": signal.symbol,
-            "side": "long",
-            "qty": qty,
-            "avg_entry": fill_price,
-            "current_price": fill_price,
-            "entry_fee": fee,
-            "stop_loss": signal.stop_loss,
-            "take_profit": signal.take_profit,
-            "intent": signal.intent.value,
-            "strategy_version": strategy_version,
-            "opened_at": now,
-            "updated_at": now,
-        }
+        # Resolve tag: if signal has a tag and it exists, average in
+        tag = signal.tag
+        existing = self._positions.get(tag) if tag else None
 
-        # If position exists, average in (preserve existing SL/TP if new signal has None)
-        if signal.symbol in self._positions:
-            existing = self._positions[signal.symbol]
-            total_qty = existing["qty"] + qty
-            avg = (existing["avg_entry"] * existing["qty"] + fill_price * qty) / total_qty
+        if tag and existing:
+            # Average into existing tagged position
+            pos = existing
+            total_qty = pos["qty"] + qty
+            avg = (pos["avg_entry"] * pos["qty"] + fill_price * qty) / total_qty
             pos["qty"] = total_qty
             pos["avg_entry"] = avg
-            pos["entry_fee"] = existing.get("entry_fee", 0.0) + fee
-            pos["opened_at"] = existing["opened_at"]
+            pos["entry_fee"] = pos.get("entry_fee", 0.0) + fee
+            pos["updated_at"] = datetime.now().isoformat()
             # Preserve existing SL/TP if new signal doesn't specify them
-            if pos["stop_loss"] is None and existing.get("stop_loss") is not None:
-                pos["stop_loss"] = existing["stop_loss"]
-            if pos["take_profit"] is None and existing.get("take_profit") is not None:
-                pos["take_profit"] = existing["take_profit"]
+            if signal.stop_loss is not None:
+                pos["stop_loss"] = signal.stop_loss
+            if signal.take_profit is not None:
+                pos["take_profit"] = signal.take_profit
+            pos["current_price"] = fill_price
 
-        self._positions[signal.symbol] = pos
+            # Update DB
+            await self._db.execute(
+                """UPDATE positions SET qty = ?, avg_entry = ?, current_price = ?,
+                   entry_fee = ?, stop_loss = ?, take_profit = ?, updated_at = ?
+                   WHERE tag = ?""",
+                (pos["qty"], pos["avg_entry"], pos["current_price"],
+                 pos["entry_fee"], pos["stop_loss"], pos["take_profit"],
+                 pos["updated_at"], tag),
+            )
+        else:
+            # New position
+            if not tag:
+                tag = self._generate_tag(signal.symbol)
 
-        # Save to DB
-        await self._db.execute(
-            """INSERT OR REPLACE INTO positions
-               (symbol, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pos["symbol"], pos["side"], pos["qty"], pos["avg_entry"], pos["current_price"],
-             pos["entry_fee"], pos["stop_loss"], pos["take_profit"], pos["intent"],
-             pos["strategy_version"], pos["opened_at"], pos["updated_at"]),
-        )
+            now = datetime.now().isoformat()
+            pos = {
+                "symbol": signal.symbol,
+                "tag": tag,
+                "side": "long",
+                "qty": qty,
+                "avg_entry": fill_price,
+                "current_price": fill_price,
+                "entry_fee": fee,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "intent": signal.intent.value,
+                "strategy_version": strategy_version,
+                "opened_at": now,
+                "updated_at": now,
+            }
+            self._positions[tag] = pos
+
+            # Insert into DB
+            await self._db.execute(
+                """INSERT INTO positions
+                   (symbol, tag, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (pos["symbol"], tag, pos["side"], pos["qty"], pos["avg_entry"],
+                 pos["current_price"], pos["entry_fee"], pos["stop_loss"],
+                 pos["take_profit"], pos["intent"], pos["strategy_version"],
+                 pos["opened_at"], pos["updated_at"]),
+            )
+
         await self._db.commit()
 
-        log.info("portfolio.buy", symbol=signal.symbol, qty=round(qty, 8),
+        log.info("portfolio.buy", symbol=signal.symbol, tag=tag, qty=round(qty, 8),
                  price=round(fill_price, 2), fee=round(fee, 4), intent=signal.intent.value)
 
         return {
             "symbol": signal.symbol, "action": "BUY", "qty": qty,
             "price": fill_price, "fee": fee, "intent": signal.intent.value,
+            "tag": tag,
         }
 
     async def _execute_sell(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
-        """Partial sell of a position."""
-        pos = self._positions.get(signal.symbol)
-        if not pos:
-            log.warning("portfolio.no_position_to_sell", symbol=signal.symbol)
+        """Partial sell of a position. No tag = sell oldest for symbol."""
+        resolved = self._resolve_position(signal)
+        if not resolved:
+            log.warning("portfolio.no_position_to_sell", symbol=signal.symbol, tag=signal.tag)
             return None
 
+        tag, pos = resolved
         portfolio_value = await self.total_value()
         sell_value = portfolio_value * signal.size_pct
         qty_to_sell = min(sell_value / price, pos["qty"])
 
-        return await self._close_qty(signal.symbol, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+        return await self._close_qty(tag, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
 
     async def _execute_close(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
-        """Close entire position."""
-        pos = self._positions.get(signal.symbol)
-        if not pos:
-            log.warning("portfolio.no_position_to_close", symbol=signal.symbol)
+        """Close entire position by tag."""
+        resolved = self._resolve_position(signal)
+        if not resolved:
+            log.warning("portfolio.no_position_to_close", symbol=signal.symbol, tag=signal.tag)
             return None
 
-        return await self._close_qty(signal.symbol, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+        tag, pos = resolved
+        return await self._close_qty(tag, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
 
     async def _close_qty(
-        self, symbol: str, qty: float, price: float,
+        self, tag: str, qty: float, price: float,
         maker_fee: float, taker_fee: float, signal: Signal,
         strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
-        pos = self._positions[symbol]
+        pos = self._positions[tag]
+        symbol = pos["symbol"]
         # Use version from position if not provided (e.g., SL/TP triggered by position monitor)
         if strategy_version is None:
             strategy_version = pos.get("strategy_version")
@@ -328,7 +430,6 @@ class PortfolioTracker:
             order_type = signal.order_type.value.lower()
             limit_price = signal.limit_price if signal.order_type == OrderType.LIMIT else None
             result = await self._kraken.place_order(symbol, "sell", order_type, qty, limit_price)
-            # TODO: Poll order status for actual fill price. Currently assumes market price.
             fill_price = price
             log.warning("portfolio.live_fill_assumed", symbol=symbol,
                         assumed_price=price, note="Actual fill may differ")
@@ -354,52 +455,105 @@ class PortfolioTracker:
         now = datetime.now().isoformat()
         await self._db.execute(
             """INSERT INTO trades
-               (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (symbol, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
+               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, tag, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
              total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now),
         )
 
         # Update or remove position
         remaining_qty = pos["qty"] - qty
         if remaining_qty <= 0.000001:
-            del self._positions[symbol]
-            await self._db.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
+            del self._positions[tag]
+            await self._db.execute("DELETE FROM positions WHERE tag = ?", (tag,))
         else:
             pos["qty"] = remaining_qty
             pos["entry_fee"] = total_entry_fee - entry_fee_portion
             pos["updated_at"] = now
             await self._db.execute(
-                "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE symbol = ?",
-                (remaining_qty, pos["entry_fee"], now, symbol),
+                "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
+                (remaining_qty, pos["entry_fee"], now, tag),
             )
 
         await self._db.commit()
 
-        log.info("portfolio.sell", symbol=symbol, qty=round(qty, 8),
+        log.info("portfolio.sell", symbol=symbol, tag=tag, qty=round(qty, 8),
                  price=round(fill_price, 2), pnl=round(pnl, 4), fee=round(fee, 4))
 
         return {
             "symbol": symbol, "action": signal.action.value, "qty": qty,
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct, "fee": fee,
-            "intent": pos.get("intent", "DAY"),
+            "intent": pos.get("intent", "DAY"), "tag": tag,
+        }
+
+    async def _execute_modify(self, signal: Signal) -> dict | None:
+        """Modify SL/TP/intent on an existing position. Zero fees, no trade recorded."""
+        if not signal.tag:
+            log.warning("portfolio.modify_no_tag", symbol=signal.symbol)
+            return None
+
+        pos = self._positions.get(signal.tag)
+        if not pos:
+            log.warning("portfolio.modify_not_found", tag=signal.tag)
+            return None
+
+        changes = {}
+        if signal.stop_loss is not None:
+            changes["stop_loss"] = signal.stop_loss
+            pos["stop_loss"] = signal.stop_loss
+        if signal.take_profit is not None:
+            changes["take_profit"] = signal.take_profit
+            pos["take_profit"] = signal.take_profit
+        if signal.intent != Intent.DAY or changes:
+            # Only update intent if explicitly different or if there are other changes
+            if signal.intent.value != pos.get("intent", "DAY"):
+                changes["intent"] = signal.intent.value
+                pos["intent"] = signal.intent.value
+
+        if not changes:
+            log.info("portfolio.modify_no_changes", tag=signal.tag)
+            return None
+
+        now = datetime.now().isoformat()
+        pos["updated_at"] = now
+
+        # Build dynamic UPDATE
+        set_clauses = ["updated_at = ?"]
+        params = [now]
+        for col, val in changes.items():
+            set_clauses.append(f"{col} = ?")
+            params.append(val)
+        params.append(signal.tag)
+
+        await self._db.execute(
+            f"UPDATE positions SET {', '.join(set_clauses)} WHERE tag = ?",
+            tuple(params),
+        )
+        await self._db.commit()
+
+        log.info("portfolio.modify", tag=signal.tag, changes=changes)
+
+        return {
+            "symbol": pos["symbol"], "action": "MODIFY", "tag": signal.tag,
+            "changes": changes, "fee": 0, "qty": pos["qty"], "price": pos.get("current_price", pos["avg_entry"]),
         }
 
     async def update_prices(self, prices: dict[str, float]) -> list[dict]:
         """Update position prices and check stop-loss/take-profit triggers.
         Returns list of triggered positions that need closing."""
         triggered = []
-        for symbol, price in prices.items():
-            if symbol not in self._positions:
+        for tag, pos in list(self._positions.items()):
+            symbol = pos["symbol"]
+            if symbol not in prices:
                 continue
-            pos = self._positions[symbol]
+            price = prices[symbol]
             pos["current_price"] = price
 
             # Check stop-loss (takes priority over take-profit)
             if pos.get("stop_loss") and price <= pos["stop_loss"]:
-                triggered.append({"symbol": symbol, "reason": "stop_loss", "price": price})
+                triggered.append({"symbol": symbol, "tag": tag, "reason": "stop_loss", "price": price})
             elif pos.get("take_profit") and price >= pos["take_profit"]:
-                triggered.append({"symbol": symbol, "reason": "take_profit", "price": price})
+                triggered.append({"symbol": symbol, "tag": tag, "reason": "take_profit", "price": price})
 
         return triggered
 

@@ -134,10 +134,10 @@ class Strategy(StrategyBase):
 
         return None
 
-    def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent) -> None:
+    def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent, tag: str = "") -> None:
         self._trade_count += 1
 
-    def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float) -> None:
+    def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float, tag: str = "") -> None:
         pass
 
     def get_state(self) -> dict:

@@ -20,6 +20,7 @@ class Action(Enum):
     BUY = "BUY"
     SELL = "SELL"
     CLOSE = "CLOSE"
+    MODIFY = "MODIFY"
 
 
 class Intent(Enum):
@@ -48,6 +49,7 @@ class OpenPosition:
     stop_loss: Optional[float]
     take_profit: Optional[float]
     opened_at: datetime
+    tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ class Signal:
     confidence: float = 0.5
     reasoning: str = ""
     slippage_tolerance: Optional[float] = None  # Override default; e.g. 0.0005 = 0.05%
+    tag: Optional[str] = None                    # Position tag for multi-position / MODIFY
 
 
 # --- Strategy Interface ---
@@ -138,11 +141,11 @@ class StrategyBase:
         """Called every scan interval. Return trading signals (may be empty)."""
         raise NotImplementedError
 
-    def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent) -> None:
+    def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent, tag: str = "") -> None:
         """Called when an order is filled. Update internal state."""
         pass
 
-    def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float) -> None:
+    def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float, tag: str = "") -> None:
         """Called when a position is fully closed. Record outcome."""
         pass
 
