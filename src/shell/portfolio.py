@@ -434,7 +434,7 @@ class PortfolioTracker:
                (date, portfolio_value, cash, total_trades, wins, losses, gross_pnl, net_pnl, fees_total, win_rate)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (today, tv, self._cash, total, wins, losses, gross_before_fees, net,
-             self._fees_today, wins / total if total > 0 else 0.0),
+             fees_from_trades, wins / total if total > 0 else 0.0),
         )
         await self._db.commit()
         self._daily_start_value = tv

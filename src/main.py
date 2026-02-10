@@ -463,6 +463,9 @@ class TradingBrain:
 
                 # Execute (use per-pair fees if available)
                 price = prices.get(signal.symbol, 0)
+                if price <= 0:
+                    log.warning("scan.invalid_price", symbol=signal.symbol, price=price)
+                    continue
                 regime = scan_symbols.get(signal.symbol, {}).get("regime")
                 sym_fees = self._pair_fees.get(signal.symbol)
                 result = await self._portfolio.execute_signal(
