@@ -1,0 +1,17 @@
+all:
+  children:
+    trading:
+      hosts:
+        trading-brain:
+          ansible_host: ""           # Remote IP or hostname
+          ansible_user: ""           # SSH user
+          ansible_ssh_private_key_file: ""  # Path to SSH private key
+          ansible_become: true
+
+          # Secrets — fill in or use ansible-vault
+          kraken_api_key: ""
+          kraken_secret_key: ""
+          anthropic_api_key: ""
+          telegram_bot_token: ""
+          telegram_chat_id: ""
+          api_key: ""

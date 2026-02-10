@@ -40,5 +40,11 @@ data/*.db-wal
 # Logs
 *.log
 
+# Ansible (contains secrets)
+deploy/inventory.yml
+
+# Ansible retry files
+*.retry
+
 # Claude
 .claude/
