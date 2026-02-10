@@ -967,7 +967,40 @@ Third full audit with 3 agents. After triage, 3 real bugs found and fixed:
 
 **False positives dismissed (7+):** WebSocket/fee/risk "race conditions" (asyncio is single-threaded), data_store param ordering (verified correct), ReadOnlyDB newline bypass (`\s*` catches newlines), various "silent failures" that are by-design graceful degradation.
 
+### Session 16 (cont.) — Cold Start Testing & Deployment Prep
+
+#### README
+- Created `README.md` with architecture diagram, features, quick start, project structure, Telegram commands, API docs, risk model
+- Verification found 3 inaccuracies: truth benchmarks 17→21, commands 14→15, event types 19→18. Fixed.
+- Rewrote intro — old version said orchestrator "rewrites the strategy nightly" (misleading). New version accurately describes the decide-then-maybe-change flow.
+
+#### Cold Start Paper Test
+- Wiped DB, started system from scratch
+- Discovered `scan.candle_fallback` warnings: bootstrap only fetched 5m candles, but scan loop substituted 5m data into `candles_1h` and `candles_1d` fields when those were empty. Strategy received wrong-timeframe data silently.
+- **Fix**: Bootstrap now fetches all three timeframes from Kraken REST:
+  - 5m: 30 days (~721 candles per symbol)
+  - 1h: 1 year (~721 candles per symbol)
+  - 1d: 1 year (~365 candles per symbol)
+- Zero fallback warnings after fix — strategy gets real data from minute one.
+
+#### Orchestrator Failure Alerting
+- Found gap: `run_nightly_cycle()` caught exceptions and returned error string (swallowed). Caller in `main.py` sent it as a `daily_summary` — confusing, not a proper alert.
+- **Fix**: Orchestrator now sends `system_error` via Telegram/WebSocket before re-raising. Caller catches but doesn't double-notify.
+
+#### Deployment Prep
+- Enabled API by default (`api.enabled = true`)
+- Added `API_KEY` to `.env`
+- Docker log persistence: `json-file` driver, 50MB max size, 5 rotated files
+- Removed dead `min_trade_usd` from config dataclass, loader, and TOML
+- User updated config: paper_balance_usd 200→100, timezone US/Eastern→America/New_York, sonnet model updated
+
+#### Config Changes (user-applied)
+- `paper_balance_usd`: 200.0 → 100.0
+- `timezone`: "US/Eastern" → "America/New_York"
+- `sonnet_model`: "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5"
+
 ### Final State
 - **Tests: 58/58 passing**
-- **3 audit rounds completed, all real findings fixed**
-- **System hardened and ready for deployment**
+- **3 audit rounds + cold start test completed**
+- **Merged to master**
+- **Ready for VPS deployment**

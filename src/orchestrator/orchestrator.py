@@ -108,7 +108,7 @@ These hard constraints cannot be bypassed, modified, or overridden:
 - **Risk manager**: Silently clamps oversized trade requests to configured maximums.
 - **Daily loss halt**: Trading stops for the day when cumulative losses hit the limit.
 - **Drawdown halt**: System halts entirely when portfolio drops below the threshold from peak.
-- **Truth benchmarks**: 17 metrics computed from raw database data. You cannot modify these. They exist so you can verify your analysis modules against reality.
+- **Truth benchmarks**: 21 metrics computed from raw database data. You cannot modify these. They exist so you can verify your analysis modules against reality.
 - **Long-only**: Only long positions. Short selling is unavailable — Kraken margin trading is not accessible from Canada. No leverage.
 - **Code pipeline**: All generated code must pass sandbox validation, Opus code review, and backtesting before deployment.
 
@@ -118,6 +118,7 @@ Running continuously without your involvement:
 - **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions.
 - **Data maintenance** (nightly, after your cycle): Aggregates and prunes candles beyond retention windows.
 - **Paper trading**: All trades execute with configurable slippage and real fee calculations.
+- **Failure alerting**: If your nightly cycle fails, a system error alert is sent automatically via Telegram.
 
 ### Your Inputs
 Five categories, labeled by trust level:
@@ -130,9 +131,10 @@ Five categories, labeled by trust level:
 If your analysis module output contradicts ground truth, ground truth is correct — your analysis has a bug.
 
 ### Data Landscape
+All timeframes are bootstrapped from Kraken on cold start — the strategy has real data from minute one.
 - 5-minute candles: last 30 days per symbol
-- 1-hour candles: last 1 year
-- Daily candles: up to 7 years
+- 1-hour candles: last 1 year per symbol
+- Daily candles: up to 7 years per symbol
 - Scan results: raw indicator values stored every scan
 - Trades and signals: tagged with strategy version and strategy regime
 
