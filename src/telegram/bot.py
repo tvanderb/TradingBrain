@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler
 
 from src.shell.config import TelegramConfig
@@ -57,10 +60,23 @@ class TelegramBot:
         await self._app.initialize()
         await self._app.start()
 
-        # Explicitly clear any stale webhook/polling session from a previous
-        # instance (e.g. container restart) before starting our own polling.
+        # Clear any stale webhook from a previous instance before polling.
         await self._app.bot.delete_webhook(drop_pending_updates=True)
 
+        # Retry polling startup — on container restart, the previous instance's
+        # long-poll may still be alive on Telegram's servers for a few seconds.
+        for attempt in range(3):
+            try:
+                await self._app.updater.start_polling(drop_pending_updates=True)
+                log.info("telegram.started")
+                return
+            except Conflict:
+                wait = 3 * (attempt + 1)
+                log.warning("telegram.conflict", attempt=attempt + 1, retry_in=wait,
+                            note="Previous polling session still active on Telegram servers")
+                await asyncio.sleep(wait)
+
+        # Final attempt — let it raise if it still fails
         await self._app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram.started")
 
