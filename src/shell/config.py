@@ -31,6 +31,7 @@ class AIConfig:
     anthropic_api_key: str = ""
     sonnet_model: str = "claude-sonnet-4-5-20250929"
     opus_model: str = "claude-opus-4-6"
+    haiku_model: str = "claude-haiku-4-5-20251001"
     daily_token_limit: int = 1500000
     vertex_project_id: str = ""
     vertex_region: str = "us-east5"
@@ -170,6 +171,7 @@ def load_config() -> Config:
         config.ai.provider = ai.get("provider", config.ai.provider)
         config.ai.sonnet_model = ai.get("sonnet_model", config.ai.sonnet_model)
         config.ai.opus_model = ai.get("opus_model", config.ai.opus_model)
+        config.ai.haiku_model = ai.get("haiku_model", config.ai.haiku_model)
         config.ai.daily_token_limit = ai.get("daily_token_limit", config.ai.daily_token_limit)
 
         vertex = ai.get("vertex", {})

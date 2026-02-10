@@ -37,13 +37,15 @@ class TelegramBot:
 
         # Register command handlers
         handlers = {
-            "start": self._commands.cmd_start,
+            "start": self._commands.cmd_help,
+            "help": self._commands.cmd_help,
             "status": self._commands.cmd_status,
+            "health": self._commands.cmd_health,
+            "outlook": self._commands.cmd_outlook,
             "positions": self._commands.cmd_positions,
             "trades": self._commands.cmd_trades,
-            "report": self._commands.cmd_report,
             "risk": self._commands.cmd_risk,
-            "performance": self._commands.cmd_performance,
+            "daily_performance": self._commands.cmd_daily_performance,
             "strategy": self._commands.cmd_strategy,
             "tokens": self._commands.cmd_tokens,
             "ask": self._commands.cmd_ask,

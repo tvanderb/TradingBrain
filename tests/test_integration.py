@@ -284,7 +284,7 @@ def test_sandbox_rejects_syntax_error():
 # --- Indicators ---
 
 def test_compute_indicators():
-    from strategy.skills import compute_indicators
+    from strategy.skills.indicators import compute_indicators
 
     dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
     df = pd.DataFrame({
@@ -496,9 +496,9 @@ async def test_truth_benchmarks():
         # Seed scan results
         for i in range(10):
             await db.execute(
-                """INSERT INTO scan_results (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
-                   VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("BTC/USD", 50000 + i * 100, 50100, 49900, 55, 1.2, 0.5, "trending"),
+                """INSERT INTO scan_results (timestamp, symbol, price, spread)
+                   VALUES (datetime('now'), ?, ?, ?)""",
+                ("BTC/USD", 50000 + i * 100, 0.5),
             )
 
         await db.commit()
@@ -741,16 +741,22 @@ async def test_market_analysis_module():
         db = Database(db_path)
         await db.connect()
 
-        # Seed scan results
+        # Seed candles (1h timeframe for market analysis)
         for i in range(20):
             await db.execute(
-                """INSERT INTO scan_results
-                   (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
+                """INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+                   VALUES (?, '1h', datetime('now', ?), ?, ?, ?, ?, ?)""",
+                ("BTC/USD", f"-{20-i} hours",
+                 50000 + i * 50, 50100 + i * 50, 49900 + i * 50,
+                 50000 + i * 50, 100 + i * 5),
+            )
+        # Seed scan results (for data_quality section)
+        for i in range(20):
+            await db.execute(
+                """INSERT INTO scan_results (timestamp, symbol, price, spread, created_at)
+                   VALUES (?, ?, ?, ?, datetime('now', ?))""",
                 (f"2026-01-01 {10+i//6:02d}:{(i%6)*10:02d}:00", "BTC/USD",
-                 50000 + i * 50, 50100 + i * 10, 49900 + i * 10,
-                 45 + i, 1.1 + i * 0.05, 0.5, "trending",
-                 f"-{20-i} minutes"),
+                 50000 + i * 50, 0.5, f"-{20-i} minutes"),
             )
         await db.commit()
 
@@ -761,8 +767,7 @@ async def test_market_analysis_module():
 
         assert isinstance(result, dict)
         assert "price_summary" in result
-        assert "indicator_stats_24h" in result
-        assert "signal_proximity" in result
+        assert "data_depth" in result
         assert "data_quality" in result
         assert result["data_quality"]["total_scans"] == 20
 
@@ -770,7 +775,6 @@ async def test_market_analysis_module():
         assert "BTC/USD" in result["price_summary"]
         btc = result["price_summary"]["BTC/USD"]
         assert btc["current_price"] > 0
-        assert btc["ema_alignment"] in ("bullish", "bearish")
 
         await db.close()
     finally:
@@ -910,9 +914,15 @@ async def test_orchestrator_gather_context_includes_truth_and_analysis():
 
         # Seed some data so modules have something to analyze
         await db.execute(
-            """INSERT INTO scan_results (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime, created_at)
-               VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
-            ("BTC/USD", 50000, 50100, 49900, 55, 1.2, 0.5, "trending"),
+            """INSERT INTO scan_results (timestamp, symbol, price, spread, created_at)
+               VALUES (datetime('now'), ?, ?, ?, datetime('now'))""",
+            ("BTC/USD", 50000, 0.5),
+        )
+        # Seed candle data (market analysis now reads from candles, not scan_results)
+        await db.execute(
+            """INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+               VALUES (?, '1h', datetime('now'), ?, ?, ?, ?, ?)""",
+            ("BTC/USD", 50000, 50500, 49800, 50200, 150),
         )
         await db.execute(
             """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_regime, opened_at, closed_at)
@@ -1664,8 +1674,7 @@ async def test_telegram_commands():
         risk = RiskManager(config.risk)
 
         scan_state = {"last_scan": "02:30:00", "symbols": {
-            "BTC/USD": {"price": 70000, "rsi": 55, "ema_fast": 70100, "ema_slow": 69900,
-                        "vol_ratio": 1.2, "regime": "trending"},
+            "BTC/USD": {"price": 70000, "spread": 0.5},
         }}
 
         # Configure allowed user IDs so auth passes
@@ -1685,18 +1694,26 @@ async def test_telegram_commands():
         context = MagicMock()
         context.args = []
 
-        # /start
-        await commands.cmd_start(update, context)
+        # /help (also handles /start)
+        await commands.cmd_help(update, context)
         reply = update.message.reply_text.call_args[0][0]
         assert "Trading Brain" in reply
         assert "/status" in reply
+        assert "/health" in reply
+        assert "/outlook" in reply
+        assert "Ask about the system" in reply
 
-        # /status
+        # /status — system health only (no portfolio/P&L)
         update.message.reply_text.reset_mock()
         await commands.cmd_status(update, context)
         reply = update.message.reply_text.call_args[0][0]
         assert "Mode: paper" in reply
         assert "ACTIVE" in reply
+        assert "Uptime:" in reply
+        # Should NOT contain portfolio/P&L data (moved to /health)
+        assert "Portfolio:" not in reply
+        assert "Cash:" not in reply
+        assert "Daily P&L" not in reply
 
         # /positions (empty)
         update.message.reply_text.reset_mock()
@@ -1709,13 +1726,6 @@ async def test_telegram_commands():
         await commands.cmd_trades(update, context)
         reply = update.message.reply_text.call_args[0][0]
         assert "No completed trades" in reply
-
-        # /report (with scan data)
-        update.message.reply_text.reset_mock()
-        await commands.cmd_report(update, context)
-        reply = update.message.reply_text.call_args[0][0]
-        assert "BTC/USD" in reply
-        assert "trending" in reply
 
         # /risk
         update.message.reply_text.reset_mock()
@@ -1754,6 +1764,175 @@ async def test_telegram_commands():
         await commands.cmd_kill(update, context)
         assert commands.is_paused
         assert scan_state.get("kill_requested") is True
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_telegram_health_command():
+    """T4c: /health returns fund metrics from truth benchmarks + live state."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        risk = RiskManager(config.risk)
+        risk._peak_portfolio = 210.0
+
+        # Mock portfolio tracker
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=200.0)
+        portfolio.cash = 180.0
+        portfolio.position_count = 1
+
+        config.telegram.allowed_user_ids = [12345]
+
+        commands = BotCommands(
+            config=config, db=db, scan_state={},
+            portfolio_tracker=portfolio, risk_manager=risk,
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = []
+
+        await commands.cmd_health(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Fund Health" in reply
+        assert "Portfolio: $200.00" in reply
+        assert "Cash: $180.00" in reply
+        assert "Win Rate:" in reply
+        assert "Expectancy:" in reply
+        assert "Total Fees:" in reply
+        assert "Strategy:" in reply
+        assert "Max Drawdown:" in reply
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_telegram_outlook_command():
+    """T4d: /outlook returns latest orchestrator observations."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        config.telegram.allowed_user_ids = [12345]
+
+        commands = BotCommands(config=config, db=db, scan_state={})
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = []
+
+        # Empty — no cycles yet
+        await commands.cmd_outlook(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "No orchestrator cycles have run yet" in reply
+
+        # Seed an observation
+        await db.execute(
+            """INSERT INTO orchestrator_observations (date, cycle_id, market_summary, strategy_assessment, notable_findings)
+               VALUES ('2026-02-01', 'cycle_001', 'BTC consolidating near 70k', 'Strategy performing well', 'Volatility dropping')"""
+        )
+        await db.commit()
+
+        update.message.reply_text.reset_mock()
+        await commands.cmd_outlook(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Orchestrator Outlook" in reply
+        assert "2026-02-01" in reply
+        assert "BTC consolidating near 70k" in reply
+        assert "Strategy performing well" in reply
+        assert "Volatility dropping" in reply
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_telegram_ask_command():
+    """T4e: /ask assembles context and calls Haiku."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+    from src.telegram.commands import BotCommands, ASK_SYSTEM_PROMPT
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        risk = RiskManager(config.risk)
+
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=200.0)
+        portfolio.cash = 180.0
+        portfolio.position_count = 0
+
+        ai = MagicMock()
+        ai.ask_haiku = AsyncMock(return_value="The fund is currently stable with no open positions.")
+
+        config.telegram.allowed_user_ids = [12345]
+
+        commands = BotCommands(
+            config=config, db=db, scan_state={},
+            portfolio_tracker=portfolio, risk_manager=risk, ai_client=ai,
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["How", "is", "the", "fund?"]
+
+        await commands.cmd_ask(update, context)
+
+        # Should have called ask_haiku with context + question
+        ai.ask_haiku.assert_called_once()
+        call_kwargs = ai.ask_haiku.call_args
+        prompt = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("prompt", "")
+        assert "How is the fund?" in prompt
+        assert "Portfolio: $200.00" in prompt
+        assert call_kwargs[1].get("system") == ASK_SYSTEM_PROMPT or call_kwargs.kwargs.get("system") == ASK_SYSTEM_PROMPT
+        assert call_kwargs[1].get("purpose") == "user_ask" or call_kwargs.kwargs.get("purpose") == "user_ask"
+
+        # Should have sent "Thinking..." then the answer
+        calls = update.message.reply_text.call_args_list
+        assert "Thinking..." in calls[0][0][0]
+        assert "stable" in calls[1][0][0]
 
         await db.close()
     finally:
@@ -2023,15 +2202,15 @@ async def test_scan_results_stored_in_db():
         # Simulate what the scan loop does: insert scan results
         await db.execute(
             """INSERT INTO scan_results
-               (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now(tz=None).isoformat(), "BTC/USD", 70000, 70100, 69900, 55, 1.2, 0.5, "trending"),
+               (timestamp, symbol, price, spread)
+               VALUES (?, ?, ?, ?)""",
+            (datetime.now(tz=None).isoformat(), "BTC/USD", 70000, 0.5),
         )
         await db.execute(
             """INSERT INTO scan_results
-               (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now(tz=None).isoformat(), "ETH/USD", 3500, 3510, 3490, 48, 0.9, 0.3, "ranging"),
+               (timestamp, symbol, price, spread)
+               VALUES (?, ?, ?, ?)""",
+            (datetime.now(tz=None).isoformat(), "ETH/USD", 3500, 0.3),
         )
         await db.commit()
 
@@ -2039,9 +2218,9 @@ async def test_scan_results_stored_in_db():
         rows = await db.fetchall("SELECT * FROM scan_results ORDER BY symbol")
         assert len(rows) == 2
         assert rows[0]["symbol"] == "BTC/USD"
-        assert rows[0]["rsi"] == 55
+        assert rows[0]["price"] == 70000
         assert rows[1]["symbol"] == "ETH/USD"
-        assert rows[1]["strategy_regime"] == "ranging"
+        assert rows[1]["spread"] == 0.3
 
         # Update with signal info (simulates what scan loop does after strategy runs)
         await db.execute(
@@ -2089,7 +2268,7 @@ async def test_api_server_endpoints():
         ai = MagicMock()
         ai.get_daily_usage = AsyncMock(return_value={"total_tokens": 1000, "total_cost": 0.01, "by_model": {}})
         ai.tokens_remaining = 1499000
-        scan_state = {"symbols": {"BTC/USD": {"price": 45000, "rsi": 52, "regime": "ranging"}}, "last_scan": "03:10:00"}
+        scan_state = {"symbols": {"BTC/USD": {"price": 45000, "spread": 0.3}}, "last_scan": "03:10:00"}
         commands = MagicMock()
         commands.is_paused = False
 
@@ -2135,13 +2314,6 @@ async def test_api_server_endpoints():
             assert "limits" in body["data"]
             assert "current" in body["data"]
             assert body["data"]["current"]["halted"] is False
-
-            # /v1/market
-            resp = await client.get("/v1/market", headers=auth_headers)
-            assert resp.status == 200
-            body = await resp.json()
-            assert len(body["data"]) == 1
-            assert body["data"][0]["symbol"] == "BTC/USD"
 
             # /v1/signals
             resp = await client.get("/v1/signals", headers=auth_headers)

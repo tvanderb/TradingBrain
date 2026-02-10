@@ -20,6 +20,7 @@ log = structlog.get_logger()
 MODEL_COSTS = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
 }
 
 
@@ -163,6 +164,11 @@ class AIClient:
     async def ask_sonnet(self, prompt: str, system: str = "", max_tokens: int = 8192, purpose: str = "") -> str:
         """Shortcut for Sonnet model calls."""
         return await self.ask(prompt, model=self._config.sonnet_model, system=system,
+                              max_tokens=max_tokens, purpose=purpose)
+
+    async def ask_haiku(self, prompt: str, system: str = "", max_tokens: int = 1000, purpose: str = "") -> str:
+        """Shortcut for Haiku model calls."""
+        return await self.ask(prompt, model=self._config.haiku_model, system=system,
                               max_tokens=max_tokens, purpose=purpose)
 
     async def get_daily_usage(self) -> dict:

@@ -1176,3 +1176,96 @@ Also added `sshd -t` full config validation before flushing handlers (catches cr
 - VPS running at 178.156.216.93
 - All keys rotated from previous security incident
 - System fully deployed and scanning
+
+## Session 18 (2026-02-10) — Remove Hard-Coded Indicator Pipeline
+
+### Context
+The scan loop computed indicators via `compute_indicators()` (RSI(14), EMA(9/21), volume_ratio(20), `classify_regime()`) and stored them in `scan_results` DB table and `scan_state` in-memory dict. This meant the orchestrator received pre-interpreted data through a fixed lens it couldn't change. Goal: remove this pipeline so the orchestrator only receives data through its own rewritable analysis modules.
+
+### What Was Removed
+- `compute_indicators()` call in scan loop (main.py)
+- Indicator columns from `scan_results` schema (ema_fast, ema_slow, rsi, volume_ratio, strategy_regime)
+- Indicator fields from `scan_state["symbols"]` (now only price + spread)
+- `/report` Telegram command (showed hard-coded indicators)
+- `/v1/market` API endpoint (showed hard-coded indicators)
+- `compute_indicators` re-export from `strategy/skills/__init__.py`
+
+### What Was Kept
+- `scan_state` dict (still holds: `last_scan`, `strategy_hash`, `strategy_version`, `kill_requested`, `symbols` with price+spread)
+- All other Telegram commands and API endpoints
+- `strategy/skills/indicators.py` — functions still exist, strategy modules can import directly
+- `strategy_regime` column on trades/signals — stays but will be NULL for new records
+- `scan_results` table — kept for audit trail (timestamp, symbol, price, spread, signal columns)
+
+### Market Analysis Module Rewrite
+- Rewrote `statistics/active/market_analysis.py` to compute from `candles` table (raw OHLCV)
+- Price changes (24h, 7d) from candle close prices
+- Volatility from 1h returns, volume trends from raw volume data
+- Data depth section showing candle history per symbol/timeframe
+- Data quality section still queries scan_results for scan frequency
+
+### Files Modified (8)
+1. `src/main.py` — Removed import + indicator computation + simplified scan_results INSERT + regime→None
+2. `src/shell/database.py` — Stripped 5 indicator columns from scan_results schema
+3. `src/telegram/commands.py` — Removed cmd_report, updated /start help text
+4. `src/telegram/bot.py` — Removed "report" from handlers dict
+5. `src/api/routes.py` — Removed market_handler + /v1/market route
+6. `strategy/skills/__init__.py` — Removed compute_indicators re-export
+7. `src/statistics/readonly_db.py` — Updated scan_results schema description
+8. `statistics/active/market_analysis.py` — Full rewrite to use candles table
+9. `tests/test_integration.py` — Updated 7 test locations (scan_results INSERTs, mock scan_state, removed /report + /v1/market tests, added candle seeding)
+
+### Test Results
+- **58/58 passing** (same count — no tests added or removed, just modified)
+
+## Session 19 (2026-02-10) — Telegram Command Redesign
+
+### Context
+After removing the hard-coded indicator pipeline (Session 18), redesigned Telegram commands to better fit the investor/fund manager analogy. User is the investor, orchestrator is the fund manager, Telegram is the investor's window into the fund.
+
+### Changes Made
+
+#### 1. `/status` trimmed to system health only
+- Removed: Portfolio value, cash, positions, daily P&L, daily trades
+- Added: Uptime calculation from `first_scan_at` via scan_results MIN query
+- Kept: Mode, status (ACTIVE/PAUSED/HALTED with reason), last scan time
+- Status line now shows HALTED with reason when risk manager halted
+
+#### 2. New `/health` — Long-term fund metrics
+- Calls `compute_truth_benchmarks(db)` for 17 truth metrics
+- Live state from PortfolioTracker (value, cash, positions)
+- Total return calculated from `paper_balance_usd` initial capital
+- Current drawdown from RiskManager peak_portfolio
+- Trade stats: count (W/L), win rate, expectancy, total fees
+- Strategy version, last orchestrator cycle date, days since last trade
+
+#### 3. New `/outlook` — Orchestrator's perspective
+- Queries latest `orchestrator_observations` row
+- Shows: date, market_summary, strategy_assessment, notable_findings
+- "No orchestrator cycles have run yet" when empty
+
+#### 4. `/ask` redesigned as context-aware Haiku assistant
+- System prompt: investor relations assistant, grounded in data
+- Context injected: portfolio state, risk state, last 5 trades, latest orchestrator observations, strategy version
+- Now calls `ask_haiku()` instead of `ask_sonnet()` (cheaper, user-controlled)
+- Max tokens increased to 1000 (was 500)
+
+#### 5. `/help` updated
+- Added `/health` and `/outlook` to command list
+- `/ask` description changed to "Ask about the system"
+
+#### Config + AI client changes
+- `AIConfig.haiku_model`: new field, default `claude-haiku-4-5-20251001`
+- `MODEL_COSTS`: added Haiku pricing (input: $0.80, output: $4.0 per 1M tokens)
+- `ask_haiku()`: new shortcut method (same pattern as ask_opus/ask_sonnet)
+- `load_config()`: loads `haiku_model` from settings.toml
+
+### Files Modified (5)
+1. `src/shell/config.py` — Added `haiku_model` to AIConfig + loading
+2. `src/orchestrator/ai_client.py` — Added Haiku pricing + `ask_haiku()`
+3. `src/telegram/commands.py` — Trimmed status, added health/outlook, rewrote ask, updated help
+4. `src/telegram/bot.py` — Registered health and outlook handlers
+5. `tests/test_integration.py` — Updated status test, added 3 new tests (health, outlook, ask)
+
+### Test Results
+- **61/61 passing** (3 new tests added)
