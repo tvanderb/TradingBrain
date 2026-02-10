@@ -257,7 +257,7 @@
         recreate: always
 
     - name: restart container
-      command: docker compose -f {{ deploy_dir }}/docker-compose.yml restart
+      command: docker compose -f {{ deploy_dir }}/docker-compose.yml up -d --force-recreate
 
     - name: reload caddy
       systemd:
