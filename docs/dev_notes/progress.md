@@ -1004,3 +1004,89 @@ Third full audit with 3 agents. After triage, 3 real bugs found and fixed:
 - **3 audit rounds + cold start test completed**
 - **Merged to master**
 - **Ready for VPS deployment**
+
+## Session 16 (cont.) — Ansible Deployment & VPS Setup
+
+### Ansible Deployment Created
+
+Built a two-playbook Ansible deployment system in `deploy/`:
+
+**`deploy/setup.yml`** — VPS Setup & Hardening (run once on fresh box):
+- Creates `trading` deploy user with passwordless sudo
+- Generates ed25519 SSH key pair locally at `deploy/keys/trading-brain`
+- Hardens sshd: disables root login, password auth, limits auth tries
+- Configures UFW firewall: deny all incoming, allow SSH (22) + API (80/443/8080)
+- Creates 2GB swap file
+- Supports both Debian/Ubuntu and Arch Linux
+
+**`deploy/playbook.yml`** — Application Deployment (idempotent, re-runnable):
+- Installs Docker via official repos (Debian or Arch)
+- Creates `/srv/trading-brain/` directory structure
+- Syncs project files via rsync: `src/`, `strategy/`, `statistics/`, `config/`, build files
+- Renders `.env` from Jinja2 template with secrets from inventory
+- Builds and starts container via `docker compose`
+- Caddy reverse proxy: installed as system service, proxies port 80 → localhost:8080
+- Handler-based restarts: only restarts container when relevant files change
+- Tags: `setup`, `sync`, `secrets`, `build`, `start`, `verify`, `caddy`
+
+**Supporting files:**
+- `deploy/ansible.cfg` — SSH pipelining, host key checking off
+- `deploy/inventory.yml.example` — Template with connection details + secret placeholders
+- `deploy/templates/env.j2` — Jinja2 `.env` template
+- `deploy/templates/Caddyfile.j2` — Reverse proxy config (swap `:80` for domain to get auto-HTTPS)
+
+### VPS Deployed
+
+- **Target**: Debian 13 (trixie), 2 vCPU, 2GB RAM, at 178.156.216.93
+- VPS setup completed: user created, SSH keys, firewall, swap
+- Application deployed: Docker installed, container built and running
+- Caddy reverse proxy active on port 80
+- API verified: `curl http://178.156.216.93/v1/system` returns system status
+- Bootstrap completed: all 9 symbols × 3 timeframes (5m, 1h, 1d)
+- Scans running every 5 minutes, zero fallback warnings
+
+### Issues Found During Deployment
+
+1. **`wheel` group doesn't exist on Debian**: setup.yml tried `groups: sudo,wheel`. Fixed with conditional: `sudo` for Debian, `wheel` for Arch.
+2. **Ansible `yaml` callback removed**: `stdout_callback = yaml` (community.general) was removed in newer Ansible. Fixed to `result_format = yaml`.
+3. **SSH verify used `ansible_host` in delegate**: resolved to `localhost` instead of VPS IP. Fixed to use `inventory_hostname`.
+4. **Telegram Conflict error**: Still occurring on VPS. Same `terminated by other getUpdates request` from dev box. Not a multi-instance issue — only one container running.
+5. **Telegram commands not working**: `allowed_user_ids = []` rejects all users by design. Added user's Telegram ID to config.
+
+### Config Externalization
+
+- Created `config/settings.example.toml` with default/placeholder values
+- Added `config/settings.toml` to `.gitignore` (contains personal user ID)
+- Untracked `settings.toml` from git (`git rm --cached`)
+- `.env` was already gitignored with `.env.example` template
+- `deploy/inventory.yml` was already gitignored with `inventory.yml.example` template
+
+### Deployment Workflow
+
+```bash
+# First-time VPS setup (root + password):
+cd deploy
+ansible-playbook setup.yml -i "1.2.3.4," -u root --extra-vars "ansible_password=<pw>"
+
+# Fill inventory with connection + secrets:
+cp inventory.yml.example inventory.yml
+# Edit inventory.yml
+
+# Deploy application:
+ansible-playbook playbook.yml
+
+# Update after code changes (no container restart if only strategy/stats changed):
+ansible-playbook playbook.yml --tags sync
+
+# Deploy just Caddy:
+ansible-playbook playbook.yml --tags caddy
+
+# View logs remotely:
+ssh -i keys/trading-brain trading@<host> "docker compose -f /srv/trading-brain/docker-compose.yml logs --tail=50"
+```
+
+### Current State
+- VPS running at 178.156.216.93, paper mode, $100 portfolio
+- Caddy reverse proxy on port 80
+- Telegram Conflict error under investigation (user creating new bot to test)
+- All deployment files committed

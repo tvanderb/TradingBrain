@@ -11,6 +11,10 @@ __pycache__/
 dist/
 *.egg
 
+# Config (user-customized)
+config/settings.toml
+!config/settings.example.toml
+
 # Runtime data
 data/*.db
 data/*.sqlite

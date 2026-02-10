@@ -188,6 +188,66 @@
         msg: "{{ logs.stdout_lines }}"
       tags: [verify]
 
+    # --- Reverse Proxy (Caddy) ---
+
+    - name: Install Caddy (Debian/Ubuntu)
+      when: ansible_os_family == "Debian"
+      block:
+        - name: Add Caddy GPG key
+          shell: |
+            curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /etc/apt/keyrings/caddy.gpg
+          args:
+            creates: /etc/apt/keyrings/caddy.gpg
+
+        - name: Add Caddy repository
+          shell: |
+            echo "deb [signed-by=/etc/apt/keyrings/caddy.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy.list
+          args:
+            creates: /etc/apt/sources.list.d/caddy.list
+
+        - name: Install Caddy
+          apt:
+            name: caddy
+            state: present
+            update_cache: true
+      tags: [caddy]
+
+    - name: Install Caddy (Arch Linux)
+      when: ansible_os_family == "Archlinux"
+      pacman:
+        name: caddy
+        state: present
+      tags: [caddy]
+
+    - name: Deploy Caddyfile
+      template:
+        src: templates/Caddyfile.j2
+        dest: /etc/caddy/Caddyfile
+        mode: "0644"
+      notify: reload caddy
+      tags: [caddy]
+
+    - name: Allow HTTP through firewall
+      ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+      tags: [caddy]
+
+    - name: Allow HTTPS through firewall
+      ufw:
+        rule: allow
+        port: "443"
+        proto: tcp
+      tags: [caddy]
+
+    - name: Enable and start Caddy
+      systemd:
+        name: caddy
+        enabled: true
+        state: started
+      tags: [caddy]
+
   handlers:
     - name: rebuild container
       community.docker.docker_compose_v2:
@@ -198,3 +258,8 @@
 
     - name: restart container
       command: docker compose -f {{ deploy_dir }}/docker-compose.yml restart
+
+    - name: reload caddy
+      systemd:
+        name: caddy
+        state: reloaded

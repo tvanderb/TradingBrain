@@ -86,7 +86,7 @@
       user:
         name: "{{ deploy_user }}"
         shell: /bin/bash
-        groups: sudo,wheel
+        groups: "{{ 'sudo' if ansible_os_family == 'Debian' else 'wheel' }}"
         append: true
         create_home: true
         state: present
@@ -205,7 +205,7 @@
       command: >
         ssh -o StrictHostKeyChecking=no
         -i {{ local_key_dir }}/trading-brain
-        {{ deploy_user }}@{{ ansible_host }}
+        {{ deploy_user }}@{{ inventory_hostname }}
         echo "SSH key auth working"
       register: ssh_verify
       changed_when: false
