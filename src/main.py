@@ -289,44 +289,52 @@ class TradingBrain:
         log.info("scheduler.configured", scan_interval=scan_interval)
 
     async def _bootstrap_historical_data(self) -> None:
-        """Fetch ~30 days of 5m candles from Kraken if DB is sparse.
+        """Fetch historical candles (5m, 1h, 1d) from Kraken if DB is sparse.
 
         Runs once on startup. Paginates the OHLC API (720 candles/request).
         """
+        # (timeframe_label, kraken_interval_minutes, lookback_days, min_threshold)
+        timeframes = [
+            ("5m", 5, 30, 1000),
+            ("1h", 60, 365, 200),
+            ("1d", 1440, 365, 30),
+        ]
+
         for symbol in self._config.symbols:
-            count = await self._data_store.get_candle_count(symbol, "5m")
-            if count >= 1000:
-                continue
+            for tf_label, interval, lookback_days, threshold in timeframes:
+                count = await self._data_store.get_candle_count(symbol, tf_label)
+                if count >= threshold:
+                    continue
 
-            log.info("bootstrap.fetching", symbol=symbol, existing=count)
-            since = int((datetime.now() - timedelta(days=30)).timestamp())
-            total = 0
+                log.info("bootstrap.fetching", symbol=symbol, timeframe=tf_label, existing=count)
+                since = int((datetime.now() - timedelta(days=lookback_days)).timestamp())
+                total = 0
 
-            while True:
-                try:
-                    df = await self._kraken.get_ohlc(symbol, interval=5, since=since)
-                except Exception as e:
-                    log.warning("bootstrap.fetch_failed", symbol=symbol, error=str(e))
-                    break
+                while True:
+                    try:
+                        df = await self._kraken.get_ohlc(symbol, interval=interval, since=since)
+                    except Exception as e:
+                        log.warning("bootstrap.fetch_failed", symbol=symbol, timeframe=tf_label, error=str(e))
+                        break
 
-                if df.empty:
-                    break
+                    if df.empty:
+                        break
 
-                stored = await self._data_store.store_candles(symbol, "5m", df)
-                total += stored
+                    stored = await self._data_store.store_candles(symbol, tf_label, df)
+                    total += stored
 
-                # Use last candle timestamp for next page
-                last_ts = int(df.index[-1].timestamp())
-                if last_ts <= since:
-                    break  # No progress
-                since = last_ts
+                    # Use last candle timestamp for next page
+                    last_ts = int(df.index[-1].timestamp())
+                    if last_ts <= since:
+                        break  # No progress
+                    since = last_ts
 
-                if len(df) < 720:
-                    break  # Last page
+                    if len(df) < 720:
+                        break  # Last page
 
-                await asyncio.sleep(1)  # Rate limit
+                    await asyncio.sleep(1)  # Rate limit
 
-            log.info("bootstrap.complete", symbol=symbol, candles=total)
+                log.info("bootstrap.complete", symbol=symbol, timeframe=tf_label, candles=total)
 
     async def _on_ws_failure(self) -> None:
         """Called when WebSocket permanently fails after max retries."""
@@ -705,7 +713,7 @@ class TradingBrain:
             )
         except Exception as e:
             log.error("orchestration.failed", error=str(e))
-            await self._notifier.system_error(f"Orchestration failed: {e}")
+            # Orchestrator already sends system_error before re-raising
 
     async def _weekly_report(self) -> None:
         try:

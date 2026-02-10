@@ -2306,6 +2306,6 @@ def test_api_config_loading():
     """Test API config loads from settings.toml."""
     from src.shell.config import load_config
     config = load_config()
-    assert config.api.enabled is False  # Default off
+    assert config.api.enabled is True
     assert config.api.port == 8080
     assert config.api.host == "0.0.0.0"

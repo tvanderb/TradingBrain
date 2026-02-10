@@ -429,7 +429,9 @@ class Orchestrator:
 
         except Exception as e:
             log.error("orchestrator.cycle_failed", error=str(e), exc_info=True)
-            return f"Orchestrator cycle failed: {e}"
+            if self._notifier:
+                await self._notifier.system_error(f"Orchestrator cycle failed: {e}")
+            raise
 
     async def _gather_context(self) -> dict:
         """Collect all context needed for analysis.
