@@ -349,6 +349,7 @@ class TradingBrain:
         if self._commands and self._commands.is_paused:
             return
         halted = self._risk and self._risk.is_halted
+        self._scan_count = getattr(self, "_scan_count", 0) + 1
 
         log.info("scan.start", halted=halted)
         try:
@@ -362,14 +363,21 @@ class TradingBrain:
                     price = float(ticker["c"][0])  # Last trade price
                     prices[symbol] = price
 
-                    # Fetch recent candles for strategy
+                    # Fetch fresh 5m candles from Kraken every scan
+                    fresh_5m = await self._kraken.get_ohlc(symbol, interval=5)
+                    if not fresh_5m.empty:
+                        await self._data_store.store_candles(symbol, "5m", fresh_5m)
                     df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)
 
-                    # If we don't have enough stored data, fetch from Kraken
-                    if len(df_5m) < 30:
-                        df_5m = await self._kraken.get_ohlc(symbol, interval=5)
-                        if not df_5m.empty:
-                            await self._data_store.store_candles(symbol, "5m", df_5m)
+                    # Refresh 1h candles every hour (12 scans), 1d every day (288 scans)
+                    if self._scan_count % 12 == 1:
+                        fresh_1h = await self._kraken.get_ohlc(symbol, interval=60)
+                        if not fresh_1h.empty:
+                            await self._data_store.store_candles(symbol, "1h", fresh_1h)
+                    if self._scan_count % 288 == 1:
+                        fresh_1d = await self._kraken.get_ohlc(symbol, interval=1440)
+                        if not fresh_1d.empty:
+                            await self._data_store.store_candles(symbol, "1d", fresh_1d)
 
                     df_1h = await self._data_store.get_candles(symbol, "1h", limit=8760)
                     df_1d = await self._data_store.get_candles(symbol, "1d", limit=2555)
