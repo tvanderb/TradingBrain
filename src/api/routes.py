@@ -211,28 +211,6 @@ async def risk_handler(request: web.Request) -> web.Response:
     return web.json_response(_envelope(data, config.mode))
 
 
-async def market_handler(request: web.Request) -> web.Response:
-    ctx = request.app[ctx_key]
-    config = ctx["config"]
-    scan_state = ctx["scan_state"]
-
-    symbols = scan_state.get("symbols", {})
-    data = []
-    for sym, info in symbols.items():
-        data.append({
-            "symbol": sym,
-            "price": info.get("price"),
-            "regime": info.get("regime"),
-            "rsi": info.get("rsi"),
-            "ema_fast": info.get("ema_fast"),
-            "ema_slow": info.get("ema_slow"),
-            "volume_ratio": info.get("vol_ratio"),
-            "spread": info.get("spread"),
-            "signal": info.get("signal"),
-        })
-    return web.json_response(_envelope(data, config.mode))
-
-
 async def signals_handler(request: web.Request) -> web.Response:
     ctx = request.app[ctx_key]
     config = ctx["config"]
@@ -338,7 +316,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/v1/trades", trades_handler)
     app.router.add_get("/v1/performance", performance_handler)
     app.router.add_get("/v1/risk", risk_handler)
-    app.router.add_get("/v1/market", market_handler)
     app.router.add_get("/v1/signals", signals_handler)
     app.router.add_get("/v1/strategy", strategy_handler)
     app.router.add_get("/v1/ai/usage", ai_usage_handler)

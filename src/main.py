@@ -39,7 +39,6 @@ from aiohttp import web
 
 from src.api.server import create_app as create_api_app
 from src.utils.logging import setup_logging
-from strategy.skills import compute_indicators
 
 log = structlog.get_logger()
 
@@ -403,28 +402,17 @@ class TradingBrain:
                         taker_fee_pct=pair_fees[1] if pair_fees else self._config.kraken.taker_fee_pct,
                     )
 
-                    # Compute indicators for scan_state (used by /report)
-                    indicators = compute_indicators(df_5m) if len(df_5m) >= 30 else {}
-
                     scan_symbols[symbol] = {
                         "price": price,
                         "spread": spread,
-                        "vol_ratio": indicators.get("vol_ratio", 0),
-                        "rsi": indicators.get("rsi", 0),
-                        "ema_fast": indicators.get("ema_fast", 0),
-                        "ema_slow": indicators.get("ema_slow", 0),
-                        "regime": indicators.get("regime", "unknown"),
                     }
 
-                    # Store scan results (raw indicator values + strategy's regime interpretation)
+                    # Store scan results (price + spread for audit trail)
                     await self._db.execute(
                         """INSERT INTO scan_results
-                           (timestamp, symbol, price, ema_fast, ema_slow, rsi, volume_ratio, spread, strategy_regime)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (datetime.now(timezone.utc).isoformat(), symbol, price,
-                         indicators.get("ema_fast"), indicators.get("ema_slow"),
-                         indicators.get("rsi"), indicators.get("vol_ratio"),
-                         spread, indicators.get("regime")),
+                           (timestamp, symbol, price, spread)
+                           VALUES (?, ?, ?, ?)""",
+                        (datetime.now(timezone.utc).isoformat(), symbol, price, spread),
                     )
 
                 except Exception as e:
@@ -466,11 +454,10 @@ class TradingBrain:
                     )
                     if self._risk.is_halted:
                         await self._notifier.risk_halt(self._risk.halt_reason)
-                    regime = scan_symbols.get(signal.symbol, {}).get("regime")
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, regime, check.reason),
+                         signal.intent.value, signal.reasoning, None, check.reason),
                     )
                     continue
 
@@ -482,13 +469,12 @@ class TradingBrain:
                 if price <= 0:
                     log.warning("scan.invalid_price", symbol=signal.symbol, price=price)
                     continue
-                regime = scan_symbols.get(signal.symbol, {}).get("regime")
                 sym_fees = self._pair_fees.get(signal.symbol)
                 result = await self._portfolio.execute_signal(
                     signal, price,
                     sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                     sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                    strategy_regime=regime,
+                    strategy_regime=None,
                     strategy_version=self._scan_state.get("strategy_version"),
                 )
 
@@ -497,7 +483,7 @@ class TradingBrain:
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, regime),
+                         signal.intent.value, signal.reasoning, None),
                     )
 
                     # Track P&L
@@ -607,14 +593,12 @@ class TradingBrain:
                 intent=Intent.DAY, confidence=1.0,
                 reasoning=f"{reason} triggered at ${price:.2f}",
             )
-            # Use most recent scan's regime for this symbol
-            regime = self._scan_state.get("symbols", {}).get(symbol, {}).get("regime")
             sym_fees = self._pair_fees.get(symbol)
             result = await self._portfolio.execute_signal(
                 signal, price,
                 sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                 sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                strategy_regime=regime,
+                strategy_regime=None,
             )
             if result:
                 if result.get("pnl") is not None:

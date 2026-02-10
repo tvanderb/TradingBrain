@@ -167,18 +167,13 @@ CREATE TABLE IF NOT EXISTS paper_tests (
     completed_at TEXT
 );
 
--- Scan results: raw indicator values (truth) + strategy's regime classification (interpretation)
+-- Scan results: price + spread audit trail, signal tracking
 CREATE TABLE IF NOT EXISTS scan_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
     symbol TEXT NOT NULL,
     price REAL NOT NULL,
-    ema_fast REAL,
-    ema_slow REAL,
-    rsi REAL,
-    volume_ratio REAL,
     spread REAL,
-    strategy_regime TEXT,               -- what the strategy classified (fact about decision, not truth)
     signal_generated INTEGER DEFAULT 0,
     signal_action TEXT,
     signal_confidence REAL,
