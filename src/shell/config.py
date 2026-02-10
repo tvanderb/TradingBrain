@@ -93,7 +93,6 @@ class DataConfig:
 @dataclass
 class FeeConfig:
     check_interval_hours: int = 24
-    min_trade_usd: float = 20.0
 
 
 @dataclass
@@ -198,7 +197,6 @@ def load_config() -> Config:
 
         fees = settings.get("fees", {})
         config.fees.check_interval_hours = fees.get("check_interval_hours", config.fees.check_interval_hours)
-        config.fees.min_trade_usd = fees.get("min_trade_usd", config.fees.min_trade_usd)
 
         data = settings.get("data", {})
         config.data.candle_5m_retention_days = data.get("candle_5m_retention_days", config.data.candle_5m_retention_days)

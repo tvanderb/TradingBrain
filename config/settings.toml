@@ -53,7 +53,6 @@ port = 8080
 
 [fees]
 check_interval_hours = 24
-min_trade_usd = 20.0
 
 [data]
 # Data tiering thresholds
