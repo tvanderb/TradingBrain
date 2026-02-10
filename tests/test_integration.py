@@ -1244,7 +1244,7 @@ async def test_pnl_includes_entry_and_exit_fees():
         portfolio = PortfolioTracker(config, db, kraken)
 
         # Buy at 50000 with 0.40% taker fee
-        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.10, intent=Intent.DAY)
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
         buy_result = await portfolio.execute_signal(buy, 50000.0, 0.25, 0.40)
         assert buy_result is not None
         entry_fee = buy_result["fee"]
@@ -1515,7 +1515,7 @@ async def test_orchestration_cycle_insufficient_budget():
         data_store = DataStore(db, config.data)
 
         ai = AsyncMock()
-        ai.tokens_remaining = 100  # Way below 5000 threshold
+        ai.tokens_remaining = 100  # Way below 50000 threshold
 
         orch = Orchestrator(config, db, ai, MagicMock(), data_store)
         report = await orch.run_nightly_cycle()
@@ -1606,10 +1606,10 @@ async def test_paper_test_full_pipeline():
         # Create a paper test that has already ended (past ends_at)
         await db.execute(
             """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, ends_at, status)
-               VALUES ('v_test', 1, 1, datetime('now', '-1 hour'), 'running')"""
+               (strategy_version, risk_tier, required_days, started_at, ends_at, status)
+               VALUES ('v_test', 1, 1, datetime('now', '-3 hours'), datetime('now', '-1 hour'), 'running')"""
         )
-        # Insert some winning trades for that version
+        # Insert some winning trades for that version (within the paper test time window)
         await db.execute(
             """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
                fees, intent, strategy_version, opened_at, closed_at)
@@ -1667,6 +1667,9 @@ async def test_telegram_commands():
             "BTC/USD": {"price": 70000, "rsi": 55, "ema_fast": 70100, "ema_slow": 69900,
                         "vol_ratio": 1.2, "regime": "trending"},
         }}
+
+        # Configure allowed user IDs so auth passes
+        config.telegram.allowed_user_ids = [12345]
 
         commands = BotCommands(
             config=config, db=db, scan_state=scan_state,
@@ -2081,10 +2084,10 @@ async def test_api_server_endpoints():
         portfolio.total_value = AsyncMock(return_value=200.0)
         portfolio.position_count = 2
         portfolio.get_portfolio = AsyncMock(return_value=MagicMock(
-            total_value=200.0, cash=180.0, positions={}
+            total_value=200.0, cash=180.0, positions=[]
         ))
         ai = MagicMock()
-        ai.get_daily_usage = MagicMock(return_value={"total_tokens": 1000, "total_cost": 0.01, "by_model": {}})
+        ai.get_daily_usage = AsyncMock(return_value={"total_tokens": 1000, "total_cost": 0.01, "by_model": {}})
         ai.tokens_remaining = 1499000
         scan_state = {"symbols": {"BTC/USD": {"price": 45000, "rsi": 52, "regime": "ranging"}}, "last_scan": "03:10:00"}
         commands = MagicMock()
@@ -2092,9 +2095,14 @@ async def test_api_server_endpoints():
 
         app, ws_manager = create_app(config, db, portfolio, risk, ai, scan_state, commands)
 
+        # Set API key for auth
+        from src.api import api_key_key
+        app[api_key_key] = "test-key"
+        auth_headers = {"Authorization": "Bearer test-key"}
+
         async with TestClient(TestServer(app)) as client:
             # /v1/system
-            resp = await client.get("/v1/system")
+            resp = await client.get("/v1/system", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert "data" in body
@@ -2103,25 +2111,25 @@ async def test_api_server_endpoints():
             assert body["data"]["status"] == "running"
 
             # /v1/portfolio
-            resp = await client.get("/v1/portfolio")
+            resp = await client.get("/v1/portfolio", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert body["data"]["total_value"] == 200.0
 
             # /v1/positions
-            resp = await client.get("/v1/positions")
+            resp = await client.get("/v1/positions", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert isinstance(body["data"], list)
 
             # /v1/trades
-            resp = await client.get("/v1/trades?limit=10")
+            resp = await client.get("/v1/trades?limit=10", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert isinstance(body["data"], list)
 
             # /v1/risk
-            resp = await client.get("/v1/risk")
+            resp = await client.get("/v1/risk", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert "limits" in body["data"]
@@ -2129,32 +2137,32 @@ async def test_api_server_endpoints():
             assert body["data"]["current"]["halted"] is False
 
             # /v1/market
-            resp = await client.get("/v1/market")
+            resp = await client.get("/v1/market", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert len(body["data"]) == 1
             assert body["data"][0]["symbol"] == "BTC/USD"
 
             # /v1/signals
-            resp = await client.get("/v1/signals")
+            resp = await client.get("/v1/signals", headers=auth_headers)
             assert resp.status == 200
 
             # /v1/strategy
-            resp = await client.get("/v1/strategy")
+            resp = await client.get("/v1/strategy", headers=auth_headers)
             assert resp.status == 200
 
             # /v1/ai/usage
-            resp = await client.get("/v1/ai/usage")
+            resp = await client.get("/v1/ai/usage", headers=auth_headers)
             assert resp.status == 200
             body = await resp.json()
             assert body["data"]["today"]["total_tokens"] == 1000
 
             # /v1/benchmarks
-            resp = await client.get("/v1/benchmarks")
+            resp = await client.get("/v1/benchmarks", headers=auth_headers)
             assert resp.status == 200
 
             # /v1/performance
-            resp = await client.get("/v1/performance")
+            resp = await client.get("/v1/performance", headers=auth_headers)
             assert resp.status == 200
 
         await db.close()
@@ -2222,8 +2230,12 @@ async def test_api_websocket_connection():
         risk = RiskManager(config.risk)
         app, ws_manager = create_app(config, db, MagicMock(), risk, MagicMock(), {})
 
+        # Set API key for auth
+        from src.api import api_key_key
+        app[api_key_key] = "test-ws-key"
+
         async with TestClient(TestServer(app)) as client:
-            async with client.ws_connect("/v1/events") as ws:
+            async with client.ws_connect("/v1/events?token=test-ws-key") as ws:
                 assert ws_manager.client_count == 1
 
                 # Broadcast an event

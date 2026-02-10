@@ -199,6 +199,110 @@ class Analysis(AnalysisBase):
         else:
             report["holding_duration"] = {"avg_hours": 0, "avg_winning_hours": 0, "avg_losing_hours": 0}
 
+        # --- Position Aging (open positions) ---
+        open_positions = await db.fetchall(
+            """SELECT symbol, intent,
+                (julianday('now') - julianday(opened_at)) * 24 as hours_open,
+                (current_price - avg_entry) / avg_entry as unrealized_pnl_pct
+            FROM positions"""
+        )
+
+        if open_positions:
+            aging = []
+            for p in open_positions:
+                hours = p["hours_open"] or 0
+                if hours < 24:
+                    bucket = "< 1d"
+                elif hours < 72:
+                    bucket = "1-3d"
+                elif hours < 168:
+                    bucket = "3-7d"
+                else:
+                    bucket = "> 7d"
+                aging.append({
+                    "symbol": p["symbol"],
+                    "intent": p["intent"],
+                    "hours_open": round(hours, 1),
+                    "bucket": bucket,
+                    "unrealized_pnl_pct": round(p["unrealized_pnl_pct"] or 0, 4),
+                })
+            report["position_aging"] = aging
+        else:
+            report["position_aging"] = []
+
+        # --- Cross-Reference: Win Rate by Regime + Symbol ---
+        cross_ref = await db.fetchall(
+            """SELECT symbol, strategy_regime,
+                COUNT(*) as trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(pnl), 0) as net_pnl,
+                COALESCE(AVG(pnl), 0) as avg_pnl
+            FROM trades
+            WHERE closed_at IS NOT NULL AND strategy_regime IS NOT NULL
+            GROUP BY symbol, strategy_regime
+            ORDER BY net_pnl DESC"""
+        )
+        if cross_ref:
+            report["cross_reference"] = {
+                "regime_x_symbol": [
+                    {
+                        "symbol": r["symbol"],
+                        "regime": r["strategy_regime"],
+                        "trades": r["trades"],
+                        "win_rate": r["wins"] / r["trades"] if r["trades"] else 0,
+                        "net_pnl": r["net_pnl"],
+                        "avg_pnl": r["avg_pnl"],
+                    }
+                    for r in cross_ref
+                ]
+            }
+
+            # Performance by intent type (DAY, SWING, HOLD)
+            by_intent = await db.fetchall(
+                """SELECT intent,
+                    COUNT(*) as trades,
+                    COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                    COALESCE(SUM(pnl), 0) as net_pnl,
+                    COALESCE(AVG((julianday(closed_at) - julianday(opened_at)) * 24), 0) as avg_hours
+                FROM trades WHERE closed_at IS NOT NULL
+                GROUP BY intent"""
+            )
+            report["cross_reference"]["by_intent"] = [
+                {
+                    "intent": r["intent"],
+                    "trades": r["trades"],
+                    "win_rate": r["wins"] / r["trades"] if r["trades"] else 0,
+                    "net_pnl": r["net_pnl"],
+                    "avg_hold_hours": round(r["avg_hours"], 1),
+                }
+                for r in by_intent
+            ]
+        else:
+            report["cross_reference"] = {"regime_x_symbol": [], "by_intent": []}
+
+        # --- Time-of-Day Analysis ---
+        tod_stats = await db.fetchall(
+            """SELECT
+                CAST(strftime('%H', opened_at) AS INTEGER) as hour,
+                COUNT(*) as trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(pnl), 0) as net_pnl
+            FROM trades WHERE closed_at IS NOT NULL AND opened_at IS NOT NULL
+            GROUP BY hour ORDER BY hour"""
+        )
+        if tod_stats:
+            report["time_of_day"] = [
+                {
+                    "hour": r["hour"],
+                    "trades": r["trades"],
+                    "win_rate": r["wins"] / r["trades"] if r["trades"] else 0,
+                    "net_pnl": r["net_pnl"],
+                }
+                for r in tod_stats
+            ]
+        else:
+            report["time_of_day"] = []
+
         # --- Rolling Metrics (7d, 30d) ---
         for period_name, days in [("7d", 7), ("30d", 30)]:
             period_stats = await db.fetchone(

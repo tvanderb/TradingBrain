@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -368,7 +369,7 @@ class Orchestrator:
 
         try:
             # 0. Check token budget
-            if self._ai.tokens_remaining < 5000:
+            if self._ai.tokens_remaining < 50000:
                 log.warning(
                     "orchestrator.insufficient_budget",
                     remaining=self._ai.tokens_remaining,
@@ -391,13 +392,16 @@ class Orchestrator:
             decision_type = decision.get("decision", "NO_CHANGE")
             deployed_version = None
 
+            valid_strategy_types = {
+                "STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
+                "TWEAK", "RESTRUCTURE", "OVERHAUL",
+            }
+
             if decision_type == "NO_CHANGE":
                 report = f"Orchestrator: No changes. {decision.get('reasoning', '')}"
             elif decision_type in ("MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE"):
                 report = await self._execute_analysis_change(decision, context)
-            else:
-                # Strategy changes: STRATEGY_TWEAK, STRATEGY_RESTRUCTURE, STRATEGY_OVERHAUL
-                # Also handle legacy names: TWEAK, RESTRUCTURE, OVERHAUL
+            elif decision_type in valid_strategy_types:
                 report = await self._execute_change(decision, context)
                 # Extract deployed version from report if deploy succeeded
                 if "deployed" in report.lower():
@@ -405,6 +409,9 @@ class Orchestrator:
                         "SELECT version FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
                     )
                     deployed_version = ver_row["version"] if ver_row else None
+            else:
+                log.warning("orchestrator.unknown_decision_type", decision_type=decision_type)
+                report = f"Orchestrator: Unknown decision type '{decision_type}' — treated as NO_CHANGE."
 
             # 4. Store daily observations
             await self._store_observation(decision)
@@ -421,7 +428,7 @@ class Orchestrator:
             return report
 
         except Exception as e:
-            log.error("orchestrator.cycle_failed", error=str(e))
+            log.error("orchestrator.cycle_failed", error=str(e), exc_info=True)
             return f"Orchestrator cycle failed: {e}"
 
     async def _gather_context(self) -> dict:
@@ -713,7 +720,7 @@ Respond in JSON format."""
 
     async def _execute_change(self, decision: dict, context: dict) -> str:
         """Execute a strategy change: generate -> review -> sandbox -> backtest."""
-        tier = decision.get("risk_tier", 1)
+        tier = max(1, min(3, decision.get("risk_tier", 1)))
         changes = decision.get("specific_changes", "")
         max_revisions = self._config.orchestrator.max_revisions
 
@@ -796,15 +803,10 @@ Generate the complete strategy.py file."""
                 f"code_gen_{attempt + 1}", "sonnet", gen_prompt[:500], code
             )
 
-            # Strip markdown code fences if present (case-insensitive)
-            code_lower = code.lower()
-            if "```python" in code_lower:
-                idx = code_lower.index("```python")
-                code = code[idx + len("```python"):]
-                if "```" in code:
-                    code = code[:code.index("```")]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
+            # Strip markdown code fences if present
+            fence_match = re.search(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                code = fence_match.group(1)
             code = code.strip()
 
             # Sandbox validation
@@ -866,7 +868,7 @@ Is this classification correct?
 
             if review.get("approved"):
                 # Determine actual risk tier
-                actual_tier = review.get("suggested_tier", tier)
+                actual_tier = max(1, min(3, review.get("suggested_tier", tier)))
                 paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
 
                 # Backtest against historical data before deploying
@@ -882,6 +884,13 @@ Is this classification correct?
 
                 # Terminate any running paper tests (superseded by new strategy)
                 await self._terminate_running_paper_tests("superseded by new deploy")
+
+                # Retire old version
+                if parent_version:
+                    await self._db.execute(
+                        "UPDATE strategy_versions SET retired_at = datetime('now') WHERE version = ?",
+                        (parent_version,),
+                    )
 
                 # Deploy to active
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -966,18 +975,25 @@ Is this classification correct?
         results = []
         for test in completed:
             version = test["strategy_version"]
-            # Get trades made during the paper test period
+            # Get trades made during the paper test period (filter by time window)
             trades = await self._db.fetchall(
-                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL",
-                (version,),
+                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND opened_at >= ? AND closed_at <= ?",
+                (version, test["started_at"], test["ends_at"]),
             )
             total_pnl = sum(t["pnl"] for t in trades) if trades else 0.0
             trade_count = len(trades)
             wins = sum(1 for t in trades if t["pnl"] > 0)
 
-            # Simple pass/fail: did it not lose money? (orchestrator can do deeper analysis)
-            passed = total_pnl >= 0 or trade_count == 0  # No trades = inconclusive, pass
-            status = "passed" if passed else "failed"
+            # Pass/fail: must have trades and not lose money
+            if trade_count == 0:
+                passed = False
+                status = "inconclusive"  # No trades — don't deploy untested strategy
+            elif total_pnl >= 0:
+                passed = True
+                status = "passed"
+            else:
+                passed = False
+                status = "failed"
 
             await self._db.execute(
                 "UPDATE paper_tests SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?",
@@ -1060,15 +1076,10 @@ Generate the complete {module_name}.py file."""
                 code,
             )
 
-            # Strip markdown code fences if present (case-insensitive)
-            code_lower = code.lower()
-            if "```python" in code_lower:
-                idx = code_lower.index("```python")
-                code = code[idx + len("```python"):]
-                if "```" in code:
-                    code = code[:code.index("```")]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
+            # Strip markdown code fences if present
+            fence_match = re.search(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                code = fence_match.group(1)
             code = code.strip()
 
             # Sandbox validation
@@ -1185,6 +1196,17 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 max_drawdown_pct=self._config.risk.max_drawdown_pct,
             )
 
+            # Pull per-pair fees from DB (live fee schedule from Kraken API)
+            per_pair_fees = {}
+            try:
+                rows = await self._db.fetchall(
+                    "SELECT symbol, maker_fee_pct, taker_fee_pct FROM fee_schedule"
+                )
+                for row in rows:
+                    per_pair_fees[row["symbol"]] = (row["maker_fee_pct"], row["taker_fee_pct"])
+            except Exception:
+                pass  # Fall back to global config fees
+
             bt = Backtester(
                 strategy=strategy,
                 risk_limits=risk_limits,
@@ -1192,9 +1214,21 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 maker_fee_pct=self._config.kraken.maker_fee_pct,
                 taker_fee_pct=self._config.kraken.taker_fee_pct,
                 starting_cash=self._config.paper_balance_usd,
+                per_pair_fees=per_pair_fees,
+                slippage_factor=self._config.default_slippage_factor,
             )
 
-            result = bt.run(candle_data, timeframe="5m")
+            # Run backtest with timeout (60s) to catch infinite loops in AI-generated code
+            import asyncio
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, bt.run, candle_data, "5m"
+                    ),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                return False, "Strategy backtest timed out (>60s) — possible infinite loop"
             summary = result.summary()
             log.info("orchestrator.backtest_complete", summary=summary)
 
@@ -1235,14 +1269,18 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                    VALUES (date('now'), ?, ?, ?, ?)""",
                 (
                     self._cycle_id or "unknown",
-                    decision.get("market_observations", "")[:2000],
-                    decision.get("reasoning", "")[:2000],
-                    decision.get("cross_reference_findings", "")[:2000],
+                    decision.get("market_observations", "")[:5000],
+                    decision.get("reasoning", "")[:5000],
+                    decision.get("cross_reference_findings", "")[:5000],
                 ),
             )
             # Prune observations older than 30 days
             await self._db.execute(
                 "DELETE FROM orchestrator_observations WHERE date < date('now', '-30 days')"
+            )
+            # Prune thoughts older than 30 days
+            await self._db.execute(
+                "DELETE FROM orchestrator_thoughts WHERE created_at < datetime('now', '-30 days')"
             )
             await self._db.commit()
             log.info("orchestrator.observation_stored", cycle_id=self._cycle_id)
@@ -1253,11 +1291,19 @@ The orchestrator wants to change this module because: {changes[:500]}"""
         self, decision: dict, deployed_version: str | None = None
     ) -> None:
         """Record orchestration decision in database."""
-        # Get current strategy version as the "from" version
-        current = await self._db.fetchone(
-            "SELECT version FROM strategy_versions WHERE retired_at IS NULL ORDER BY deployed_at DESC LIMIT 1"
-        )
-        version_from = current["version"] if current else None
+        # Get current strategy version — if we just deployed, the new version has retired_at IS NULL
+        # so we need the SECOND most recent, or the deployed version's parent
+        if deployed_version:
+            parent = await self._db.fetchone(
+                "SELECT parent_version FROM strategy_versions WHERE version = ?",
+                (deployed_version,),
+            )
+            version_from = parent["parent_version"] if parent else None
+        else:
+            current = await self._db.fetchone(
+                "SELECT version FROM strategy_versions WHERE retired_at IS NULL ORDER BY deployed_at DESC LIMIT 1"
+            )
+            version_from = current["version"] if current else None
 
         # Token usage for this cycle
         tokens_used = self._ai._daily_tokens_used  # Total for today (includes this cycle)

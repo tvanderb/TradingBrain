@@ -43,12 +43,12 @@ class NotificationConfig:
     stop_triggered: bool = True
     risk_halt: bool = True
     risk_resumed: bool = True
-    rollback: bool = True
+    strategy_rollback: bool = True
     strategy_deployed: bool = True
     system_online: bool = True
     system_shutdown: bool = True
     system_error: bool = True
-    websocket_failed: bool = True
+    websocket_feed_lost: bool = True
     daily_summary: bool = True
     weekly_report: bool = True
     # High-frequency — default off for Telegram
@@ -63,7 +63,7 @@ class NotificationConfig:
 @dataclass
 class ApiConfig:
     enabled: bool = False
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8080
 
 
@@ -93,7 +93,6 @@ class DataConfig:
 @dataclass
 class FeeConfig:
     check_interval_hours: int = 24
-    min_profit_fee_ratio: float = 3.0
     min_trade_usd: float = 20.0
 
 
@@ -199,7 +198,6 @@ def load_config() -> Config:
 
         fees = settings.get("fees", {})
         config.fees.check_interval_hours = fees.get("check_interval_hours", config.fees.check_interval_hours)
-        config.fees.min_profit_fee_ratio = fees.get("min_profit_fee_ratio", config.fees.min_profit_fee_ratio)
         config.fees.min_trade_usd = fees.get("min_trade_usd", config.fees.min_trade_usd)
 
         data = settings.get("data", {})
@@ -267,6 +265,13 @@ def _validate_config(config: Config) -> None:
         errors.append("At least one trading symbol must be configured")
     if config.mode not in ("paper", "live"):
         errors.append(f"mode must be 'paper' or 'live', got '{config.mode}'")
+    if config.paper_balance_usd <= 0:
+        errors.append(f"paper_balance_usd must be > 0, got {config.paper_balance_usd}")
+    if not (0 <= config.default_slippage_factor <= 0.05):
+        errors.append(f"default_slippage_factor must be 0-0.05, got {config.default_slippage_factor}")
+    if hasattr(config, 'api') and config.api.enabled:
+        if not (1 <= config.api.port <= 65535):
+            errors.append(f"api.port must be 1-65535, got {config.api.port}")
 
     if errors:
         raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

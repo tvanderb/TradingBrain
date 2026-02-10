@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import datetime, timezone
 
@@ -23,14 +24,41 @@ async def auth_middleware(request: web.Request, handler):
         return await handler(request)
 
     api_key = request.app.get(api_key_key, "")
-    if api_key:
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != api_key:
-            return web.json_response(
-                {"error": {"code": "unauthorized", "message": "Invalid or missing API key"}},
-                status=401,
-            )
+    if not api_key:
+        # No API key configured — reject all requests
+        return web.json_response(
+            {"error": {"code": "unauthorized", "message": "API key not configured"}},
+            status=401,
+        )
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], api_key):
+        return web.json_response(
+            {"error": {"code": "unauthorized", "message": "Invalid or missing API key"}},
+            status=401,
+        )
     return await handler(request)
+
+
+@web.middleware
+async def error_middleware(request: web.Request, handler):
+    """Catch unhandled exceptions and return generic error (no tracebacks to clients)."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise  # Let aiohttp handle HTTP errors (401, 404, etc.)
+    except Exception as e:
+        log.error("api.unhandled_error", path=request.path, error=str(e),
+                  error_type=type(e).__name__)
+        return web.json_response(
+            {
+                "error": {"code": "internal_error", "message": "An unexpected error occurred"},
+                "meta": {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "version": "2.0.0",
+                },
+            },
+            status=500,
+        )
 
 
 def create_app(
@@ -43,7 +71,7 @@ def create_app(
     commands=None,
 ) -> tuple[web.Application, WebSocketManager]:
     """Create and configure the aiohttp application."""
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[error_middleware, auth_middleware])
 
     # Auth
     app[api_key_key] = os.getenv("API_KEY", "")

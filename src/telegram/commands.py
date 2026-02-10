@@ -57,10 +57,10 @@ class BotCommands:
             await update.message.reply_text(prefix + chunk)
 
     def _authorized(self, update: Update) -> bool:
-        """Check if user is authorized."""
+        """Check if user is authorized. Rejects all users if no IDs configured."""
         allowed = self._config.telegram.allowed_user_ids
         if not allowed:
-            return True
+            return False  # No configured users = locked down
         return update.effective_user and update.effective_user.id in allowed
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -154,12 +154,13 @@ class BotCommands:
 
         lines = ["Recent Trades:"]
         for t in rows:
-            pnl = t.get("pnl", 0)
-            pnl_pct = t.get("pnl_pct", 0) * 100
-            emoji = "+" if pnl and pnl > 0 else ""
+            pnl = t.get("pnl") or 0
+            pnl_pct = (t.get("pnl_pct") or 0) * 100
+            fees = t.get("fees") or 0
+            sign = "+" if pnl > 0 else ""
             lines.append(
-                f"{t['symbol']} {t['side']} ${pnl:{emoji}.2f} ({pnl_pct:+.1f}%) "
-                f"fee=${t.get('fees', 0):.3f}"
+                f"{t['symbol']} {t['side']} ${sign}{pnl:.2f} ({pnl_pct:+.1f}%) "
+                f"fee=${fees:.3f}"
             )
 
         await update.message.reply_text("\n".join(lines))
@@ -310,7 +311,8 @@ class BotCommands:
             )
             await update.message.reply_text(answer[:4000])
         except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
+            log.error("telegram.ask_failed", error=str(e))
+            await update.message.reply_text("Sorry, an error occurred processing your question.")
 
     async def cmd_thoughts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Browse orchestrator thought spool.

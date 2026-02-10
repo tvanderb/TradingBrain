@@ -48,14 +48,14 @@ class Notifier:
     async def _send_telegram(self, text: str) -> None:
         if not self._app or not self._chat_id:
             return
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 await self._app.bot.send_message(chat_id=self._chat_id, text=text[:4096])
                 return
             except Exception as e:
-                if attempt == 0:
-                    log.warning("notifier.send_retry", error=str(e))
-                    await asyncio.sleep(1)
+                if attempt < 2:
+                    log.warning("notifier.send_retry", attempt=attempt + 1, error=str(e))
+                    await asyncio.sleep(2 ** attempt)
                 else:
                     log.error("notifier.send_failed", error=str(e))
 

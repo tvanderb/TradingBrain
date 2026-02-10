@@ -19,6 +19,12 @@ _WRITE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# CTE bypass: WITH ... INSERT/UPDATE/DELETE/etc.
+_CTE_WRITE_PATTERN = re.compile(
+    r"^\s*WITH\b.*\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Strip SQL block comments (/* ... */) and line comments (--)
 _SQL_COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 
@@ -33,6 +39,9 @@ class ReadOnlyDB:
         """Raise ValueError if the SQL is not a read-only query."""
         # Strip comments to prevent bypass via /* comment */ DROP TABLE
         cleaned = _SQL_COMMENT.sub("", sql)
+        # Check for CTE write bypass (WITH ... INSERT/UPDATE/DELETE)
+        if _CTE_WRITE_PATTERN.search(cleaned):
+            raise ValueError(f"Write operation blocked in read-only mode (CTE): {cleaned[:80]}")
         # Check each statement to prevent multi-statement bypass (e.g. "SELECT 1; DROP TABLE")
         for statement in cleaned.split(";"):
             statement = statement.strip()

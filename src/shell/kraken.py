@@ -63,6 +63,10 @@ class KrakenREST:
         self._api_key = config.api_key
         self._secret = config.secret_key
         self._client = httpx.AsyncClient(timeout=30.0)
+        self._last_nonce = 0  # monotonic nonce to prevent collisions
+        self._rate_lock = asyncio.Lock()
+        self._last_call_time = 0.0
+        self._min_call_interval = 0.34  # ~3 calls/sec max (Kraken allows ~15/sec for public)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -77,26 +81,41 @@ class KrakenREST:
             "API-Sign": base64.b64encode(mac.digest()).decode(),
         }
 
+    async def _rate_limit(self) -> None:
+        """Enforce minimum interval between API calls."""
+        async with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_call_time
+            if elapsed < self._min_call_interval:
+                await asyncio.sleep(self._min_call_interval - elapsed)
+            self._last_call_time = time.monotonic()
+
     async def public(self, endpoint: str, params: dict | None = None) -> dict:
+        await self._rate_limit()
         url = f"{self._base_url}/0/public/{endpoint}"
         resp = await self._client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
-            raise RuntimeError(f"Kraken API error: {data['error']}")
+            errors = data["error"]
+            raise RuntimeError(f"Kraken API error: {'; '.join(errors) if isinstance(errors, list) else errors}")
         return data["result"]
 
     async def private(self, endpoint: str, data: dict | None = None) -> dict:
+        await self._rate_limit()
         urlpath = f"/0/private/{endpoint}"
         url = f"{self._base_url}{urlpath}"
         data = data or {}
-        data["nonce"] = str(int(time.time() * 1000))
+        nonce = int(time.time() * 1000)
+        self._last_nonce = max(self._last_nonce + 1, nonce)
+        data["nonce"] = str(self._last_nonce)
         headers = self._sign(urlpath, data)
         resp = await self._client.post(url, data=data, headers=headers)
         resp.raise_for_status()
         result = resp.json()
         if result.get("error"):
-            raise RuntimeError(f"Kraken API error: {result['error']}")
+            errors = result["error"]
+            raise RuntimeError(f"Kraken API error: {'; '.join(errors) if isinstance(errors, list) else errors}")
         return result["result"]
 
     async def get_ohlc(self, symbol: str, interval: int = 5, since: int | None = None) -> pd.DataFrame:
@@ -257,7 +276,12 @@ class KrakenWebSocket:
                 await self._on_failure()
 
     async def _subscribe(self, ws) -> None:
-        pairs = [to_kraken_pair(s) for s in self._symbols]
+        # WS v2 uses slash-separated format: XBT/USD, XDG/USD, etc.
+        ws_pair_map = {
+            "BTC/USD": "XBT/USD",
+            "DOGE/USD": "XDG/USD",
+        }
+        pairs = [ws_pair_map.get(s, s) for s in self._symbols]
         # Subscribe to ticker
         await ws.send(json.dumps({
             "method": "subscribe",

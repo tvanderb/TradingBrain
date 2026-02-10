@@ -70,6 +70,7 @@ class Backtester:
         taker_fee_pct: float = 0.40,
         starting_cash: float = 200.0,
         per_pair_fees: dict[str, tuple[float, float]] | None = None,
+        slippage_factor: float = 0.0005,
     ) -> None:
         self._strategy = strategy
         self._risk_limits = risk_limits
@@ -78,6 +79,7 @@ class Backtester:
         self._taker_fee = taker_fee_pct
         self._starting_cash = starting_cash
         self._per_pair_fees = per_pair_fees or {}
+        self._slippage = slippage_factor  # applied to fill prices (buy higher, sell lower)
 
     def _get_taker_fee(self, symbol: str) -> float:
         """Get taker fee for symbol (per-pair if available, else global)."""
@@ -134,12 +136,20 @@ class Backtester:
                 prices[symbol] = current_price
 
                 pair_fees = self._per_pair_fees.get(symbol)
+                # Resample to proper timeframes
+                hist_5m = historical.tail(8640)
+                hist_1h = historical.resample("1h").agg(
+                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                ).dropna()
+                hist_1d = historical.resample("1D").agg(
+                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                ).dropna()
                 markets[symbol] = SymbolData(
                     symbol=symbol,
                     current_price=current_price,
-                    candles_5m=historical.tail(8640),   # ~30 days of 5m
-                    candles_1h=historical.tail(8760),
-                    candles_1d=historical.tail(2555),
+                    candles_5m=hist_5m,
+                    candles_1h=hist_1h,
+                    candles_1d=hist_1d,
                     spread=0.001,
                     volume_24h=float(historical.tail(24)["volume"].sum()) if len(historical) >= 24 else 0,
                     maker_fee_pct=pair_fees[0] if pair_fees else self._maker_fee,
@@ -194,37 +204,44 @@ class Backtester:
                 fee_pct = self._get_taker_fee(signal.symbol) / 100
 
                 if signal.action == Action.BUY and signal.symbol not in positions:
-                    trade_value = total_value * signal.size_pct
+                    # Enforce max_positions
+                    if len(positions) >= self._risk_limits.max_positions:
+                        continue
+                    fill_price = price * (1 + self._slippage)  # slippage: buy higher
+                    # Clamp size_pct to max_trade_pct
+                    clamped_pct = min(signal.size_pct, self._risk_limits.max_trade_pct)
+                    trade_value = total_value * clamped_pct
                     if trade_value > cash:
                         continue
-                    qty = trade_value / price
+                    qty = trade_value / fill_price
                     fee = trade_value * fee_pct
                     cash -= (trade_value + fee)
                     positions[signal.symbol] = {
-                        "qty": qty, "avg_entry": price,
+                        "qty": qty, "avg_entry": fill_price,
                         "entry_fee": fee,
                         "stop_loss": signal.stop_loss, "take_profit": signal.take_profit,
                         "opened_at": ts,
                     }
-                    self._strategy.on_fill(signal.symbol, Action.BUY, qty, price, signal.intent)
+                    self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent)
 
                 elif signal.action in (Action.SELL, Action.CLOSE) and signal.symbol in positions:
                     pos = positions[signal.symbol]
+                    fill_price = price * (1 - self._slippage)  # slippage: sell lower
                     qty = pos["qty"]
-                    sale = qty * price
+                    sale = qty * fill_price
                     exit_fee = sale * fee_pct
                     entry_fee = pos.get("entry_fee", 0.0)
                     fee = entry_fee + exit_fee
-                    pnl = (price - pos["avg_entry"]) * qty - fee
+                    pnl = (fill_price - pos["avg_entry"]) * qty - fee
                     pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
-                    cash += (sale - fee)
+                    cash += (sale - exit_fee)
 
                     all_trades.append(BacktestTrade(
                         symbol=signal.symbol, action=signal.action.value,
-                        qty=qty, price=price, fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
+                        qty=qty, price=fill_price, fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
                     ))
 
-                    self._strategy.on_fill(signal.symbol, signal.action, qty, price, signal.intent)
+                    self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
                     self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
                     del positions[signal.symbol]
 
@@ -233,27 +250,38 @@ class Backtester:
                 pos = positions[sym]
                 if pos.get("opened_at") == ts:
                     continue  # Don't trigger SL/TP on the same bar as entry
+
+                df = candle_data.get(sym)
+                if df is None or ts not in df.index:
+                    continue
+                bar = df.loc[ts]
+                bar_low = float(bar["low"])
+                bar_high = float(bar["high"])
                 price = prices.get(sym)
                 if price is None:
                     continue
 
                 triggered = False
-                if pos.get("stop_loss") and price <= pos["stop_loss"]:
+                # Use intrabar low for SL check, intrabar high for TP check
+                if pos.get("stop_loss") and bar_low <= pos["stop_loss"]:
+                    price = pos["stop_loss"]  # Fill at SL price (worst case)
                     triggered = True
-                elif pos.get("take_profit") and price >= pos["take_profit"]:
+                elif pos.get("take_profit") and bar_high >= pos["take_profit"]:
+                    price = pos["take_profit"]  # Fill at TP price (best case)
                     triggered = True
 
                 if triggered:
+                    fill_price = price * (1 - self._slippage)  # slippage: exit lower
                     qty = pos["qty"]
-                    sale = qty * price
+                    sale = qty * fill_price
                     exit_fee = sale * (self._get_taker_fee(sym) / 100)
                     entry_fee = pos.get("entry_fee", 0.0)
                     fee = entry_fee + exit_fee
-                    pnl = (price - pos["avg_entry"]) * qty - fee
+                    pnl = (fill_price - pos["avg_entry"]) * qty - fee
                     pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
-                    cash += (sale - fee)
+                    cash += (sale - exit_fee)
                     all_trades.append(BacktestTrade(
-                        symbol=sym, action="CLOSE", qty=qty, price=price,
+                        symbol=sym, action="CLOSE", qty=qty, price=fill_price,
                         fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
                     ))
                     self._strategy.on_position_closed(sym, pnl, pnl_pct)
@@ -267,11 +295,16 @@ class Backtester:
                 day_start_value = total_value
                 prev_day = current_day
 
+        # Capture final day's value
+        if prev_day is not None:
+            daily_values.append(total_value)
+            peak_value = max(peak_value, total_value)
+
         # Compute metrics
         result = BacktestResult(trades=all_trades)
         result.total_trades = len(all_trades)
         result.wins = sum(1 for t in all_trades if t.pnl > 0)
-        result.losses = sum(1 for t in all_trades if t.pnl <= 0)
+        result.losses = sum(1 for t in all_trades if t.pnl < 0)
         result.total_fees = float(sum(t.fee for t in all_trades))
         result.gross_pnl = float(sum(t.pnl + t.fee for t in all_trades))
         result.net_pnl = float(sum(t.pnl for t in all_trades))

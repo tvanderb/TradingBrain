@@ -66,6 +66,10 @@ class RiskManager:
     def consecutive_losses(self) -> int:
         return self._consecutive_losses
 
+    @property
+    def peak_portfolio(self) -> float | None:
+        return self._peak_portfolio
+
     def reset_daily(self) -> None:
         self._daily_trades = 0
         self._daily_pnl = 0.0

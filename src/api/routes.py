@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import structlog
 from aiohttp import web
 
 from src.api import ctx_key
 from src.shell.truth import compute_truth_benchmarks
+
+log = structlog.get_logger()
+
+
+def _safe_int(value: str, default: int) -> int:
+    """Parse int from query param, returning default on failure."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 
 def _envelope(data, mode: str) -> dict:
@@ -67,12 +78,12 @@ async def portfolio_handler(request: web.Request) -> web.Response:
     total = port.total_value
     cash_pct = (port.cash / total * 100) if total > 0 else 100
 
+    unrealized_pnl = sum(p.unrealized_pnl for p in port.positions)
+
     data = {
         "total_value": round(total, 2),
         "cash": round(port.cash, 2),
-        "unrealized_pnl": round(total - port.cash - sum(
-            p.get("cost_basis", 0) for p in port.positions.values()
-        ), 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
         "position_count": len(port.positions),
         "allocation": {
             "cash_pct": round(cash_pct, 1),
@@ -117,7 +128,7 @@ async def trades_handler(request: web.Request) -> web.Response:
     config = ctx["config"]
     db = ctx["db"]
 
-    limit = min(int(request.query.get("limit", "50")), 500)
+    limit = min(_safe_int(request.query.get("limit", "50"), 50), 500)
     since = request.query.get("since")
     until = request.query.get("until")
     symbol = request.query.get("symbol")
@@ -175,7 +186,7 @@ async def risk_handler(request: web.Request) -> web.Response:
     portfolio = ctx["portfolio"]
 
     portfolio_value = await portfolio.total_value()
-    peak = risk._peak_portfolio or portfolio_value
+    peak = risk.peak_portfolio or portfolio_value
     drawdown_pct = ((peak - portfolio_value) / peak) if peak > 0 else 0
 
     data = {
@@ -227,7 +238,7 @@ async def signals_handler(request: web.Request) -> web.Response:
     config = ctx["config"]
     db = ctx["db"]
 
-    limit = min(int(request.query.get("limit", "50")), 500)
+    limit = min(_safe_int(request.query.get("limit", "50"), 50), 500)
     since = request.query.get("since")
     until = request.query.get("until")
     symbol = request.query.get("symbol")
@@ -290,7 +301,7 @@ async def ai_usage_handler(request: web.Request) -> web.Response:
     config = ctx["config"]
     ai = ctx["ai"]
 
-    usage = ai.get_daily_usage()
+    usage = await ai.get_daily_usage()
     data = {
         "today": {
             "total_tokens": usage.get("total_tokens", 0),
@@ -311,8 +322,9 @@ async def benchmarks_handler(request: web.Request) -> web.Response:
     try:
         benchmarks = await compute_truth_benchmarks(db)
     except Exception as e:
+        log.error("api.benchmarks_error", error=str(e))
         return web.json_response(
-            _error_envelope("benchmark_error", str(e), config.mode),
+            _error_envelope("benchmark_error", "Failed to compute benchmarks", config.mode),
             status=500,
         )
     return web.json_response(_envelope(benchmarks, config.mode))

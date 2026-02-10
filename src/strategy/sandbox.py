@@ -33,6 +33,10 @@ FORBIDDEN_IMPORTS = {
     "subprocess", "os", "shutil", "socket", "http",
     "urllib", "requests", "httpx", "websockets", "aiohttp",
     "sqlite3", "aiosqlite", "pathlib",
+    "sys", "builtins", "ctypes", "importlib", "types",
+    "code", "codeop", "runpy", "pkgutil",
+    "threading", "multiprocessing", "pickle", "shelve", "marshal",
+    "io", "tempfile", "gc", "inspect", "atexit", "signal",
 }
 
 FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "os.environ", "os.path"}

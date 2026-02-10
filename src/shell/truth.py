@@ -25,11 +25,11 @@ async def compute_truth_benchmarks(db: Database) -> dict:
         SELECT
             COUNT(*) as trade_count,
             COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as win_count,
-            COALESCE(SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), 0) as loss_count,
+            COALESCE(SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END), 0) as loss_count,
             COALESCE(SUM(pnl), 0) as net_pnl,
             COALESCE(SUM(fees), 0) as total_fees,
             COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
-            COALESCE(AVG(CASE WHEN pnl <= 0 THEN pnl END), 0) as avg_loss
+            COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss
         FROM trades WHERE closed_at IS NOT NULL
     """)
 
@@ -60,7 +60,7 @@ async def compute_truth_benchmarks(db: Database) -> dict:
     )
     consecutive_losses = 0
     for t in recent_trades:
-        if t["pnl"] is not None and t["pnl"] <= 0:
+        if t["pnl"] is not None and t["pnl"] < 0:
             consecutive_losses += 1
         else:
             break
@@ -85,7 +85,9 @@ async def compute_truth_benchmarks(db: Database) -> dict:
     peak = 0.0
     max_drawdown = 0.0
     for s in snapshots:
-        val = s["portfolio_value"] or 0.0
+        val = s["portfolio_value"]
+        if val is None:
+            continue
         if val > peak:
             peak = val
         if peak > 0:

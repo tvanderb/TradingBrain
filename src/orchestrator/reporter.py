@@ -153,7 +153,7 @@ class Reporter:
 
         pnls = [t.get("pnl", 0) for t in trades if t.get("pnl") is not None]
         wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p <= 0]
+        losses = [p for p in pnls if p < 0]
 
         total = len(pnls)
         win_rate = len(wins) / total if total > 0 else 0

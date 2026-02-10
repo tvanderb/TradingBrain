@@ -31,9 +31,11 @@ CREATE TABLE IF NOT EXISTS positions (
     avg_entry REAL NOT NULL,
     current_price REAL DEFAULT 0,
     unrealized_pnl REAL DEFAULT 0,
+    entry_fee REAL DEFAULT 0,
     stop_loss REAL,
     take_profit REAL,
     intent TEXT NOT NULL DEFAULT 'DAY',
+    strategy_version TEXT,
     opened_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -227,6 +229,10 @@ MIGRATIONS = [
     ("signals", "strategy_regime", "ALTER TABLE signals ADD COLUMN strategy_regime TEXT"),
     # Add per-pair symbol to fee_schedule
     ("fee_schedule", "symbol", "ALTER TABLE fee_schedule ADD COLUMN symbol TEXT"),
+    # Persist entry_fee on positions (for accurate P&L on restart)
+    ("positions", "entry_fee", "ALTER TABLE positions ADD COLUMN entry_fee REAL DEFAULT 0"),
+    # Persist strategy_version on positions (for SL/TP trade attribution)
+    ("positions", "strategy_version", "ALTER TABLE positions ADD COLUMN strategy_version TEXT"),
 ]
 
 

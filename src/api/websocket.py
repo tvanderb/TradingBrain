@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 
 import structlog
@@ -14,6 +15,8 @@ log = structlog.get_logger()
 
 class WebSocketManager:
     """Tracks connected WebSocket clients and broadcasts events."""
+
+    MAX_CLIENTS = 50
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
@@ -33,16 +36,23 @@ class WebSocketManager:
                 await ws.send_str(msg)
             except Exception:
                 closed.add(ws)
-        self._clients -= closed
+        if closed:
+            self._clients -= closed
+            log.warning("ws.clients_dropped", count=len(closed), remaining=len(self._clients))
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         """WebSocket endpoint handler. Auth via ?token= query param."""
         api_key = request.app.get(api_key_key, "")
         token = request.query.get("token", "")
-        if api_key and token != api_key:
+        if not api_key:
+            raise web.HTTPUnauthorized(text="API key not configured")
+        if not hmac.compare_digest(token, api_key):
             raise web.HTTPUnauthorized(text="Invalid token")
 
-        ws = web.WebSocketResponse()
+        if len(self._clients) >= self.MAX_CLIENTS:
+            raise web.HTTPServiceUnavailable(text="Too many WebSocket connections")
+
+        ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(request)
         self._clients.add(ws)
         log.info("ws.client_connected", clients=len(self._clients))

@@ -171,20 +171,21 @@ class PortfolioTracker:
 
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
-        strategy_regime: str | None = None,
+        strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
         """Execute a signal. Returns trade info dict or None if failed."""
 
         if signal.action == Action.BUY:
-            return await self._execute_buy(signal, current_price, maker_fee, taker_fee)
+            return await self._execute_buy(signal, current_price, maker_fee, taker_fee, strategy_version)
         elif signal.action == Action.SELL:
-            return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime)
+            return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
         elif signal.action == Action.CLOSE:
-            return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime)
+            return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
         return None
 
     async def _execute_buy(
-        self, signal: Signal, price: float, maker_fee: float, taker_fee: float
+        self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
+        strategy_version: str | None = None,
     ) -> dict | None:
         portfolio_value = await self.total_value()
         trade_value = portfolio_value * signal.size_pct
@@ -220,8 +221,10 @@ class PortfolioTracker:
                 qty,
                 limit_price,
             )
-            fill_price = price  # Will be updated by fill callback
-            log.info("portfolio.order_placed", result=result)
+            # TODO: Poll order status for actual fill price. Currently assumes market price.
+            fill_price = price
+            log.warning("portfolio.live_fill_assumed", symbol=signal.symbol,
+                        assumed_price=price, note="Actual fill may differ")
 
         # Deduct cash
         self._cash -= (qty * fill_price + fee)
@@ -239,11 +242,12 @@ class PortfolioTracker:
             "stop_loss": signal.stop_loss,
             "take_profit": signal.take_profit,
             "intent": signal.intent.value,
+            "strategy_version": strategy_version,
             "opened_at": now,
             "updated_at": now,
         }
 
-        # If position exists, average in
+        # If position exists, average in (preserve existing SL/TP if new signal has None)
         if signal.symbol in self._positions:
             existing = self._positions[signal.symbol]
             total_qty = existing["qty"] + qty
@@ -252,16 +256,22 @@ class PortfolioTracker:
             pos["avg_entry"] = avg
             pos["entry_fee"] = existing.get("entry_fee", 0.0) + fee
             pos["opened_at"] = existing["opened_at"]
+            # Preserve existing SL/TP if new signal doesn't specify them
+            if pos["stop_loss"] is None and existing.get("stop_loss") is not None:
+                pos["stop_loss"] = existing["stop_loss"]
+            if pos["take_profit"] is None and existing.get("take_profit") is not None:
+                pos["take_profit"] = existing["take_profit"]
 
         self._positions[signal.symbol] = pos
 
         # Save to DB
         await self._db.execute(
             """INSERT OR REPLACE INTO positions
-               (symbol, side, qty, avg_entry, current_price, stop_loss, take_profit, intent, opened_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (symbol, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (pos["symbol"], pos["side"], pos["qty"], pos["avg_entry"], pos["current_price"],
-             pos["stop_loss"], pos["take_profit"], pos["intent"], pos["opened_at"], pos["updated_at"]),
+             pos["entry_fee"], pos["stop_loss"], pos["take_profit"], pos["intent"],
+             pos["strategy_version"], pos["opened_at"], pos["updated_at"]),
         )
         await self._db.commit()
 
@@ -275,7 +285,7 @@ class PortfolioTracker:
 
     async def _execute_sell(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
-        strategy_regime: str | None = None,
+        strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
         """Partial sell of a position."""
         pos = self._positions.get(signal.symbol)
@@ -287,11 +297,11 @@ class PortfolioTracker:
         sell_value = portfolio_value * signal.size_pct
         qty_to_sell = min(sell_value / price, pos["qty"])
 
-        return await self._close_qty(signal.symbol, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime)
+        return await self._close_qty(signal.symbol, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
 
     async def _execute_close(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
-        strategy_regime: str | None = None,
+        strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
         """Close entire position."""
         pos = self._positions.get(signal.symbol)
@@ -299,14 +309,17 @@ class PortfolioTracker:
             log.warning("portfolio.no_position_to_close", symbol=signal.symbol)
             return None
 
-        return await self._close_qty(signal.symbol, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime)
+        return await self._close_qty(signal.symbol, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
 
     async def _close_qty(
         self, symbol: str, qty: float, price: float,
         maker_fee: float, taker_fee: float, signal: Signal,
-        strategy_regime: str | None = None,
+        strategy_regime: str | None = None, strategy_version: str | None = None,
     ) -> dict | None:
         pos = self._positions[symbol]
+        # Use version from position if not provided (e.g., SL/TP triggered by position monitor)
+        if strategy_version is None:
+            strategy_version = pos.get("strategy_version")
 
         if self._config.is_paper():
             slippage = price * self._get_slippage(signal)
@@ -315,8 +328,10 @@ class PortfolioTracker:
             order_type = signal.order_type.value.lower()
             limit_price = signal.limit_price if signal.order_type == OrderType.LIMIT else None
             result = await self._kraken.place_order(symbol, "sell", order_type, qty, limit_price)
+            # TODO: Poll order status for actual fill price. Currently assumes market price.
             fill_price = price
-            log.info("portfolio.sell_order_placed", result=result)
+            log.warning("portfolio.live_fill_assumed", symbol=symbol,
+                        assumed_price=price, note="Actual fill may differ")
 
         sale_value = qty * fill_price
         fee_pct = maker_fee if signal.order_type == OrderType.LIMIT else taker_fee
@@ -342,7 +357,7 @@ class PortfolioTracker:
                (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
-             total_fee, pos.get("intent", "DAY"), None, strategy_regime, pos.get("opened_at", now), now),
+             total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now),
         )
 
         # Update or remove position
@@ -355,8 +370,8 @@ class PortfolioTracker:
             pos["entry_fee"] = total_entry_fee - entry_fee_portion
             pos["updated_at"] = now
             await self._db.execute(
-                "UPDATE positions SET qty = ?, updated_at = ? WHERE symbol = ?",
-                (remaining_qty, now, symbol),
+                "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE symbol = ?",
+                (remaining_qty, pos["entry_fee"], now, symbol),
             )
 
         await self._db.commit()
@@ -380,12 +395,10 @@ class PortfolioTracker:
             pos = self._positions[symbol]
             pos["current_price"] = price
 
-            # Check stop-loss
+            # Check stop-loss (takes priority over take-profit)
             if pos.get("stop_loss") and price <= pos["stop_loss"]:
                 triggered.append({"symbol": symbol, "reason": "stop_loss", "price": price})
-
-            # Check take-profit
-            if pos.get("take_profit") and price >= pos["take_profit"]:
+            elif pos.get("take_profit") and price >= pos["take_profit"]:
                 triggered.append({"symbol": symbol, "reason": "take_profit", "price": price})
 
         return triggered
@@ -405,7 +418,7 @@ class PortfolioTracker:
             (today,),
         )
         wins = sum(1 for t in trades if t["pnl"] > 0)
-        losses = sum(1 for t in trades if t["pnl"] <= 0)
+        losses = sum(1 for t in trades if t["pnl"] < 0)
         total = len(trades)
         gross = sum(t["pnl"] for t in trades)
 

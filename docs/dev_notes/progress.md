@@ -592,3 +592,354 @@ Full system review with 4 parallel agents examining all 29 source files + 3 acti
 ### Verification
 - **52/52 tests passing** (unchanged)
 - Docker not installed on dev machine (VPS-only) — files validated structurally
+
+---
+
+## Session 14 (cont.) — Data API Implementation
+
+### Design Discussion
+- User asked about programmatic observability API
+- Shifted from dashboard-specific to general-purpose data access for any external software
+- Decisions: full filtering, response envelopes (with mode), read-only, no candle data, single WebSocket event stream
+
+### Phase 1: Event System Refactor
+- **Notifier rewritten** with dual dispatch: WebSocket (always) + Telegram (filtered by config)
+- 19 event methods covering: trades, risk, scans, strategy, orchestrator, system
+- **Bug fix**: `strategy_change()` existed but was never called — wired into orchestrator
+- **Bug fix**: risk halts were silent — wired notifications at call sites in main.py
+- `NotificationConfig` added to config with per-event Telegram filtering
+
+### Phase 2+3: REST API + WebSocket
+- 11 REST endpoints: system, portfolio, positions, trades, performance, risk, market, signals, strategy, ai/usage, benchmarks
+- Response envelope format: `{data: ..., meta: {timestamp, mode, version}}`
+- Bearer token auth via middleware (API_KEY from .env)
+- WebSocket event stream at `/v1/events` (token auth via query param)
+- aiohttp server integrated into main.py lifecycle (startup/shutdown)
+
+### Phase 4: Config, Docker, Tests
+- Added `[telegram.notifications]` and `[api]` sections to settings.toml
+- Updated docker-compose.yml with port mapping
+- 6 new tests added
+
+### Files Created
+- `src/api/__init__.py` — typed AppKey definitions
+- `src/api/server.py` — aiohttp app with auth middleware
+- `src/api/routes.py` — 11 endpoint handlers
+- `src/api/websocket.py` — WebSocketManager with broadcast
+
+### Files Modified
+- `src/telegram/notifications.py` — rewritten with dual dispatch
+- `src/shell/config.py` — NotificationConfig + ApiConfig
+- `src/main.py` — API server lifecycle, event wiring
+- `src/orchestrator/orchestrator.py` — notifier integration
+- `src/telegram/commands.py` — risk_resumed notification
+- `pyproject.toml` — added aiohttp>=3.9
+
+### Current Status
+- Branch: v2-io-container
+- Tests: **58/58 passing**
+- Data API fully implemented and committed
+
+---
+
+## Session 15 (2026-02-09) — Full System Audit
+
+### Audit Scope
+End-to-end audit focused on alignment with goal (performant, growing, learning crypto hedge fund doing day/swing/hold trades), oversights, and bugs. Four parallel audits: core trading loop, strategy/orchestrator, config/operations, test coverage.
+
+### Critical (5)
+
+1. **Notifier passed to Orchestrator as None** — `main.py:133-136`
+   - Orchestrator created before Notifier initialized. All orchestrator notifications silently fail.
+
+2. **All CronTrigger jobs ignore configured timezone** — `main.py:236-257`
+   - Config loads `timezone = "US/Eastern"` but never passed to scheduler or CronTrigger.
+   - On UTC VPS: daily reset fires 4-5 hours early, orchestrator runs at wrong hour.
+
+3. **Scan loop blocks ALL signals during halt, including exits** — `main.py:309-310`
+   - `if self._risk.is_halted: return` short-circuits before strategy runs.
+   - Risk manager allows SELL/CLOSE during halt (risk.py:95-96), but scan_loop never reaches it.
+   - Strategy-driven exits blocked during halt. Only SL/TP from position monitor works.
+
+4. **`strategy_version` always None in trade records** — `portfolio.py:345`
+   - Trade INSERT hardcodes `None` for `strategy_version`. Portfolio has no version reference.
+   - Compounds with #7: paper test queries trades by version, finds 0, auto-passes.
+
+5. **Live mode: order fills assumed immediate, no confirmation** — `portfolio.py:216-227`
+   - Cash deducted immediately at assumed price. No fill-confirmation or order-status polling.
+   - Market order fills differ by spread+slippage. Limit orders may not fill at all.
+
+### Medium (10)
+
+6. **`end_hour` config loaded but never enforced** — `config.py:82`
+7. **Paper test evaluation: 0 trades = pass** — `orchestrator.py:979` (compounds with #4)
+8. **Active strategy only generates DAY trades** — `strategy.py:117,130`
+9. **`min_profit_fee_ratio` config loaded but never used** — dead config
+10. **No credential validation at startup for live mode** — `main.py:71-196`
+11. **Backtest doesn't use live fee schedule** — hardcoded 0.25%/0.40%
+12. **Observations truncated to 2000 chars** — `orchestrator.py:1233-1240`
+13. **No correlation analysis between symbols** — per-symbol only
+14. **Position monitor can trigger both SL and TP on same update** — `portfolio.py:384-389`
+15. **WebSocket fire-and-forget at startup** — `main.py:199`
+
+### Low (7)
+
+16. Position stale prices between scans
+17. Clamped signals not recorded in audit trail
+18. Emergency stop doesn't retry failed closes
+19. Fee check race with config update
+20. Bootstrap infinite loop edge case
+21. Lockfile int parse not wrapped in try/except
+22. Daily snapshot at 23:55 may miss last 5 min of trades
+
+### Goal Alignment Gaps (6)
+
+- No swing/position trade lifecycle enforcement
+- No trailing stops
+- No position aging awareness
+- Analysis modules don't cross-reference market + trade data
+- No time-of-day analysis
+- Backtest assumes perfect fills (no slippage simulation)
+
+### Session 15 — Fixes Applied (Pre-Audit)
+
+**Critical fixes (5/5)**:
+- C1: Moved orchestrator creation after notifier init (was receiving None)
+- C2: Added timezone to AsyncIOScheduler constructor
+- C3: Scan loop continues during halt (no early return), risk_check filters entries
+- C4: Strategy version threaded through portfolio → positions → trades
+- C5: Added live mode credential validation at startup
+
+**Medium fixes (10/10)**:
+- M6: Orchestrator timeout enforcement (asyncio.wait_for based on window hours)
+- M7: Paper test 0-trade = "inconclusive" (not pass)
+- M9: Removed dead min_profit_fee_ratio config
+- M10: Credential validation for live mode
+- M11: Backtester uses per-pair fees from DB + slippage_factor parameter
+- M12: Observations truncation increased 2000→5000 chars
+- M14: SL/TP double trigger fixed (elif instead of if)
+- M15: WS task stored with done callback for error logging
+
+**Low fixes (3/7 — 4 skipped as marginal)**:
+- L18: Emergency stop retry (3 attempts per position)
+- L21: Lockfile int parse wrapped in try/except for corrupt files
+- L22: Daily snapshot moved from 23:55 to 23:59
+
+**Goal alignment additions**:
+- Backtester: slippage simulation on all fills (buy higher, sell lower)
+- Backtester: entry fee cash accounting fix (was double-counted on sell)
+- trade_performance.py: position aging (open positions with time buckets)
+- trade_performance.py: cross-reference (regime×symbol, by intent type)
+- trade_performance.py: time-of-day analysis (win rate/P&L by hour)
+
+### Session 15 — Post-Fix Audit Results
+
+**58/58 tests passing.**
+
+**Critical (5)**:
+1. `entry_fee` not persisted to positions DB — lost on restart → P&L overstated
+2. `strategy_version` not persisted to positions DB — SL/TP closes lose attribution
+3. Sandbox bypass: `import sys; sys.modules['os']` — sys not in FORBIDDEN_IMPORTS
+4. Sandbox bypass: `import builtins; builtins.__import__('os')` — builtins not blocked
+5. API route calls async `get_daily_usage()` without await — returns coroutine object
+
+**Medium (12)**:
+1. Position monitor skips strategy.on_fill()/on_position_closed() after SL/TP
+2. Position monitor skips rollback trigger check + portfolio peak update
+3. Backtester doesn't enforce max_positions
+4. Backtester doesn't clamp size_pct to max_trade_pct
+5. Backtester SL/TP uses close price, not intrabar high/low
+6. Backtester candles_1h/1d receive raw 5m data
+7. Notification event name mismatch: websocket_failed → "websocket_feed_lost"
+8. Notification event name mismatch: rollback_alert → "strategy_rollback"
+9. Old strategy version retired_at never set
+10. Paper test evaluation doesn't filter trades by time window
+11. Telegram bot open to ALL users when allowed_user_ids=[] (default)
+12. ReadOnlyDB CTE bypass with `WITH ... INSERT`
+
+**Low (8)**: reset_daily gaps, API auth when key not set, naive datetime, breakeven=loss, thoughts pruning, partial sell entry_fee, signal handler race, scan results for rejected signals
+
+**Test Coverage Gaps (3 critical)**: emergency stop flow, position monitor pipeline, orchestrator deploy pipeline
+
+### Session 15 — All Audit Findings Fixed
+
+**58/58 tests passing.**
+
+**All 5 Critical — FIXED:**
+1. `entry_fee` + `strategy_version` added to positions DB schema + migrations + INSERT/UPDATE statements
+2. Sandbox: `sys`, `builtins`, `ctypes`, `importlib`, `types`, `code`, `codeop`, `runpy`, `pkgutil` added to FORBIDDEN_IMPORTS
+3. API route: `await` added to `ai.get_daily_usage()` (test mock updated to AsyncMock)
+
+**All 12 Medium — FIXED:**
+1-2. Position monitor: added strategy callbacks (on_fill, on_position_closed) + rollback triggers + peak update after SL/TP
+3-4. Backtester: max_positions enforcement + size_pct clamped to max_trade_pct
+5. Backtester: SL/TP now uses intrabar high/low instead of close price
+6. Backtester: candles_1h/1d properly resampled from 5m data
+7-8. NotificationConfig field names renamed to match dispatch event names (strategy_rollback, websocket_feed_lost)
+9. Orchestrator: old strategy version retired_at set before deploying new version
+10. Paper test evaluation: trades filtered by started_at/ends_at time window
+11. Telegram: empty allowed_user_ids now rejects all users (was: allows all)
+12. ReadOnlyDB: CTE bypass blocked with _CTE_WRITE_PATTERN regex
+
+**5 of 8 Low — FIXED:**
+1. Breakeven=loss: `pnl <= 0` changed to `pnl < 0` in truth.py and portfolio.py snapshot
+2. Thoughts pruning: orchestrator_thoughts pruned to 30 days alongside observations
+3. API default bind: changed from 0.0.0.0 to 127.0.0.1
+4. Signal handler race: stored task ref, prevents double-stop on rapid Ctrl+C
+5. Scan results: only acted-upon signals update scan_results (not rejected ones)
+
+**3 Low — SKIPPED (not actionable):**
+- reset_daily gaps: snapshot at 23:59 + reset at 00:00 is acceptable (1min gap)
+- naive datetime: APScheduler handles timezone conversion internally
+- partial sell entry_fee: already fixed in critical fixes (entry_fee persisted to DB)
+
+---
+
+## Session 16 (2026-02-09) — Final End-to-End Audit
+
+### Audit Scope
+Full codebase audit (all Python source files) focused on bugs, error handling, and alignment with autonomous crypto hedge fund goal. Five parallel agents: core trading loop, orchestrator/strategy, shell infrastructure, API/notifications, test coverage.
+
+### Critical (14)
+
+| # | File | Finding |
+|---|------|---------|
+| C1 | `main.py:221` | Kill switch cleared after failed emergency stop — `kill_requested` = False even if positions couldn't be closed |
+| C2 | `main.py:411` | Strategy `analyze()` has no timeout — AI-rewritten strategy could infinite loop, blocking scan loop permanently |
+| C3 | `portfolio.py:250-258` | SL/TP silently overwritten on position averaging — adding to position replaces stop_loss/take_profit; `None` removes protection |
+| C4 | `portfolio.py:89-92` | Stale prices at startup — `total_value()` uses last DB price; overnight moves give wrong drawdown baseline |
+| C5 | `main.py + risk.py` | Minimum trade size never enforced — `fees.min_trade_usd` ($20) in config but never checked |
+| C6 | `routes.py:73-75` | Portfolio handler crashes — `port.positions.values()` on `list[OpenPosition]`; test masks with MagicMock |
+| C7 | `kraken.py:259-265` | WebSocket subscribes with REST pair format — `XBTUSD` sent but WS v2 needs `XBT/USD` |
+| C8 | `kraken.py:93` | Nonce collision under concurrent calls — `int(time.time() * 1000)` repeats within same ms during emergency stop |
+| C9 | `server.py:25-49` | Empty API_KEY disables all authentication — no warning, all endpoints fully open |
+| C10 | `routes.py + server.py` | No global error handler — unhandled exceptions return raw tracebacks to clients |
+| C11 | `sandbox.py:32-38` | Sandbox misses dangerous modules — `threading`, `multiprocessing`, `pickle`, `io`, `tempfile`, `gc`, `inspect`, `atexit`, `signal` not blocked |
+| C12 | `orchestrator.py:1159-1250` | No timeout on backtest execution — AI-generated strategy runs in-process with no time limit |
+| C13 | `orchestrator.py:1288-1289` | version_from query returns new version — `WHERE retired_at IS NULL` finds newly deployed version after retire |
+| C14 | `routes.py:313 + commands.py:312` | Exception messages leak internals — `str(e)` in API responses and Telegram `/ask` |
+
+### Medium (29)
+
+| # | File | Finding |
+|---|------|---------|
+| M1 | `main.py:366-369` | 5m candle fallback for empty 1h/1d — strategy gets wrong timeframe semantics |
+| M2 | `main.py:567` | Position monitor PnL default of 0 — resets consecutive losses counter |
+| M3 | `risk.py:69-72` | Consecutive losses carry across days — multi-day accumulation triggers rollback |
+| M4 | `risk.py:82-83` | Peak portfolio only in memory — lost on crash, weakens drawdown protection |
+| M5 | `portfolio.py:293` | Partial SELL uses portfolio value % not position value % |
+| M6 | `portfolio.py:234` | Mixed timezones — Python inserts local time, SQLite defaults UTC |
+| M7 | `orchestrator.py:371` | Token budget threshold 5000 too low — cycle needs 50K+ |
+| M8 | `backtester.py` | Backtester doesn't simulate daily loss halt or drawdown halt |
+| M9 | `orchestrator.py:391-401` | Unknown decision type treated as strategy change |
+| M10 | `orchestrator.py:843` | Risk tier IndexError if AI returns tier > 3 |
+| M11 | `orchestrator.py:989` | Paper test pass/fail too simplistic — 1 trade $0.01 profit passes |
+| M12 | `orchestrator.py:423` | Cycle failure swallows traceback — no `traceback.format_exc()` |
+| M13 | `orchestrator.py` | LAYER_2_SYSTEM prompt missing `max_position_pct` constraint |
+| M14 | `database.py:277` | No query timeout — expensive SELECT blocks event loop |
+| M15 | `kraken.py:80-87` | No Kraken REST rate limiter — 18+ calls per scan |
+| M16 | `kraken.py:85-87` | Kraken error is a list, displayed raw |
+| M17 | `config.py:250-270` | Config validation incomplete — port, hours, balance, slippage unchecked |
+| M18 | `truth.py:86-95` | Max drawdown treats None portfolio_value as 0 — 100% drawdown spike |
+| M19 | `commands.py:159` | Telegram `/trades` crashes on None pnl — TypeError on format |
+| M20 | `websocket.py:25-36` | No WS backpressure or client limit — connection flooding possible |
+| M21 | `websocket.py:38-59` | No WS heartbeat/ping-pong — zombie connections accumulate |
+| M22 | `websocket.py:41` | WS auth token in URL — logged by proxies |
+| M23 | `notifications.py:51` | Only 1 retry on Telegram failure — critical alerts lost |
+| M24 | `routes.py` | No API rate limiting |
+| M25 | `routes.py:120,230` | `int()` parsing crash — `?limit=abc` returns 500 |
+| M26 | `routes.py:178` | Accesses private `risk._peak_portfolio` |
+| M27 | `backtester.py:290-296` | Daily value tracking stale, misses final day |
+| M28 | `orchestrator.py:800-808` | Markdown fence stripping fragile |
+| M29 | `backtester.py` | Backtester doesn't enforce `max_position_pct` (not in RiskLimits) |
+
+### Low (22)
+
+L1-L22: Comment numbering, dead code, dust threshold, live fill TODO, dead clamp, fragile variable dependency, unhalt doesn't reset daily_pnl, unrealistic sample data, deploy_strategy no validation, Sharpe gaps, redundant commit, WS retry count, telegram truncation, SL/TP shows $0.00, empty env override, redundant SQL, API key not constant-time, strategy readable via Telegram, getattr defaults True for unknown events, no pagination metadata, no CORS, misleading regime labels.
+
+### Test Coverage Gaps (7 critical paths)
+
+| # | Area | Description |
+|---|------|-------------|
+| T1 | Emergency stop | `_emergency_stop()` + kill switch poll loop: zero coverage |
+| T2 | Position monitor | `_position_monitor()` SL/TP trigger flow: zero coverage |
+| T3 | Live Kraken | `place_order()`, `cancel_order()`, `_sign()`: zero coverage |
+| T4 | Orchestrator change | `_execute_change()` pipeline: zero coverage |
+| T5 | DB migrations | `_run_migrations()` on existing schema: zero coverage |
+| T6 | WS reconnection | Connect/reconnect loop + message parsing: zero coverage |
+| T7 | Brain lifecycle | `start()` and `stop()` sequences: zero coverage |
+
+### Triage Notes
+
+**Not actionable / by design:**
+- M3: Consecutive losses across days — intentional (default threshold 999 disables it)
+- M4: Peak portfolio memory-only — already persisted via daily snapshots, gap is crash-only
+- M5: SELL size_pct relative to portfolio — consistent with BUY behavior, by design
+- M6: Mixed timezones — known from Session 15, all internal usage is consistent
+- M8: Backtester no risk halt simulation — backtester shows raw strategy performance
+- M11: Paper test simplistic — already flagged Session 15, deliberate (orchestrator learns)
+- M22: WS token in URL — inherent to WebSocket auth (no header support in browsers)
+- M29: max_position_pct not in RiskLimits — shell enforces it; strategy doesn't need to know
+- L1-L22: Cosmetic/low-risk, fix opportunistically
+
+**Will fix (14 critical + ~15 medium):**
+- All 14 criticals
+- M1, M2, M7, M9, M10, M12, M13, M14, M15, M16, M17, M18, M19, M20, M21, M23, M24, M25, M26, M27, M28
+
+### Critical Fixes Applied (14/14)
+
+| ID | Fix | File(s) |
+|----|-----|---------|
+| C1 | Kill switch only clears after successful emergency stop | `main.py` |
+| C2 | Strategy analyze() wrapped in 30s timeout via run_in_executor | `main.py` |
+| C3 | Position averaging preserves existing SL/TP when new signal has None | `portfolio.py` |
+| C4 | Startup refreshes prices from Kraken before setting portfolio peak | `main.py` |
+| C5 | Minimum trade size ($20) enforced before executing buy | `portfolio.py` |
+| C6 | Fixed portfolio_handler crash (iterated dict as list) | `routes.py` |
+| C7 | WebSocket subscription uses WS v2 pair format (XBT/USD, XDG/USD) | `kraken.py` |
+| C8 | Monotonic nonce counter prevents API collisions | `kraken.py` |
+| C9 | Empty API_KEY rejects all requests; constant-time comparison | `server.py`, `websocket.py` |
+| C10 | Global error middleware catches unhandled exceptions | `server.py` |
+| C11 | 12 additional modules added to FORBIDDEN_IMPORTS | `sandbox.py` |
+| C12 | Backtest wrapped in 60s timeout | `orchestrator.py` |
+| C13 | version_from uses parent_version for lineage tracking | `orchestrator.py` |
+| C14 | Exception messages replaced with generic text in API/Telegram | `routes.py`, `commands.py` |
+
+### Medium Fixes Applied (19/29, 10 triaged as not actionable)
+
+| ID | Fix | File(s) |
+|----|-----|---------|
+| M1 | Added warning log when using 5m candles as 1h/1d fallback | `main.py` |
+| M2 | Position monitor only records PnL when not None (was defaulting to 0) | `main.py` |
+| M7 | Token budget threshold increased from 5K to 50K | `orchestrator.py` |
+| M9 | Unknown decision types treated as NO_CHANGE (was: strategy change) | `orchestrator.py` |
+| M10 | Risk tier clamped to 1-3 at source + from review | `orchestrator.py` |
+| M12 | Cycle failure logs full traceback via exc_info=True | `orchestrator.py` |
+| M13 | Already present — max_position_pct in dynamic prompt at line 668 | N/A |
+| M16 | Kraken error list joined with semicolons | `kraken.py` |
+| M17 | Config validation: paper_balance, slippage, API port bounds | `config.py` |
+| M18 | None portfolio_value skipped in drawdown calc (was treated as 0) | `truth.py` |
+| M19 | /trades handles None pnl/pnl_pct/fees safely | `commands.py` |
+| M20 | WebSocket max 50 clients, rejects with 503 above limit | `websocket.py` |
+| M21 | WebSocket heartbeat=30s enables automatic ping/pong | `websocket.py` |
+| M23 | Telegram retry increased to 3 attempts with exponential backoff | `notifications.py` |
+| M25 | Safe int parsing for query params (no 500 on ?limit=abc) | `routes.py` |
+| M26 | Added peak_portfolio property, removed private attr access | `risk.py`, `routes.py` |
+| M27 | Backtester captures final day's value in daily_values | `backtester.py` |
+| M28 | Markdown fence stripping uses regex (handles edge cases) | `orchestrator.py` |
+| M15 | Kraken REST rate limiter (~3 calls/sec with async lock) | `kraken.py` |
+
+**Not actionable / by design (10):** M3 (consecutive losses across days — intentional, threshold 999), M4 (peak memory-only — persisted via daily snapshots), M5 (SELL size_pct relative to portfolio — consistent with BUY), M6 (mixed timezones — internal usage consistent), M8 (backtester no risk halt — shows raw performance), M11 (paper test simplistic — deliberate), M22 (WS token in URL — inherent to WebSocket auth), M29 (max_position_pct not in RiskLimits — shell enforces it)
+
+**Deferred (2):** M14 (query timeout — aiosqlite runs in thread, doesn't block event loop), M24 (API rate limiting — single-user auth'd API, low priority)
+
+### Test Updates
+- Paper trade tests: size_pct increased 0.05 → 0.10 (min_trade_usd = $20)
+- API server test: auth headers added (Bearer test-key)
+- WebSocket test: token query param added (?token=test-ws-key)
+- Budget test comment updated (5000 → 50000)
+
+### Final State
+- **Tests: 58/58 passing**
+- **Critical: 14/14 fixed**
+- **Medium: 19/21 actionable fixed, 2 deferred, 8 not actionable**

@@ -66,6 +66,7 @@ class TradingBrain:
         self._commands: BotCommands | None = None
         self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
         self._api_runner: web.AppRunner | None = None
+        self._ws_task: asyncio.Task | None = None
         self._running = False
 
     async def start(self) -> None:
@@ -76,6 +77,11 @@ class TradingBrain:
         self._config = load_config()
         setup_logging(self._config.log_level)
         log.info("config.loaded", mode=self._config.mode, symbols=self._config.symbols)
+
+        # 1b. Validate credentials for live mode
+        if not self._config.is_paper():
+            if not self._config.kraken.api_key or not self._config.kraken.secret_key:
+                raise RuntimeError("Live mode requires KRAKEN_API_KEY and KRAKEN_SECRET_KEY in .env")
 
         # 2. Database
         self._db = Database(self._config.db_path)
@@ -114,6 +120,12 @@ class TradingBrain:
 
             # Initialize strategy hash so first nightly cycle doesn't trigger unnecessary reload
             self._scan_state["strategy_hash"] = get_code_hash(get_strategy_path())
+
+            # Track current deployed version for trade recording
+            version_row = await self._db.fetchone(
+                "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+            )
+            self._scan_state["strategy_version"] = version_row["version"] if version_row else None
         except Exception as e:
             log.error("strategy.load_failed", error=str(e))
             raise
@@ -128,14 +140,8 @@ class TradingBrain:
                 log.error("ai.init_failed", error=str(e),
                           note="Nightly orchestration will be unavailable")
 
-        # 6. Reporter & Orchestrator
+        # 6. Reporter + Notifier + Telegram
         self._reporter = Reporter(self._db)
-        self._orchestrator = Orchestrator(
-            self._config, self._db, self._ai, self._reporter, self._data_store,
-            notifier=self._notifier,
-        )
-
-        # 7. Telegram
         self._notifier = Notifier(
             self._config.telegram.chat_id,
             tg_filter=self._config.telegram.notifications,
@@ -154,6 +160,12 @@ class TradingBrain:
         await self._telegram.start()
         if self._telegram.app:
             self._notifier.set_app(self._telegram.app)
+
+        # 7. Orchestrator (after notifier so it's not None)
+        self._orchestrator = Orchestrator(
+            self._config, self._db, self._ai, self._reporter, self._data_store,
+            notifier=self._notifier,
+        )
 
         # 8. WebSocket
         self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
@@ -179,12 +191,19 @@ class TradingBrain:
             await site.start()
             log.info("api.started", host=self._config.api.host, port=self._config.api.port)
 
-        # 9. Scheduler
-        self._scheduler = AsyncIOScheduler()
+        # 9. Scheduler (use configured timezone for all cron jobs)
+        self._scheduler = AsyncIOScheduler(timezone=self._config.timezone)
         self._setup_jobs()
         self._scheduler.start()
 
-        # 10. Portfolio peak tracking
+        # 10. Portfolio peak tracking — refresh prices first to avoid stale baseline
+        for symbol in self._config.symbols:
+            if symbol in self._portfolio._positions:
+                try:
+                    ticker = await self._kraken.get_ticker(symbol)
+                    self._portfolio._positions[symbol]["current_price"] = float(ticker["c"][0])
+                except Exception as e:
+                    log.warning("startup.price_refresh_failed", symbol=symbol, error=str(e))
         portfolio_value = await self._portfolio.total_value()
         self._risk.update_portfolio_peak(portfolio_value)
 
@@ -195,8 +214,9 @@ class TradingBrain:
         log.info("brain.started", portfolio=f"${portfolio_value:.2f}",
                  positions=self._portfolio.position_count, mode=self._config.mode)
 
-        # Run WebSocket in background
-        asyncio.create_task(self._ws.connect())
+        # Run WebSocket in background (store reference to prevent silent exception loss)
+        self._ws_task = asyncio.create_task(self._ws.connect())
+        self._ws_task.add_done_callback(self._on_ws_done)
 
         # Keep alive
         while self._running:
@@ -204,8 +224,18 @@ class TradingBrain:
 
             # Check kill switch
             if self._scan_state.get("kill_requested"):
-                await self._emergency_stop()
-                self._scan_state["kill_requested"] = False
+                success = await self._emergency_stop()
+                if success:
+                    self._scan_state["kill_requested"] = False
+                # If failed, flag stays True — retries next iteration
+
+    def _on_ws_done(self, task: asyncio.Task) -> None:
+        """Handle WebSocket task completion — log any unexpected errors."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.error("websocket.task_failed", error=str(exc), type=type(exc).__name__)
 
     def _setup_jobs(self) -> None:
         """Configure all scheduled jobs."""
@@ -233,7 +263,7 @@ class TradingBrain:
 
         # Daily P&L snapshot
         self._scheduler.add_job(
-            self._daily_snapshot, CronTrigger(hour=23, minute=55),
+            self._daily_snapshot, CronTrigger(hour=23, minute=59),
             id="daily_snapshot", name="Daily Snapshot",
         )
 
@@ -303,13 +333,16 @@ class TradingBrain:
         await self._notifier.websocket_failed()
 
     async def _scan_loop(self) -> None:
-        """Main scan loop — fetch data, run strategy, execute signals."""
+        """Main scan loop — fetch data, run strategy, execute signals.
+
+        When halted, still runs strategy to process exit signals (SELL/CLOSE).
+        Risk manager allows exits during halt — we must not short-circuit before it.
+        """
         if self._commands and self._commands.is_paused:
             return
-        if self._risk and self._risk.is_halted:
-            return
+        halted = self._risk and self._risk.is_halted
 
-        log.info("scan.start")
+        log.info("scan.start", halted=halted)
         try:
             prices = {}
             markets = {}
@@ -337,6 +370,11 @@ class TradingBrain:
                     vol_24h = float(ticker.get("v", [0, 0])[1])
 
                     pair_fees = self._pair_fees.get(symbol)
+                    if df_1h.empty:
+                        log.warning("scan.candle_fallback", symbol=symbol, timeframe="1h", fallback="5m")
+                    if df_1d.empty:
+                        log.warning("scan.candle_fallback", symbol=symbol, timeframe="1d", fallback="5m")
+
                     markets[symbol] = SymbolData(
                         symbol=symbol,
                         current_price=price,
@@ -383,8 +421,19 @@ class TradingBrain:
             portfolio = await self._portfolio.get_portfolio(prices)
             portfolio_value = portfolio.total_value
 
-            # Run strategy
-            signals = self._strategy.analyze(markets, portfolio, datetime.now())
+            # Run strategy (with timeout to catch infinite loops in AI-rewritten code)
+            try:
+                signals = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, self._strategy.analyze, markets, portfolio, datetime.now()
+                    ),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                log.error("scan.strategy_timeout", note="strategy.analyze() took >30s")
+                if self._notifier:
+                    await self._notifier.system_error("Strategy analyze() timed out (>30s) — possible infinite loop")
+                return
 
             # Process signals
             for signal in signals:
@@ -421,6 +470,7 @@ class TradingBrain:
                     sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                     sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                     strategy_regime=regime,
+                    strategy_version=self._scan_state.get("strategy_version"),
                 )
 
                 if result:
@@ -466,10 +516,10 @@ class TradingBrain:
                             "reasoning": signal.reasoning,
                         }
 
-            # Update scan_results with signal info for symbols that generated signals
+            # Update scan_results with signal info for signals that were acted on
             for signal in signals:
                 sym_data = scan_symbols.get(signal.symbol, {})
-                if sym_data:
+                if sym_data and sym_data.get("signal"):
                     await self._db.execute(
                         """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
                            WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
@@ -518,6 +568,15 @@ class TradingBrain:
                 except Exception as e:
                     log.warning("position_monitor.price_fetch_failed", symbol=symbol, error=str(e))
 
+        if not prices and self._portfolio.position_count > 0:
+            log.error("position_monitor.no_prices", positions=self._portfolio.position_count,
+                      note="SL/TP checks skipped — no price data available")
+            if self._notifier:
+                await self._notifier.system_error(
+                    f"Position monitor: no prices available. {self._portfolio.position_count} open positions not monitored."
+                )
+            return
+
         triggered = await self._portfolio.update_prices(prices)
         for t in triggered:
             symbol = t["symbol"]
@@ -539,9 +598,30 @@ class TradingBrain:
                 strategy_regime=regime,
             )
             if result:
-                self._risk.record_trade_result(result.get("pnl", 0))
+                if result.get("pnl") is not None:
+                    self._risk.record_trade_result(result["pnl"])
                 await self._notifier.stop_triggered(symbol, reason, price)
                 await self._notifier.trade_executed(result)
+
+                # Strategy callbacks (match scan loop behavior)
+                if result.get("pnl") is not None and self._strategy:
+                    self._strategy.on_position_closed(
+                        result["symbol"], result["pnl"], result.get("pnl_pct", 0)
+                    )
+                if self._strategy:
+                    self._strategy.on_fill(
+                        symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY
+                    )
+
+                # Rollback triggers + peak update
+                new_value = await self._portfolio.total_value()
+                rollback = self._risk.check_rollback_triggers(
+                    new_value, self._portfolio.daily_start_value
+                )
+                if not rollback.passed:
+                    await self._notifier.rollback_alert(rollback.reason, "previous")
+                    await self._notifier.risk_halt(rollback.reason)
+                self._risk.update_portfolio_peak(new_value)
 
     async def _check_fees(self) -> None:
         """Update fee schedule from Kraken for all pairs."""
@@ -555,12 +635,6 @@ class TradingBrain:
                     "INSERT INTO fee_schedule (symbol, maker_fee_pct, taker_fee_pct) VALUES (?, ?, ?)",
                     (symbol, maker, taker),
                 )
-            # Also update global config with first pair's fees as default
-            if self._config.symbols:
-                first = self._config.symbols[0]
-                if first in self._pair_fees:
-                    self._config.kraken.maker_fee_pct = self._pair_fees[first][0]
-                    self._config.kraken.taker_fee_pct = self._pair_fees[first][1]
             await self._db.commit()
             log.info("fees.updated", pairs=len(self._pair_fees))
         except Exception as e:
@@ -575,9 +649,17 @@ class TradingBrain:
         self._ai.reset_daily_tokens()
 
     async def _nightly_orchestration(self) -> None:
-        """Run the nightly AI review cycle."""
+        """Run the nightly AI review cycle with timeout enforcement."""
+        # Enforce end_hour window (e.g., 3 hours from start_hour to end_hour)
+        window_hours = self._config.orchestrator.end_hour - self._config.orchestrator.start_hour
+        if window_hours <= 0:
+            window_hours += 24  # Handle wrap-around (e.g., start=23, end=2)
+        timeout_seconds = window_hours * 3600
+
         try:
-            report = await self._orchestrator.run_nightly_cycle()
+            report = await asyncio.wait_for(
+                self._orchestrator.run_nightly_cycle(), timeout=timeout_seconds,
+            )
 
             # Reload strategy if it was changed
             new_hash = get_code_hash(get_strategy_path())
@@ -593,6 +675,12 @@ class TradingBrain:
                 self._strategy.initialize(risk_limits, self._config.symbols)
                 self._scan_state["strategy_hash"] = new_hash
 
+                # Update strategy version for trade recording
+                version_row = await self._db.fetchone(
+                    "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+                )
+                self._scan_state["strategy_version"] = version_row["version"] if version_row else None
+
                 # Update scan interval if strategy changed it
                 new_interval = self._strategy.scan_interval_minutes
                 try:
@@ -607,6 +695,11 @@ class TradingBrain:
                 log.info("strategy.reloaded_after_orchestration")
 
             await self._notifier.daily_summary(report)
+        except asyncio.TimeoutError:
+            log.error("orchestration.timeout", window_hours=window_hours)
+            await self._notifier.system_error(
+                f"Orchestration timed out after {window_hours}h window"
+            )
         except Exception as e:
             log.error("orchestration.failed", error=str(e))
             await self._notifier.system_error(f"Orchestration failed: {e}")
@@ -618,28 +711,33 @@ class TradingBrain:
         except Exception as e:
             log.error("weekly_report.failed", error=str(e))
 
-    async def _emergency_stop(self) -> None:
-        """Close all positions immediately."""
+    async def _emergency_stop(self) -> bool:
+        """Close all positions immediately. Returns True if all positions closed."""
         log.warning("brain.emergency_stop")
         await self._notifier.system_error("Emergency stop initiated — closing all positions")
 
         positions = await self._db.fetchall("SELECT * FROM positions")
         for pos in positions:
-            try:
-                ticker = await self._kraken.get_ticker(pos["symbol"])
-                price = float(ticker["c"][0])
-                signal = Signal(
-                    symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
-                    intent=Intent.DAY, confidence=1.0, reasoning="Emergency stop",
-                )
-                sym_fees = self._pair_fees.get(pos["symbol"])
-                await self._portfolio.execute_signal(
-                    signal, price,
-                    sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
-                    sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                )
-            except Exception as e:
-                log.error("emergency.close_failed", symbol=pos["symbol"], error=str(e))
+            for attempt in range(3):
+                try:
+                    ticker = await self._kraken.get_ticker(pos["symbol"])
+                    price = float(ticker["c"][0])
+                    signal = Signal(
+                        symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
+                        intent=Intent.DAY, confidence=1.0, reasoning="Emergency stop",
+                    )
+                    sym_fees = self._pair_fees.get(pos["symbol"])
+                    await self._portfolio.execute_signal(
+                        signal, price,
+                        sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                        sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+                    )
+                    break  # Success
+                except Exception as e:
+                    log.error("emergency.close_failed", symbol=pos["symbol"],
+                              attempt=attempt + 1, error=str(e))
+                    if attempt < 2:
+                        await asyncio.sleep(2)
 
         # Verify all positions were closed
         remaining = await self._db.fetchall("SELECT symbol FROM positions")
@@ -649,9 +747,11 @@ class TradingBrain:
             await self._notifier.system_error(
                 f"Emergency stop incomplete — positions remaining: {', '.join(symbols)}"
             )
+            return False
         else:
             log.info("emergency.all_positions_closed")
             await self._notifier.system_error("Emergency stop complete — all positions closed")
+            return True
 
     async def stop(self) -> None:
         """Graceful shutdown sequence."""
@@ -711,15 +811,21 @@ LOCK_FILE = Path(__file__).resolve().parent.parent / "data" / "brain.pid"
 def _acquire_lock() -> None:
     """Ensure only one instance runs. Write PID to lockfile."""
     if LOCK_FILE.exists():
-        old_pid = int(LOCK_FILE.read_text().strip())
-        # Check if the old process is still alive
         try:
-            os.kill(old_pid, 0)  # signal 0 = just check existence
-            print(f"ERROR: Another instance is running (PID {old_pid}). Exiting.", file=sys.stderr)
-            sys.exit(1)
-        except (ProcessLookupError, PermissionError):
-            # Stale lockfile — previous process died without cleanup
-            log.warning("lockfile.stale", old_pid=old_pid)
+            old_pid = int(LOCK_FILE.read_text().strip())
+        except (ValueError, OSError):
+            log.warning("lockfile.corrupt")
+            LOCK_FILE.unlink(missing_ok=True)
+            old_pid = None
+
+        if old_pid is not None:
+            try:
+                os.kill(old_pid, 0)  # signal 0 = just check existence
+                print(f"ERROR: Another instance is running (PID {old_pid}). Exiting.", file=sys.stderr)
+                sys.exit(1)
+            except (ProcessLookupError, PermissionError):
+                # Stale lockfile — previous process died without cleanup
+                log.warning("lockfile.stale", old_pid=old_pid)
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text(str(os.getpid()))
@@ -742,8 +848,12 @@ async def main() -> None:
     # Handle SIGTERM/SIGINT for graceful shutdown
     loop = asyncio.get_event_loop()
 
+    _stop_task = None
+
     def signal_handler():
-        asyncio.create_task(brain.stop())
+        nonlocal _stop_task
+        if _stop_task is None:
+            _stop_task = asyncio.create_task(brain.stop())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
