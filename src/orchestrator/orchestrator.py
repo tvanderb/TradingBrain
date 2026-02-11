@@ -1228,16 +1228,18 @@ The orchestrator wants to change this module because: {changes[:500]}"""
 
             spec = importlib.util.spec_from_file_location("backtest_strategy", tmp_path)
             mod = importlib.util.module_from_spec(spec)
+
+            def _load_and_init():
+                spec.loader.exec_module(mod)
+                return mod.Strategy()
+
             try:
-                await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(
-                        None, spec.loader.exec_module, mod
-                    ),
+                strategy = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(None, _load_and_init),
                     timeout=10,
                 )
             except asyncio.TimeoutError:
                 return False, "Strategy module import timed out (>10s) — possible infinite loop at import time"
-            strategy = mod.Strategy()
 
             # Get recent 1h candle data for backtest
             candle_data = {}
@@ -1259,6 +1261,8 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                 max_drawdown_pct=self._config.risk.max_drawdown_pct,
                 max_position_pct=self._config.risk.max_position_pct,
+                max_daily_trades=self._config.risk.max_daily_trades,
+                rollback_consecutive_losses=self._config.risk.rollback_consecutive_losses,
             )
 
             # Pull per-pair fees from DB (live fee schedule from Kraken API)

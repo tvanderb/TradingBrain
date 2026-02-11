@@ -226,6 +226,20 @@ class DataStore:
             (signal_cutoff,),
         )
 
+        # Prune old scan_results (30 days — high-frequency table, ~288 rows/day/symbol)
+        scan_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        await self._db.execute(
+            "DELETE FROM scan_results WHERE created_at < ?",
+            (scan_cutoff,),
+        )
+
+        # Prune old orchestrator_log (1 year)
+        orch_cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
+        await self._db.execute(
+            "DELETE FROM orchestrator_log WHERE date < ?",
+            (orch_cutoff,),
+        )
+
         await self._db.commit()
 
     async def run_nightly_maintenance(self) -> None:

@@ -16,6 +16,8 @@ import urllib.parse
 from collections import defaultdict
 from typing import Any, Callable, Coroutine
 
+import math
+
 import certifi
 import httpx
 import pandas as pd
@@ -121,7 +123,7 @@ class KrakenREST:
             # Nonce computation inside lock to prevent concurrent collisions
             urlpath = f"/0/private/{endpoint}"
             url = f"{self._base_url}{urlpath}"
-            data = data or {}
+            data = dict(data) if data else {}  # Copy to avoid mutating caller's dict
             nonce = int(time.time() * 1000)
             self._last_nonce = max(self._last_nonce + 1, nonce)
             data["nonce"] = str(self._last_nonce)
@@ -351,7 +353,7 @@ class KrakenWebSocket:
                     for item in msg.get("data", []):
                         symbol = from_kraken_pair(item.get("symbol", ""))
                         price = float(item.get("last", 0))
-                        if symbol and price:
+                        if symbol and price and math.isfinite(price):
                             self._prices[symbol] = price
                             self._price_updated_at[symbol] = time.monotonic()
                             for cb in self._callbacks.get("ticker", []):

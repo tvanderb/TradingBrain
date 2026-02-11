@@ -118,10 +118,37 @@ class PortfolioTracker:
 
         # Load cash from last daily snapshot if available
         last_snap = await self._db.fetchone(
-            "SELECT cash, portfolio_value FROM daily_performance ORDER BY date DESC LIMIT 1"
+            "SELECT cash, portfolio_value, date FROM daily_performance ORDER BY date DESC LIMIT 1"
         )
         if last_snap and last_snap.get("cash") is not None:
             self._cash = last_snap["cash"]
+            # Reconcile: if trades closed after the snapshot, recalculate cash from first principles
+            # cash = starting_capital + deposits - withdrawals + sum(trade PnLs) - sum(open position entry costs)
+            snap_date = last_snap.get("date")
+            if snap_date:
+                post_snap = await self._db.fetchone(
+                    "SELECT COUNT(*) as cnt FROM trades WHERE datetime(closed_at) > datetime(? || 'T23:59:59')",
+                    (snap_date,),
+                )
+                if post_snap and post_snap["cnt"] > 0:
+                    # Full recalculation — more robust than replaying individual trades
+                    starting = self._config.paper_balance_usd
+                    deposits = await self._db.fetchone(
+                        "SELECT COALESCE(SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END), 0) as net FROM capital_events"
+                    )
+                    net_capital = deposits["net"] if deposits else 0
+                    all_pnl = await self._db.fetchone(
+                        "SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE pnl IS NOT NULL"
+                    )
+                    total_pnl = all_pnl["total"] if all_pnl else 0
+                    # Open position entry costs (cash tied up in positions)
+                    position_costs = sum(
+                        p["qty"] * p["avg_entry"] + p.get("entry_fee", 0)
+                        for p in self._positions.values()
+                    )
+                    self._cash = starting + net_capital + total_pnl - position_costs
+                    log.info("portfolio.cash_reconciled", stale_trades=post_snap["cnt"],
+                             cash=round(self._cash, 2))
         elif self._config.is_paper():
             self._cash = self._config.paper_balance_usd
         else:
@@ -722,7 +749,7 @@ class PortfolioTracker:
 
         return {
             "symbol": symbol, "action": signal.action.value, "qty": qty,
-            "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct, "fee": fee,
+            "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct, "fee": total_fee,
             "intent": pos.get("intent", "DAY"), "tag": tag,
         }
 
@@ -796,6 +823,9 @@ class PortfolioTracker:
         if self._config.is_paper():
             return
         if not stop_loss and not take_profit:
+            return
+        if qty <= 0.000001:
+            log.warning("exchange_sl_tp.zero_qty", tag=tag, qty=qty)
             return
 
         sl_txid = None
@@ -936,6 +966,11 @@ class PortfolioTracker:
                 "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
                 (remaining, pos["entry_fee"], now, tag),
             )
+            # Re-place SL/TP for remaining qty (matching _close_qty pattern)
+            if pos.get("stop_loss") or pos.get("take_profit"):
+                await self._place_exchange_sl_tp(
+                    tag, symbol, remaining, pos.get("stop_loss"), pos.get("take_profit"),
+                )
 
         await self._db.commit()
 
@@ -946,7 +981,7 @@ class PortfolioTracker:
         return {
             "symbol": symbol, "action": "CLOSE", "qty": filled_volume,
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct,
-            "fee": fee, "intent": pos.get("intent", "DAY"), "tag": tag,
+            "fee": total_fee, "intent": pos.get("intent", "DAY"), "tag": tag,
         }
 
     async def update_prices(self, prices: dict[str, float]) -> list[dict]:

@@ -65,6 +65,17 @@ class AnalysisSandboxResult:
     warnings: list[str]
 
 
+ALLOWED_SRC_IMPORTS = {
+    "src.shell.contract",
+}
+
+
+def _is_allowed_src_import(module_path: str) -> bool:
+    """Check if an src.* import is in the allowlist."""
+    return any(module_path == allowed or module_path.startswith(allowed + ".")
+               for allowed in ALLOWED_SRC_IMPORTS)
+
+
 def check_analysis_imports(code: str) -> list[str]:
     """Check for forbidden imports in analysis module code."""
     errors = []
@@ -79,12 +90,16 @@ def check_analysis_imports(code: str) -> list[str]:
                 root = alias.name.split(".")[0]
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: {alias.name}")
+                elif root == "src" and not _is_allowed_src_import(alias.name):
+                    errors.append(f"Forbidden import: {alias.name} (only src.shell.contract allowed)")
 
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 root = node.module.split(".")[0]
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: from {node.module}")
+                elif root == "src" and not _is_allowed_src_import(node.module):
+                    errors.append(f"Forbidden import: from {node.module} (only src.shell.contract allowed)")
 
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
@@ -188,7 +203,7 @@ def validate_analysis_module(code: str, module_name: str) -> AnalysisSandboxResu
             except Exception as e:
                 errors.append(f"analyze() crashed on test DB: {type(e).__name__}: {e}")
 
-    except Exception as e:
+    except BaseException as e:
         errors.append(f"Runtime error: {type(e).__name__}: {e}")
     finally:
         if sys_module_name in sys.modules:

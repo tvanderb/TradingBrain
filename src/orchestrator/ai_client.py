@@ -115,13 +115,11 @@ class AIClient:
 
         # Retry with exponential backoff for transient errors
         max_retries = 3
-        last_error = None
         for attempt in range(max_retries):
             try:
                 response = await self._client.messages.create(**kwargs)
                 break
             except Exception as e:
-                last_error = e
                 error_str = str(e).lower()
                 # Retry on transient errors (network, rate limit, server errors)
                 is_transient = any(k in error_str for k in ("timeout", "rate", "429", "500", "502", "503", "529", "overloaded", "connection"))

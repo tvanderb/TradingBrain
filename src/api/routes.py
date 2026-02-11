@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import structlog
@@ -269,10 +270,23 @@ async def strategy_handler(request: web.Request) -> web.Response:
         "SELECT * FROM strategy_versions ORDER BY COALESCE(deployed_at, '0') DESC LIMIT 10"
     )
 
+    # Parse JSON string columns to avoid double-encoding
+    json_fields = ("backtest_result", "paper_test_result", "result")
+
+    def _parse_json_fields(row_dict: dict) -> dict:
+        for field in json_fields:
+            val = row_dict.get(field)
+            if isinstance(val, str):
+                try:
+                    row_dict[field] = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    pass  # Keep as string if not valid JSON
+        return row_dict
+
     data = {
-        "active": dict(active) if active else None,
-        "paper_test": dict(paper_test) if paper_test else None,
-        "recent_versions": [dict(v) for v in versions],
+        "active": _parse_json_fields(dict(active)) if active else None,
+        "paper_test": _parse_json_fields(dict(paper_test)) if paper_test else None,
+        "recent_versions": [_parse_json_fields(dict(v)) for v in versions],
     }
     return web.json_response(_envelope(data, config.mode))
 

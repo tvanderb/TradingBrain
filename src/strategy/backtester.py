@@ -144,8 +144,11 @@ class Backtester:
         prev_day = None
         day_start_value = cash
         daily_pnl = 0.0
+        daily_trade_count = 0
+        consecutive_losses = 0
         halted_today = False
         drawdown_halted = False
+        consecutive_loss_halted = False
         total_value = cash  # Track across iterations for day boundary detection
 
         for ts in timestamps:
@@ -157,6 +160,7 @@ class Backtester:
                     peak_value = max(peak_value, total_value)
                 day_start_value = total_value
                 daily_pnl = 0.0
+                daily_trade_count = 0
                 halted_today = False
                 prev_day = current_day
             # Build SymbolData for each symbol at this point
@@ -245,13 +249,19 @@ class Backtester:
 
                 fee_pct = self._get_taker_fee(signal.symbol) / 100
 
-                # Risk halt simulation: skip new entries if daily loss or drawdown exceeded
-                if signal.action == Action.BUY and (halted_today or drawdown_halted):
+                # Risk halt simulation: skip new entries if halted
+                if signal.action == Action.BUY and (halted_today or drawdown_halted or consecutive_loss_halted):
+                    continue
+                # Daily trade count limit (skip new entries only)
+                if signal.action == Action.BUY and daily_trade_count >= self._risk_limits.max_daily_trades:
                     continue
 
                 if signal.action == Action.BUY:
-                    # Enforce max_positions
-                    if len(positions) >= self._risk_limits.max_positions:
+                    # Resolve tag first (needed for average-in check)
+                    tag = signal.tag or self._bt_tag(signal.symbol)
+                    is_new = tag not in positions
+                    # Enforce max_positions only for genuinely new positions (not average-in)
+                    if is_new and len(positions) >= self._risk_limits.max_positions:
                         continue
                     fill_price = price * (1 + self._slippage)  # slippage: buy higher
                     # Reject oversized signals (matches live risk manager behavior)
@@ -265,12 +275,11 @@ class Backtester:
                     )
                     if total_value > 0 and (existing_value + trade_value) / total_value > self._risk_limits.max_position_pct:
                         continue
-                    if trade_value > cash:
+                    fee = trade_value * fee_pct
+                    if trade_value + fee > cash:
                         continue
                     qty = trade_value / fill_price
-                    fee = trade_value * fee_pct
                     cash -= (trade_value + fee)
-                    tag = signal.tag or self._bt_tag(signal.symbol)
                     if tag in positions:
                         # Average into existing position (matches live behavior)
                         existing = positions[tag]
@@ -320,10 +329,16 @@ class Backtester:
 
                     for tag, pos in to_close:
                         fill_price = price * (1 - self._slippage)  # slippage: sell lower
-                        qty = pos["qty"]
+                        # SELL respects size_pct for partial sells (matches live _execute_sell)
+                        if signal.action == Action.SELL and signal.size_pct > 0 and signal.size_pct < 1.0:
+                            sell_value = total_value * signal.size_pct
+                            qty = min(sell_value / fill_price, pos["qty"])
+                        else:
+                            qty = pos["qty"]
                         sale = qty * fill_price
                         exit_fee = sale * fee_pct
-                        entry_fee = pos.get("entry_fee", 0.0)
+                        close_fraction = min(qty / pos["qty"], 1.0) if pos["qty"] > 0 else 1.0
+                        entry_fee = pos.get("entry_fee", 0.0) * close_fraction
                         fee = entry_fee + exit_fee
                         pnl = (fill_price - pos["avg_entry"]) * qty - fee
                         pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
@@ -338,11 +353,26 @@ class Backtester:
                             self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent, tag=tag)
                         except TypeError:
                             self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
-                        try:
-                            self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct, tag=tag)
-                        except TypeError:
-                            self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
-                        del positions[tag]
+
+                        remaining = pos["qty"] - qty
+                        if remaining <= 0.000001:
+                            try:
+                                self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct, tag=tag)
+                            except TypeError:
+                                self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
+                            del positions[tag]
+                        else:
+                            # Partial sell: update position (matching live _close_qty)
+                            pos["qty"] = remaining
+                            pos["entry_fee"] = pos.get("entry_fee", 0.0) - entry_fee
+
+                    # Track trade count and consecutive losses for risk halt simulation
+                    for bt_trade in all_trades[-len(to_close):]:
+                        daily_trade_count += 1
+                        if bt_trade.pnl < 0:
+                            consecutive_losses += 1
+                        else:
+                            consecutive_losses = 0
 
                     # Recalculate total_value after trade(s)
                     total_value = cash + sum(
@@ -353,6 +383,9 @@ class Backtester:
                     daily_pnl = total_value - day_start_value
                     if day_start_value > 0 and (-daily_pnl / day_start_value) >= self._risk_limits.max_daily_loss_pct:
                         halted_today = True
+                    # Consecutive loss halt (persists across days — matches rollback behavior)
+                    if consecutive_losses >= self._risk_limits.rollback_consecutive_losses:
+                        consecutive_loss_halted = True
 
                 elif signal.action == Action.MODIFY:
                     # In-place modification of SL/TP
@@ -410,6 +443,13 @@ class Backtester:
                         self._strategy.on_position_closed(sym, pnl, pnl_pct)
                     del positions[tag]
 
+                    # Track trade count and consecutive losses
+                    daily_trade_count += 1
+                    if pnl < 0:
+                        consecutive_losses += 1
+                    else:
+                        consecutive_losses = 0
+
                     # Recalculate total_value after SL/TP close
                     total_value = cash + sum(
                         p["qty"] * prices.get(p.get("symbol", ""), p["avg_entry"])
@@ -418,6 +458,8 @@ class Backtester:
                     daily_pnl = total_value - day_start_value
                     if day_start_value > 0 and (-daily_pnl / day_start_value) >= self._risk_limits.max_daily_loss_pct:
                         halted_today = True
+                    if consecutive_losses >= self._risk_limits.rollback_consecutive_losses:
+                        consecutive_loss_halted = True
 
             # Check max_drawdown halt (persists across days — matches emergency stop behavior)
             if peak_value > 0 and (peak_value - total_value) / peak_value >= self._risk_limits.max_drawdown_pct:

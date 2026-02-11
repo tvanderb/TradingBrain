@@ -181,10 +181,14 @@ class BotCommands:
             lines.append(f"Cash: ${self._portfolio.cash:.2f}")
             lines.append(f"Positions: {self._portfolio.position_count}")
 
-            # Total return
+            # Total return — account for capital events (deposits/withdrawals)
             initial = self._config.paper_balance_usd
-            ret = value - initial
-            ret_pct = (ret / initial * 100) if initial > 0 else 0
+            cap_row = await self._db.fetchone(
+                "SELECT COALESCE(SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END), 0) as net FROM capital_events"
+            )
+            invested = initial + (cap_row["net"] if cap_row else 0)
+            ret = value - invested
+            ret_pct = (ret / invested * 100) if invested > 0 else 0
             lines.append(f"\nTotal Return: ${ret:+.2f} ({ret_pct:+.1f}%)")
         else:
             lines.append("Portfolio: unavailable")

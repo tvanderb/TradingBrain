@@ -103,6 +103,12 @@ class RiskManager:
     def reset_daily(self) -> None:
         self._daily_trades = 0
         self._daily_pnl = 0.0
+        # Auto-unhalt daily-loss halts (they should reset with the day)
+        # Drawdown and consecutive-loss halts persist (they're cumulative/structural)
+        if self._halted and "Daily portfolio drop" in self._halt_reason:
+            self._halted = False
+            self._halt_reason = ""
+            log.info("risk.daily_loss_halt_cleared")
         log.info("risk.daily_reset")
 
     def record_trade_result(self, pnl: float) -> None:

@@ -1974,3 +1974,116 @@ After triage: **12 production fixes + 4 test coverage gaps**
 - **4 new tests written** (T1-T4)
 - **1 existing test fixed**: `test_risk_counters_restored_on_restart` — updated to use UTC timestamps matching H3's timezone-aware query
 - **Tests: 134/134 passing** (was 130/130)
+
+## Session I (2026-02-11) — Audit Round 11
+
+### Audit Scope
+5 parallel Opus audit agents — 11th round. Each received full ~180 prior fix list to avoid re-reports.
+
+### Raw Findings: 28 across all agents
+After triage: **1 critical, 11 medium, 13 low, 3 test gaps** = 25 production fixes + 3 tests
+
+### Critical (1)
+
+- **I1**: Sandbox escape via transitive `src.*` imports. `import src.shell.config; src.shell.config.os.system("cmd")` bypasses all checks. Root `src` not in FORBIDDEN_IMPORTS, dotted chain doesn't match FORBIDDEN_ATTRS.
+  - **Impact**: Arbitrary code execution from AI-generated strategy/analysis code.
+  - **Fix**: Add `src` to FORBIDDEN_IMPORTS in both sandboxes, add allowlist for `src.shell.contract` and `src.strategy.skills.*`.
+
+### Medium (11)
+
+- **I2**: Reconciled exit fills (`_reconcile_orders`) don't call `risk.record_trade_result()` — risk counters stale after restart with pending fills.
+- **I3**: `record_exchange_fill` partial fill doesn't re-place SL/TP for remaining qty (unlike `_close_qty` which does).
+- **I4**: Backtester SELL always closes full position — ignores `size_pct` partial sells. Live system computes partial qty.
+- **I5**: Backtester rejects average-in BUY at max_positions — tag resolved AFTER the check, so explicit-tag average-ins blocked.
+- **I6**: Backtester BUY cash check doesn't include fee — `trade_value > cash` should be `trade_value + fee > cash`. Can drive cash negative.
+- **I7**: `SystemExit`/`KeyboardInterrupt` escapes sandbox `except Exception` — crashes entire process. `raise SystemExit(0)` is plain syntax, not blocked.
+- **I8**: Analysis loader (`statistics/loader.py`) has no sandbox validation before `exec_module` — inconsistent with strategy loader which validates first.
+- **I9**: `scan_results` table never pruned — ~2,592 rows/day, ~946K/year unbounded growth.
+- **I10**: `_close_qty` and `record_exchange_fill` return exit-only `fee` in result dict, but PnL uses `total_fee` (entry+exit). Notifications underreport fees.
+- **I11**: `/health` Total Return uses `paper_balance_usd` in live mode — wrong baseline. Live portfolio starts from exchange balance, not paper config.
+- **I12**: Strategy handler returns double-encoded JSON columns (`backtest_result`, `paper_test_result`, etc.) — consumers must parse twice.
+
+### Low (13)
+
+- **I13**: `scan_results` update loop uses wrong signal's action/confidence when multiple signals target same symbol.
+- **I14**: Portfolio `initialize` restores stale cash from snapshot — mid-day crash leaves cash from last 23:59 snapshot while positions are current.
+- **I15**: `reset_daily` doesn't unhalt daily-loss halt — persists forever, requires manual `/unhalt`. Problematic for autonomous system.
+- **I16**: Backtester no daily trade count limit simulation (`max_daily_trades` not enforced).
+- **I17**: Backtester no consecutive-loss halt simulation (`rollback_consecutive_losses` not enforced).
+- **I18**: `orchestrator_observations` INSERT OR REPLACE never replaces — UNIQUE includes `cycle_id` which is always unique.
+- **I19**: `_run_backtest` no timeout on `Strategy()` instantiation after `exec_module`.
+- **I20**: `orchestrator_log` table never pruned — slow growth but unbounded.
+- **I21**: `KrakenREST.private()` mutates caller's `data` dict by adding `nonce` key.
+- **I22**: WebSocket `_listen` accepts NaN/inf prices — `float("NaN")` is truthy, passes `if price` check.
+- **I23**: `_place_exchange_sl_tp` no guard against near-zero qty below Kraken minimums.
+- **I24**: Sandbox detection via module `__name__` — different names in sandbox/backtest/production.
+- **I25**: Dead `last_error` variable in `ai_client.py`.
+
+### Test Coverage Gaps (3)
+
+- **T1**: No tests for REST query param filtering (since/until/symbol/action).
+- **T2**: No test for `cmd_thought` with actual data or chunking.
+- **T3**: No test for error_middleware 500 response.
+
+### Dismissed (3)
+- Fee format ambiguity — docs issue, shell code handles correctly
+- cmd_thought chunk sizing — cosmetic
+- Price fallback 0 default — truthy `or` chain correctly rejects
+
+### Files to Modify
+- `src/strategy/sandbox.py` — I1 (transitive src imports), I7 (SystemExit)
+- `src/statistics/sandbox.py` — I1 (transitive src imports), I7 (SystemExit)
+- `src/statistics/loader.py` — I8 (validate before exec)
+- `src/main.py` — I2 (reconcile risk counters), I13 (scan_results signal)
+- `src/shell/portfolio.py` — I3 (partial SL/TP re-place), I10 (fee→total_fee), I14 (cash reconciliation), I15 (unhalt daily-loss)
+- `src/shell/risk.py` — I15 (reset_daily unhalt)
+- `src/strategy/backtester.py` — I4 (partial SELL), I5 (average-in max_positions), I6 (fee in cash check), I16 (daily trades), I17 (consecutive losses)
+- `src/shell/data_store.py` — I9 (scan_results prune), I20 (orchestrator_log prune)
+- `src/telegram/commands.py` — I11 (/health live baseline)
+- `src/api/routes.py` — I12 (JSON decode strategy columns)
+- `src/orchestrator/orchestrator.py` — I18 (observations UNIQUE), I19 (Strategy() timeout)
+- `src/shell/kraken.py` — I21 (data dict copy), I22 (NaN/inf guard)
+- `src/orchestrator/ai_client.py` — I25 (dead variable)
+- `tests/test_integration.py` — T1, T2, T3, new tests for I1/I5/I7
+- `src/shell/contract.py` — RiskLimits: added max_daily_trades + rollback_consecutive_losses fields
+- `src/shell/portfolio.py` — I23 (near-zero qty guard)
+
+### Implementation Results (25 fixes + 3 tests)
+
+**All 25 production fixes applied:**
+- I1 (CRITICAL): `ALLOWED_SRC_IMPORTS` allowlist in both sandboxes — blocks transitive `src.*` but allows `src.shell.contract` + `src.strategy.skills.*`
+- I2: `_reconcile_orders` now calls `risk.record_trade_result(pnl)` after exit fills
+- I3: `record_exchange_fill` partial fill now re-places SL/TP for remaining qty
+- I4: Backtester SELL now supports partial sells with `size_pct` + close_fraction fee apportionment
+- I5: Backtester resolves tag BEFORE max_positions check — average-in no longer blocked
+- I6: Backtester BUY cash check includes fee: `trade_value + fee > cash`
+- I7: Both sandbox `except Exception` → `except BaseException` (catches SystemExit)
+- I8: `statistics/loader.py` validates analysis module before `exec_module`
+- I9: `prune_old_data()` now prunes `scan_results` (30d) and `orchestrator_log` (1yr)
+- I10: `_close_qty` + `record_exchange_fill` return `total_fee` (entry+exit) in result dict
+- I11: `/health` Total Return accounts for capital events (deposits/withdrawals)
+- I12: Strategy handler parses JSON string columns (`backtest_result`, `paper_test_result`) before response
+- I13: scan_results update uses `executed_symbols` dict with correct per-symbol signal data
+- I14: Portfolio `initialize` does first-principles cash reconciliation from DB
+- I15: `reset_daily()` auto-unhalts daily-loss halts (matches autonomous fund design)
+- I16: Backtester enforces `max_daily_trades` limit per day
+- I17: Backtester enforces `rollback_consecutive_losses` halt (persists across days)
+- I18: Skipped — `INSERT OR REPLACE` on `date` column works correctly with existing UNIQUE constraint
+- I19: `_run_backtest` wraps both `exec_module` AND `Strategy()` instantiation in timeout
+- I20: `prune_old_data()` prunes `orchestrator_log` (>1yr old entries)
+- I21: `KrakenREST.private()` copies caller's `data` dict before mutating
+- I22: WebSocket `_listen` guards with `math.isfinite(price)` to reject NaN/inf
+- I23: `_place_exchange_sl_tp` returns early if `qty <= 0.000001`
+- I24: Skipped — not actionable (module __name__ detection is an edge case)
+- I25: Removed dead `last_error` variable from `ai_client.py`
+
+**Contract change:** `RiskLimits` dataclass now includes `max_daily_trades` (default=20) and `rollback_consecutive_losses` (default=15). Both main.py and orchestrator.py pass config values.
+
+**3 new tests:**
+- `test_sandbox_blocks_transitive_src_imports` — verifies `src.shell.config` blocked, `src.shell.contract` allowed, `src.strategy.skills.*` allowed
+- `test_backtester_daily_trade_count_and_consecutive_loss_halt` — verifies daily trade count limit bounds the strategy
+- `test_websocket_nan_price_ignored` — verifies `math.isfinite` guard and `price_age()` behavior
+
+**1 test updated:** `test_execute_sell_live_fill_confirmation` — expects `total_fee` (entry+exit) instead of exit-only fee
+
+**Tests: 137/137 passing** (was 134/134)

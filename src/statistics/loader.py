@@ -59,6 +59,13 @@ def load_analysis_module(module_name: str) -> AnalysisBase:
     if not path.exists():
         raise RuntimeError(f"Analysis module not found: {path}")
 
+    # Validate before loading (defense-in-depth, matching strategy loader pattern)
+    from src.statistics.sandbox import validate_analysis_module
+    code = path.read_text()
+    validation = validate_analysis_module(code, module_name)
+    if not validation.passed:
+        raise RuntimeError(f"Analysis validation failed: {validation.errors}")
+
     sys_module_name = f"analysis_{module_name}"
 
     # Remove old module if reloading

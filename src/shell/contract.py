@@ -100,6 +100,8 @@ class RiskLimits:
     max_daily_loss_pct: float
     max_drawdown_pct: float
     max_position_pct: float = 0.25
+    max_daily_trades: int = 20
+    rollback_consecutive_losses: int = 15
 
 
 # --- Output Types (Strategy -> Shell) ---

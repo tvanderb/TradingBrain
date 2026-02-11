@@ -67,6 +67,18 @@ def _get_dotted_name(node: ast.expr) -> str | None:
     return None
 
 
+ALLOWED_SRC_IMPORTS = {
+    "src.shell.contract",
+    "src.strategy.skills",
+}
+
+
+def _is_allowed_src_import(module_path: str) -> bool:
+    """Check if an src.* import is in the allowlist."""
+    return any(module_path == allowed or module_path.startswith(allowed + ".")
+               for allowed in ALLOWED_SRC_IMPORTS)
+
+
 def check_imports(code: str) -> list[str]:
     """Check for forbidden imports, calls, and attribute access in strategy code."""
     errors = []
@@ -81,12 +93,16 @@ def check_imports(code: str) -> list[str]:
                 root = alias.name.split(".")[0]
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: {alias.name}")
+                elif root == "src" and not _is_allowed_src_import(alias.name):
+                    errors.append(f"Forbidden import: {alias.name} (only src.shell.contract and src.strategy.skills.* allowed)")
 
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 root = node.module.split(".")[0]
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: from {node.module}")
+                elif root == "src" and not _is_allowed_src_import(node.module):
+                    errors.append(f"Forbidden import: from {node.module} (only src.shell.contract and src.strategy.skills.* allowed)")
 
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
@@ -246,7 +262,7 @@ def validate_strategy(code: str) -> SandboxResult:
         if not isinstance(interval, int) or interval < 1:
             warnings.append(f"scan_interval_minutes={interval} is invalid, must be positive int")
 
-    except Exception as e:
+    except BaseException as e:
         errors.append(f"Runtime error: {type(e).__name__}: {e}")
     finally:
         # Cleanup

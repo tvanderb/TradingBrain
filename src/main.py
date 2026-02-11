@@ -113,6 +113,8 @@ class TradingBrain:
                 max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                 max_drawdown_pct=self._config.risk.max_drawdown_pct,
                 max_position_pct=self._config.risk.max_position_pct,
+                max_daily_trades=self._config.risk.max_daily_trades,
+                rollback_consecutive_losses=self._config.risk.rollback_consecutive_losses,
             )
             self._strategy.initialize(risk_limits, self._config.symbols)
 
@@ -385,6 +387,8 @@ class TradingBrain:
                             order_tag, fill_price, filled_volume, fee,
                         )
                         if result:
+                            if result.get("pnl") is not None:
+                                self._risk.record_trade_result(result["pnl"])
                             log.warning("reconcile.exit_fill_processed", tag=order_tag, pnl=result.get("pnl"))
                     elif purpose == "entry" and order_tag and filled_volume > 0:
                         log.warning("reconcile.entry_fill_while_down",
@@ -734,16 +738,15 @@ class TradingBrain:
                             "reasoning": signal.reasoning,
                         }
 
-            # Update scan_results with signal info for signals that were actually executed
-            for signal in signals:
-                if signal.symbol in executed_symbols:
-                    sym_data = scan_symbols.get(signal.symbol, {})
-                    if sym_data and sym_data.get("signal"):
-                        await self._db.execute(
-                            """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
-                               WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
-                            (signal.action.value, signal.confidence, signal.symbol, signal.symbol),
-                        )
+            # Update scan_results with signal info for symbols that had executed signals
+            for symbol in executed_symbols:
+                sig_data = scan_symbols.get(symbol, {}).get("signal")
+                if sig_data:
+                    await self._db.execute(
+                        """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
+                           WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
+                        (sig_data["action"], sig_data["confidence"], symbol, symbol),
+                    )
 
             await self._db.commit()
 
@@ -1065,6 +1068,8 @@ class TradingBrain:
                     max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                     max_drawdown_pct=self._config.risk.max_drawdown_pct,
                     max_position_pct=self._config.risk.max_position_pct,
+                    max_daily_trades=self._config.risk.max_daily_trades,
+                    rollback_consecutive_losses=self._config.risk.rollback_consecutive_losses,
                 )
                 self._strategy.initialize(risk_limits, self._config.symbols)
                 # Attempt to restore strategy state after hot-reload
