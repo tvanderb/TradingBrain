@@ -1367,3 +1367,355 @@ Existing test updates:
 
 ### Test Results
 - **74/74 passing** (13 new + existing 61)
+
+## Session B (2026-02-10) — D5 (Widen Risk Limits) + D7 (Fill Confirmation) + D4 (Exchange-Native SL/TP)
+
+### Context
+Three deferred items from Session A's position system audit. D5 independent. D7 prerequisite for D4.
+
+### Phase 1: D5 — Widen Risk Limits
+Pure config changes — risk limits widened to emergency-only backstops:
+- `max_position_pct`: 0.15 → 0.25
+- `max_daily_loss_pct`: 0.06 → 0.10
+- `max_trade_pct`: 0.07 → 0.10
+- `max_drawdown_pct`: 0.12 → 0.40
+- `rollback max_daily_loss_pct`: 0.08 → 0.15
+
+Updated: `risk_limits.toml`, `config.py` defaults, test assertions.
+
+### Phase 2: D7 — Order Fill Confirmation
+Replace "assumed fill" pattern in live mode with actual Kraken fill data:
+- `KrakenREST.query_order()` — query order status via QueryOrders API
+- `orders` table — tracks all exchange orders with fill data
+- `PortfolioTracker._confirm_fill()` — polls Kraken for fill, updates DB
+- `_execute_buy()` live path — uses actual fill_price, volume, fee from Kraken
+- `_close_qty()` live path — same pattern for exits
+- `_reconcile_orders()` in main.py — startup check for stale orders
+- Paper mode completely unchanged — no Kraken calls
+
+### Phase 3: D4 — Exchange-Native SL/TP Orders
+After BUY fills in live mode, place SL/TP on Kraken for server-down protection:
+- `KrakenREST.place_conditional_order()` — place stop-loss/take-profit orders
+- `conditional_orders` table — tracks SL/TP order pairs per position
+- `_place_exchange_sl_tp()` — places both orders with 3 retries each
+- `_cancel_exchange_sl_tp()` — cancels both orders on position close
+- Wired into BUY (place after fill), CLOSE (cancel before close), MODIFY (cancel old + place new)
+- `_position_monitor()` dual-path: live checks exchange orders first, paper uses client-side only
+- `_check_conditional_orders()` — polls Kraken for SL/TP fills, records trades with actual data
+- `_emergency_stop()` — cancels all conditional orders before closing positions
+- Shutdown — marks all active conditionals as canceled in DB
+- `_reconcile_orders()` — also checks orphaned conditional orders at startup
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `config/risk_limits.toml` | D5 values |
+| `src/shell/config.py` | D5 defaults |
+| `src/shell/kraken.py` | `query_order()`, `place_conditional_order()` |
+| `src/shell/database.py` | `orders` + `conditional_orders` tables + indexes |
+| `src/shell/portfolio.py` | `_confirm_fill()`, `_place_exchange_sl_tp()`, `_cancel_exchange_sl_tp()`, live path rewrites |
+| `src/main.py` | `_reconcile_orders()`, `_check_conditional_orders()`, `_handle_sl_tp_trigger()`, dual-path monitor, emergency/shutdown cleanup |
+| `src/statistics/readonly_db.py` | Schema descriptions for new tables |
+| `tests/test_integration.py` | 14 new tests, 2 updated |
+
+### New Tests
+D5:
+- `test_config_widened_risk_limits` — verifies new values
+
+D7:
+- `test_orders_table_exists` — schema verification
+- `test_confirm_fill_success` — mock closed order, verify fill data
+- `test_confirm_fill_timeout` — mock open order, verify TimeoutError
+- `test_confirm_fill_canceled` — mock canceled, verify RuntimeError
+- `test_execute_buy_live_fill_confirmation` — live BUY with actual fill data
+- `test_execute_sell_live_fill_confirmation` — live CLOSE with actual fill data
+- `test_paper_mode_no_fill_confirmation` — paper mode unchanged
+
+D4:
+- `test_conditional_orders_table_exists` — schema verification
+- `test_place_exchange_sl_tp` — places SL + TP, records in DB
+- `test_cancel_exchange_sl_tp` — cancels on Kraken + DB
+- `test_modify_updates_exchange_sl_tp` — MODIFY cancels old, places new
+- `test_paper_mode_no_conditional_orders` — paper mode no-op
+- `test_buy_live_places_sl_tp` — BUY with SL/TP triggers exchange placement
+
+Updated:
+- `test_risk_basic_checks` — size_pct 0.10 → 0.15 (exceeds new limit)
+- `test_database_schema` — added orders + conditional_orders to required tables
+
+### Test Results
+- **88/88 passing** (14 new + 74 existing)
+
+### Session B Audit Fixes
+
+Audit identified 6 findings (2 MEDIUM, 4 LOW). All resolved except F4 (timestamp inconsistency — codebase-wide, not in scope).
+
+**F1 (MEDIUM): SL/TP canceled before sell confirms** — `_close_qty()` canceled exchange SL/TP before the sell order was placed. If the sell failed, position left unprotected.
+- **Fix**: Added `sl_tp_canceled` flag. On both failure paths (no txid, fill timeout/cancel), SL/TP are re-placed via `_place_exchange_sl_tp()`.
+
+**F2 (MEDIUM): Full position deleted on partial SL/TP fill** — `_check_conditional_orders()` in main.py always deleted the entire position, even if the exchange only partially filled the SL/TP order.
+- **Fix**: Created `record_exchange_fill()` public method on PortfolioTracker. Handles full and partial fills with proportional entry fee calculation.
+
+**F3 (LOW): Direct private attribute access** — main.py was reaching into `portfolio._positions`, `portfolio._cash`, `portfolio._fees_today` directly.
+- **Fix**: Refactored `_check_conditional_orders()` to call `record_exchange_fill()` instead of manipulating private state.
+
+**F5 (LOW): Conditional order expiry not recovered** — `_reconcile_orders()` detected expired/canceled conditional orders but didn't re-place them.
+- **Fix**: Added `needs_replace`/`found_fill` logic. If orders expired but no fill detected and position still exists, SL/TP are re-placed.
+
+**F6 (LOW): Emergency stop race condition** — If a conditional order filled on Kraken during `_emergency_stop()`, a ghost position could remain.
+- **Fix**: Added post-close check that queries Kraken for filled conditionals and uses `record_exchange_fill()` to clean up.
+
+**Bonus fix**: Empty txid list crash — `result.get("txid", [None])[0]` threw `IndexError` when Kraken returned `{"txid": []}`. Fixed all 4 instances to `(result.get("txid") or [None])[0]`.
+
+#### New Tests (3)
+- `test_record_exchange_fill` — full fill removes position, updates cash, records trade
+- `test_record_exchange_fill_partial` — partial fill reduces qty proportionally
+- `test_close_replaces_sl_tp_on_sell_failure` — verifies SL/TP re-placed on sell failure
+
+#### Test Results
+- **91/91 passing** (88 + 3 new)
+
+## Session B (cont.) — Final System Audit
+
+### Audit Scope
+Full codebase audit with 5 parallel agents covering every Python source file. Focus: end-to-end functionality, system oversights, alignment with crypto hedge fund goal. This is the most comprehensive audit to date — all findings deduplicated across agents.
+
+### Summary
+| Severity | Count |
+|----------|-------|
+| CRITICAL | 8 |
+| HIGH MEDIUM | 12 |
+| MEDIUM | 20 |
+| LOW | 19 |
+| COSMETIC | 6 |
+| Test Gaps (HIGH) | 10 |
+| **Total** | **75** |
+
+### CRITICAL (8) — Must fix before live trading
+
+| ID | Finding | Files |
+|----|---------|-------|
+| C1 | No asyncio.Lock — scan loop and position monitor can execute signals concurrently | main.py, portfolio.py |
+| C2 | Risk counters (daily_trades, daily_pnl, consecutive_losses) lost on restart | risk.py |
+| C3 | TOCTOU — batch signal processing uses stale position count/portfolio value | main.py, risk.py |
+| C4 | _reconcile_orders() updates orders table but NOT positions/cash/trades | main.py |
+| C5 | Live buy can drive cash negative (fill price > ticker price) | portfolio.py |
+| C6 | SL/TP handler drops list results silently — no P&L/risk/notifications | main.py |
+| C7 | Sandbox bypass: getattr, __builtins__, __subclasses__() not blocked | strategy/sandbox.py, statistics/sandbox.py |
+| C8 | load_strategy() has no sandbox validation before exec_module() | strategy/loader.py |
+
+### HIGH MEDIUM (12) — Strongly recommended before live
+
+| ID | Finding | Files |
+|----|---------|-------|
+| H1 | _confirm_fill timeout doesn't query for last-second fill — phantom holdings | portfolio.py |
+| H2 | Partial fills on timeout unrecorded — position qty, SL/TP, cash all wrong | portfolio.py |
+| H3 | SL/TP canceled before sell order — unprotected window | portfolio.py |
+| H4 | Shutdown doesn't cancel conditional orders individually | main.py |
+| H5 | Analysis sandbox missing many forbidden imports vs strategy sandbox | statistics/sandbox.py |
+| H6 | Analysis sandbox missing attribute call checks | statistics/sandbox.py |
+| H7 | LOAD_EXTENSION not blocked in ReadOnlyDB | statistics/readonly_db.py |
+| H8 | No timeout on analysis module execution in orchestrator | orchestrator.py |
+| H9 | Backtest import has no timeout (exec_module outside wait_for) | orchestrator.py |
+| H10 | WebSocket price staleness undetected | kraken.py |
+| H11 | Special migration backfill not committed before subsequent ops | database.py |
+| H12 | trade_value variable fragile scope in risk.py | risk.py |
+
+### MEDIUM (20)
+
+| ID | Finding | Files |
+|----|---------|-------|
+| M1 | Paper slippage applied to limit orders (should be zero) | portfolio.py |
+| M2 | Asymmetric limit price logic between buy and sell | portfolio.py |
+| M3 | close_fraction not clamped >1 on overfill | portfolio.py |
+| M4 | No SL/TP re-placement after partial conditional fill | main.py |
+| M5 | Emergency stop races with position monitor | main.py |
+| M6 | Daily reset doesn't update _daily_start_value | main.py |
+| M7 | Scan result update loop iterates all signals, not just executed | main.py |
+| M8 | Live cash load from Kraken can double-count with stale positions | portfolio.py |
+| M9 | Timezone mismatch: datetime.now() vs UTC candle timestamps | data_store.py, portfolio.py |
+| M10 | Token budget pre-flight too low (50K vs ~200K actual) | orchestrator.py |
+| M11 | No normalization of AI decision type strings | orchestrator.py |
+| M12 | No deployment rollback on mid-sequence failure | orchestrator.py |
+| M13 | Stale total_value for multi-signal sizing in backtester | backtester.py |
+| M14 | No risk halt simulation in backtester | backtester.py |
+| M15 | F-string SQL in trade_performance.py (future injection risk) | trade_performance.py |
+| M16 | WebSocket token exposed in URL query string | websocket.py |
+| M17 | /ask vulnerable to prompt injection | commands.py |
+| M18 | No rate limiting on /ask (can exhaust daily token budget) | commands.py |
+| M19 | Telegram retry silently drops critical alerts + blocks caller | notifications.py |
+| M20 | Full config with secrets passed to API context | server.py |
+
+### LOW (19)
+
+Tag reuse on closed positions, mutable dict to thread executor, two-phase commit gap, can't downgrade intent to DAY, failed signals not recorded in audit trail, partial SL/TP placement silently degrades, strategy state not restored after reload, nonce collision after rapid restart, get_candles fragile dual-branch params, executemany rowcount unreliable, fee schedule rows no dedup, clamp_signal mutates input, snapshot/reset timing gap, Kraken error join on non-string, PAIR_REVERSE missing extended names, get_spread returns 0 for zero-bid, missing config field validation, signal pruning changes benchmark semantics, _conn accessible to bypass ReadOnlyDB.
+
+### COSMETIC (6)
+
+Duplicate comment numbering in stop(), datetime.utcnow() deprecated, httpx client not closed in error paths, missing scan_results index, inconsistent timezone handling, orchestrator accesses private _daily_tokens_used.
+
+### Test Coverage Gaps (10 HIGH)
+
+| ID | Missing Test | Risk |
+|----|-------------|------|
+| T1 | _position_monitor() — zero test coverage | SL/TP monitoring untested |
+| T2 | _emergency_stop() — zero test coverage | Kill switch untested |
+| T3 | _reconcile_orders() — zero test coverage | Crash recovery untested |
+| T4 | _check_conditional_orders() — zero test coverage | Exchange SL/TP fill detection untested |
+| T5 | _scan_loop() end-to-end — zero test coverage | Trading pipeline never tested as integrated flow |
+| T6 | ALL KrakenREST methods — zero HTTP-level tests | Response format changes would be silent |
+| T7 | _sign() authentication — zero test coverage | HMAC signing never verified |
+| T8 | Orchestrator evolution pipeline e2e | Strategy change pipeline never tested |
+| T9 | snapshot_daily() — zero direct test | Daily P&L recording untested |
+| T10 | update_prices() SL/TP trigger logic | Client-side SL/TP checking untested |
+
+---
+
+## Session C (2026-02-10) — Audit Findings Fix (63 actionable items)
+
+5-agent audit produced 75 findings across 5 reports (core, orchestrator, shell, API, tests). After deduplication (5 duplicates) and false positive removal (7 items), **63 fixes were applied across 5 phases**.
+
+### Phase 1: Critical Safety (8 fixes)
+- `asyncio.Lock` for trade execution serialization (scan loop, position monitor, emergency stop, conditional orders)
+- Reconciliation processes fills for orphaned orders
+- `_handle_sl_tp_trigger` handles list results (multi-close)
+- Post-fill cash validation with critical log warning
+- Risk counter restoration from DB on restart (daily trades, PnL, consecutive losses)
+- TOCTOU refresh: portfolio_value updated after each signal execution
+- `trade_value = 0.0` init at top of `check_signal()`
+- Post-timeout fill check in `_confirm_fill()` (final query before raising)
+
+### Phase 2: Security Hardening (8 fixes)
+- Sandbox blocks `getattr/setattr/delattr/globals/vars/dir` calls
+- Sandbox blocks dunder attribute chains (`__class__.__bases__.__subclasses__`)
+- `load_strategy()` validates via sandbox before importing
+- Analysis sandbox aligned with strategy sandbox (all forbidden imports/calls/dunders)
+- ReadOnlyDB blocks `LOAD_EXTENSION`
+- ReadOnlyDB strips null bytes to prevent bypass
+- Backtest module import wrapped in 10s timeout
+- Analysis module `analyze()` wrapped in 30s timeout
+
+### Phase 3: Medium Fixes (25 fixes)
+- Clamp `close_fraction` to 1.0
+- No slippage for paper LIMIT orders (buy + sell)
+- Symmetric limit price auto-calculation for sells
+- Scheduler pause/resume during emergency stop
+- `_daily_start_value` refresh in daily reset
+- Scan results only updated for executed symbols
+- Price flush to DB before daily snapshot
+- Bounded date range for daily trades query
+- WebSocket price staleness tracking (`price_age()`)
+- `get_candles()` dual-branch refactored to single clean path
+- `datetime.now()` → UTC in data_store aggregation
+- Commit after special migration backfill
+- Decision type normalization (`.strip().upper()`)
+- Token budget threshold 50K → 200K
+- Backtester recalculates `total_value` after each trade
+- Backtester daily loss halt simulation
+- WebSocket token error messages unified
+- `/ask` prompt injection mitigation
+- `/ask` rate limiting (30s cooldown)
+- Non-blocking Telegram notification dispatch
+- Unauthorized Telegram access logging
+- `daily_tokens_used` public property on AIClient
+
+### Phase 4: Low + Cosmetic (15 fixes)
+- Intent downgrade fix in MODIFY
+- Failed signals recorded in audit trail
+- Strategy state restore after hot-reload
+- Pass `dict(markets)` copy to thread executor
+- `get_spread` returns 1.0 for zero-bid
+- Config validates `max_daily_trades`, `rollback_consecutive_losses`, `fee.check_interval_hours`
+- `PAIR_REVERSE` extended names (XXBTZUSD, XETHZUSD, XXDGUSD, etc.)
+- `datetime.utcnow()` → `datetime.now(timezone.utc)` in commands
+- `/v1/performance` result limit (365 max)
+- Concurrent WebSocket broadcast via `asyncio.gather`
+- Duplicate comment numbering fix
+- MODIFY signal `__post_init__` warns on non-zero `size_pct`
+- Concurrent orchestration guard (`_running` flag)
+- `/ask` input length limit (500 chars)
+
+### Phase 5: New Tests (16 tests)
+- `test_risk_counters_restored_on_restart` — DB counter restoration
+- `test_sandbox_blocks_getattr_bypass` — getattr() blocked
+- `test_sandbox_blocks_dunder_access` — dunder chain blocked
+- `test_loader_validates_before_load` — sandbox before import
+- `test_analysis_sandbox_aligned` — set subset check
+- `test_readonly_db_blocks_load_extension` — LOAD_EXTENSION blocked
+- `test_readonly_db_blocks_null_byte_bypass` — null byte stripping
+- `test_daily_reset_updates_start_value` — start value refresh
+- `test_websocket_price_staleness` — price_age() tracking
+- `test_pair_reverse_extended_names` — XXBTZUSD mapping
+- `test_spread_zero_bid` — 1.0 return for zero bid
+- `test_performance_endpoint_limit` — 365-day limit
+- `test_ask_rate_limiting` — cooldown tracking
+- `test_config_validates_daily_trades` — validation check
+- `test_modify_signal_warns_on_size_pct` — __post_init__ doesn't crash
+- `test_ai_client_daily_tokens_property` — public property
+
+### Result: **107/107 tests passing** (was 91/91)
+
+### Files Modified (19 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `strategy/sandbox.py`, `strategy/loader.py`, `statistics/sandbox.py`, `statistics/readonly_db.py`, `orchestrator/orchestrator.py`, `orchestrator/ai_client.py`, `shell/kraken.py`, `shell/data_store.py`, `shell/database.py`, `shell/config.py`, `shell/contract.py`, `telegram/commands.py`, `telegram/notifications.py`, `api/websocket.py`, `api/routes.py`, `strategy/backtester.py`, `tests/test_integration.py`
+
+---
+
+## Session D (2026-02-10) — Final Audit & Fixes
+
+### Audit: 28 Findings (3 Critical, 12 Medium, 13 Low)
+5-agent audit focused on "does it do what it's supposed to do, free of bugs."
+
+### Critical Fixes (3)
+- **C1**: Emergency stop now acquires `_trade_lock`, pauses both scan + position_monitor jobs
+- **C2**: Partial fill at timeout returns partial result instead of raising TimeoutError
+- **C3**: Backtester parity — BUY averaging-in, CLOSE-all semantics, max_drawdown halt simulation
+
+### Medium Fixes (12)
+- **M1**: Daily loss limit uses start-of-day value (fixed reference) not current portfolio (moving target)
+- **M2**: AI usage endpoint uses correct dict keys (`used`, `models`)
+- **M3**: Config fee validation uses correct attribute name
+- **M4**: datetime.fromisoformat calls add UTC timezone info
+- **M5**: Candle storage uses INSERT OR REPLACE (not IGNORE) so updated data replaces stale
+- **M6**: ReadOnlyDB uses name-mangled `__conn` + `__getattr__` blocks access
+- **M7**: Kraken nonce computation moved inside rate_lock (atomic)
+- **M8**: Spread formula uses `(ask-bid)/ask` (standard) not `/bid`
+- **M9**: Orchestrator sends cycle_completed notification on early budget return
+- **M10**: Paper test `ends_at` uses UTC
+- **M11**: Backtester day boundary detection moved BEFORE trading (correct start-of-day value)
+- **M12**: Removed stale XXLMZUSD from PAIR_REVERSE
+
+### Low Fixes (13)
+- **L1**: `get_event_loop()` → `get_running_loop()` (deprecation)
+- **L3**: Position monitor checks WS price staleness, falls back to REST for stale (>5min)
+- **L4**: All naive `datetime.now()` → `datetime.now(timezone.utc)` in reconcile/conditional/emergency/shutdown
+- **L5**: MODIFY with default intent=DAY no longer downgrades SWING/POSITION positions
+- **L6**: `_confirm_fill` uses wall-clock time (monotonic deadline) instead of accumulated sleep
+- **L7**: SL/TP order inserts include `placed_at` timestamp
+- **L8**: Risk counter restore uses UTC timestamps
+- **L9**: `store_candles` returns `len(rows)` (reliable) instead of cursor.rowcount
+- **L11**: JSON extractor only processes backslashes inside strings
+- **L12**: `get_ohlc` since parameter uses `is not None` check (allows since=0)
+- **L13**: SL/TP trigger reads position's actual intent (not hardcoded Intent.DAY)
+
+### New Tests (11)
+- `test_backtester_close_all_no_tag` — CLOSE without tag closes all positions
+- `test_backtester_buy_averaging_in` — Multiple BUYs for same symbol allowed
+- `test_backtester_drawdown_halt` — Max drawdown halts new entries
+- `test_backtester_day_boundary_start_value` — Day start value set before trading
+- `test_modify_no_intent_downgrade` — MODIFY with default intent preserves SWING
+- `test_json_extractor_backslash_outside_string` — Backslash handling correctness
+- `test_spread_uses_ask_denominator` — Spread formula verification
+- `test_readonly_db_conn_access_blocked` — Connection access blocked
+- `test_nonce_inside_rate_lock` — Nonce inside lock verified
+- `test_position_monitor_staleness_check` — Staleness detection exists
+- `test_data_store_rowcount_uses_len` — Reliable row count
+
+### Test Fixes (3)
+- `test_readonly_db_blocks_load_extension` — Updated regex to match new error message
+- `test_risk_counters_restored_on_restart` — Uses UTC timestamps to match risk manager
+- `test_api_server_endpoints` — Mock uses correct dict keys (`used`, `models`)
+
+### Result: **118/118 tests passing** (was 107/107)
+
+### Files Modified (10 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `routes.py`, `config.py`, `commands.py`, `data_store.py`, `readonly_db.py`, `kraken.py`, `orchestrator.py`, `backtester.py`, `tests/test_integration.py`

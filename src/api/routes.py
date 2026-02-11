@@ -162,6 +162,7 @@ async def performance_handler(request: web.Request) -> web.Response:
 
     since = request.query.get("since")
     until = request.query.get("until")
+    limit = min(_safe_int(request.query.get("limit", "365"), 365), 365)
 
     query = "SELECT * FROM daily_performance WHERE 1=1"
     params = []
@@ -173,7 +174,8 @@ async def performance_handler(request: web.Request) -> web.Response:
         query += " AND date <= ?"
         params.append(until)
 
-    query += " ORDER BY date DESC"
+    query += " ORDER BY date DESC LIMIT ?"
+    params.append(limit)
 
     rows = await db.fetchall(query, tuple(params))
     data = [dict(row) for row in rows]
@@ -283,11 +285,11 @@ async def ai_usage_handler(request: web.Request) -> web.Response:
     usage = await ai.get_daily_usage()
     data = {
         "today": {
-            "total_tokens": usage.get("total_tokens", 0),
+            "total_tokens": usage.get("used", 0),
             "total_cost_usd": round(usage.get("total_cost", 0), 4),
             "budget_limit": config.ai.daily_token_limit,
             "budget_remaining": ai.tokens_remaining,
-            "by_model": usage.get("by_model", {}),
+            "by_model": usage.get("models", {}),
         },
     }
     return web.json_response(_envelope(data, config.mode))

@@ -15,13 +15,13 @@ log = structlog.get_logger()
 
 # Patterns that indicate a write operation
 _WRITE_PATTERNS = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*=|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)",
+    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*=|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|LOAD_EXTENSION)",
     re.IGNORECASE,
 )
 
 # CTE bypass: WITH ... INSERT/UPDATE/DELETE/etc.
 _CTE_WRITE_PATTERN = re.compile(
-    r"^\s*WITH\b.*\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b",
+    r"^\s*WITH\b.*\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|LOAD_EXTENSION)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -33,12 +33,23 @@ class ReadOnlyDB:
     """Read-only database wrapper. Only allows SELECT queries."""
 
     def __init__(self, conn: aiosqlite.Connection):
-        self._conn = conn
+        self.__conn = conn  # name-mangled to prevent direct access from modules
+
+    def __getattr__(self, name: str):
+        """Block access to internal connection attributes."""
+        if name in ("_conn", "__conn", "_ReadOnlyDB__conn"):
+            raise AttributeError("Direct connection access not allowed")
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def _check_readonly(self, sql: str) -> None:
         """Raise ValueError if the SQL is not a read-only query."""
+        # Strip null bytes to prevent bypass
+        sql = sql.replace('\x00', '')
         # Strip comments to prevent bypass via /* comment */ DROP TABLE
         cleaned = _SQL_COMMENT.sub("", sql)
+        # Block load_extension() as a SQL function (e.g. SELECT load_extension(...))
+        if re.search(r'\bload_extension\s*\(', cleaned, re.IGNORECASE):
+            raise ValueError(f"load_extension() blocked in read-only mode: {cleaned[:80]}")
         # Check for CTE write bypass (WITH ... INSERT/UPDATE/DELETE)
         if _CTE_WRITE_PATTERN.search(cleaned):
             raise ValueError(f"Write operation blocked in read-only mode (CTE): {cleaned[:80]}")
@@ -51,19 +62,19 @@ class ReadOnlyDB:
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
         """Execute a read-only SQL query."""
         self._check_readonly(sql)
-        return await self._conn.execute(sql, params)
+        return await self.__conn.execute(sql, params)
 
     async def fetchone(self, sql: str, params: tuple = ()) -> dict | None:
         """Execute query and return one row as dict, or None."""
         self._check_readonly(sql)
-        cursor = await self._conn.execute(sql, params)
+        cursor = await self.__conn.execute(sql, params)
         row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def fetchall(self, sql: str, params: tuple = ()) -> list[dict]:
         """Execute query and return all rows as list of dicts."""
         self._check_readonly(sql)
-        cursor = await self._conn.execute(sql, params)
+        cursor = await self.__conn.execute(sql, params)
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -187,6 +198,38 @@ def get_schema_description() -> dict:
                 "amount": "Amount in USD",
                 "timestamp": "When the event occurred",
                 "notes": "Optional description",
+            },
+        },
+        "orders": {
+            "description": "Exchange order tracking with fill confirmation",
+            "columns": {
+                "txid": "Kraken transaction ID",
+                "tag": "Position tag",
+                "symbol": "Trading pair",
+                "side": "buy or sell",
+                "order_type": "market, limit, stop-loss, take-profit",
+                "volume": "Requested volume",
+                "status": "pending, filled, timeout, canceled, expired",
+                "filled_volume": "Actual filled volume",
+                "avg_fill_price": "Actual fill price from exchange",
+                "fee": "Exchange fee",
+                "cost": "Total cost",
+                "purpose": "entry, exit, stop_loss, take_profit",
+                "placed_at": "When the order was placed",
+                "filled_at": "When the order was filled",
+            },
+        },
+        "conditional_orders": {
+            "description": "Exchange-native stop-loss and take-profit orders",
+            "columns": {
+                "tag": "Position tag (unique identifier)",
+                "symbol": "Trading pair",
+                "entry_txid": "Transaction ID of the entry order",
+                "sl_txid": "Transaction ID of the stop-loss order on exchange",
+                "tp_txid": "Transaction ID of the take-profit order on exchange",
+                "sl_price": "Stop-loss trigger price",
+                "tp_price": "Take-profit trigger price",
+                "status": "active, canceled, filled_sl, filled_tp",
             },
         },
     }

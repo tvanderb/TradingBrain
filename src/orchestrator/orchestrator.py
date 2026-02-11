@@ -18,10 +18,11 @@ Runs daily during the 12-3am EST window:
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -303,6 +304,7 @@ class Orchestrator:
         self._data_store = data_store
         self._notifier = notifier
         self._cycle_id: str | None = None
+        self._running = False
 
     def _extract_json(self, response: str) -> dict | None:
         """Extract JSON object from AI response text.
@@ -329,13 +331,15 @@ class Orchestrator:
             if escape_next:
                 escape_next = False
                 continue
-            if c == "\\":
-                escape_next = True
-                continue
-            if c == '"' and not escape_next:
-                in_string = not in_string
-                continue
             if in_string:
+                if c == "\\":
+                    escape_next = True
+                    continue
+                if c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
                 continue
             if c == "{":
                 depth += 1
@@ -381,6 +385,10 @@ class Orchestrator:
 
     async def run_nightly_cycle(self) -> str:
         """Execute the full nightly orchestration cycle. Returns report summary."""
+        if self._running:
+            log.warning("orchestrator.already_running")
+            return "Orchestrator: Skipped — cycle already in progress."
+        self._running = True
         self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
 
@@ -389,11 +397,13 @@ class Orchestrator:
 
         try:
             # 0. Check token budget
-            if self._ai.tokens_remaining < 50000:
+            if self._ai.tokens_remaining < 200000:
                 log.warning(
                     "orchestrator.insufficient_budget",
                     remaining=self._ai.tokens_remaining,
                 )
+                if self._notifier:
+                    await self._notifier.orchestrator_cycle_completed("SKIPPED_BUDGET")
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
             # 0b. Evaluate any paper tests that have completed
@@ -409,7 +419,7 @@ class Orchestrator:
             decision = await self._analyze(context)
 
             # 3. Execute decision
-            decision_type = decision.get("decision", "NO_CHANGE")
+            decision_type = decision.get("decision", "NO_CHANGE").strip().upper()
             deployed_version = None
 
             valid_strategy_types = {
@@ -452,6 +462,8 @@ class Orchestrator:
             if self._notifier:
                 await self._notifier.system_error(f"Orchestrator cycle failed: {e}")
             raise
+        finally:
+            self._running = False
 
     async def _gather_context(self) -> dict:
         """Collect all context needed for analysis.
@@ -476,7 +488,12 @@ class Orchestrator:
             market_module = load_analysis_module("market_analysis")
             ro_db = ReadOnlyDB(self._db.conn)
             schema = get_schema_description()
-            market_report = await market_module.analyze(ro_db, schema)
+            market_report = await asyncio.wait_for(
+                market_module.analyze(ro_db, schema), timeout=30,
+            )
+        except asyncio.TimeoutError:
+            log.error("orchestrator.market_analysis_timeout")
+            market_report = {"error": "Analysis module timed out (>30s)"}
         except Exception as e:
             log.error("orchestrator.market_analysis_failed", error=str(e))
             market_report = {"error": str(e)}
@@ -485,7 +502,12 @@ class Orchestrator:
         try:
             perf_module = load_analysis_module("trade_performance")
             ro_db = ReadOnlyDB(self._db.conn)
-            perf_report = await perf_module.analyze(ro_db, schema)
+            perf_report = await asyncio.wait_for(
+                perf_module.analyze(ro_db, schema), timeout=30,
+            )
+        except asyncio.TimeoutError:
+            log.error("orchestrator.trade_performance_timeout")
+            perf_report = {"error": "Analysis module timed out (>30s)"}
         except Exception as e:
             log.error("orchestrator.trade_performance_failed", error=str(e))
             perf_report = {"error": str(e)}
@@ -937,7 +959,7 @@ Is this classification correct?
                 # Create paper test entry
                 from datetime import timedelta
 
-                ends_at = (datetime.now() + timedelta(days=paper_days)).isoformat()
+                ends_at = (datetime.now(timezone.utc) + timedelta(days=paper_days)).isoformat()
                 await self._db.execute(
                     """INSERT INTO paper_tests
                        (strategy_version, risk_tier, required_days, ends_at)
@@ -1194,7 +1216,15 @@ The orchestrator wants to change this module because: {changes[:500]}"""
 
             spec = importlib.util.spec_from_file_location("backtest_strategy", tmp_path)
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, spec.loader.exec_module, mod
+                    ),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                return False, "Strategy module import timed out (>10s) — possible infinite loop at import time"
             strategy = mod.Strategy()
 
             # Get recent 1h candle data for backtest

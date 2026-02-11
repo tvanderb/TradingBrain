@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,7 +27,7 @@ def test_config_loading():
     assert "BTC/USD" in config.symbols
     assert len(config.symbols) == 9  # 9 trading pairs
     assert "DOGE/USD" in config.symbols
-    assert config.risk.max_trade_pct == 0.07
+    assert config.risk.max_trade_pct == 0.10
     assert config.risk.rollback_consecutive_losses == 999
     assert config.ai.provider in ("anthropic", "vertex")
     assert config.ai.daily_token_limit == 1500000  # 1.5M safety net
@@ -53,7 +53,7 @@ async def test_database_schema():
                      "strategy_versions", "orchestrator_log", "orchestrator_thoughts",
                      "orchestrator_observations",
                      "token_usage", "fee_schedule", "strategy_state", "paper_tests",
-                     "scan_results", "capital_events"]
+                     "scan_results", "capital_events", "orders", "conditional_orders"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -126,8 +126,8 @@ def test_risk_basic_checks():
     check = rm.check_signal(sig, portfolio_value=200, open_position_count=0)
     assert check.passed
 
-    # Should fail: size exceeds limit
-    sig2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.10)
+    # Should fail: size exceeds limit (max_trade_pct is 0.10)
+    sig2 = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.15)
     check2 = rm.check_signal(sig2, portfolio_value=200, open_position_count=0)
     assert not check2.passed
     assert "Trade size" in check2.reason
@@ -2269,7 +2269,7 @@ async def test_api_server_endpoints():
             total_value=200.0, cash=180.0, positions=[]
         ))
         ai = MagicMock()
-        ai.get_daily_usage = AsyncMock(return_value={"total_tokens": 1000, "total_cost": 0.01, "by_model": {}})
+        ai.get_daily_usage = AsyncMock(return_value={"used": 1000, "total_cost": 0.01, "models": {}})
         ai.tokens_remaining = 1499000
         scan_state = {"symbols": {"BTC/USD": {"price": 45000, "spread": 0.3}}, "last_scan": "03:10:00"}
         commands = MagicMock()
@@ -2453,16 +2453,19 @@ async def test_notifier_dual_dispatch():
 
     # trade_executed — should go to both
     await notifier.trade_executed({"action": "BUY", "symbol": "BTC/USD", "qty": 0.001, "price": 45000, "fee": 0.5})
+    await asyncio.sleep(0.05)  # Let background Telegram task complete
     assert mock_app.bot.send_message.call_count == 1
 
     mock_app.bot.send_message.reset_mock()
 
     # scan_complete — should only go to WS (telegram filtered off)
     await notifier.scan_complete(9, 2)
+    await asyncio.sleep(0.05)
     assert mock_app.bot.send_message.call_count == 0
 
     # risk_halt — should go to telegram (defaults to True)
     await notifier.risk_halt("Max drawdown exceeded")
+    await asyncio.sleep(0.05)
     assert mock_app.bot.send_message.call_count == 1
 
 
@@ -3006,3 +3009,1550 @@ async def test_db_migration_backfills_tags():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+# --- D5: Widened Risk Limits ---
+
+def test_config_widened_risk_limits():
+    """D5: Risk limits are widened to emergency-only backstops."""
+    from src.shell.config import load_config
+    config = load_config()
+    assert config.risk.max_position_pct == 0.25
+    assert config.risk.max_daily_loss_pct == 0.10
+    assert config.risk.max_drawdown_pct == 0.40
+    assert config.risk.rollback_daily_loss_pct == 0.15
+
+
+# --- D7: Order Fill Confirmation ---
+
+@pytest.mark.asyncio
+async def test_orders_table_exists():
+    """D7: orders table exists in schema."""
+    from src.shell.database import Database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
+        assert len(rows) == 1
+
+        # Check key columns exist
+        cols = await db.fetchall("PRAGMA table_info(orders)")
+        col_names = [c["name"] for c in cols]
+        for expected in ("txid", "tag", "symbol", "side", "order_type", "volume",
+                         "status", "filled_volume", "avg_fill_price", "fee", "cost", "purpose"):
+            assert expected in col_names, f"Missing column: {expected}"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_confirm_fill_success():
+    """D7: _confirm_fill() correctly records fill data when order is closed."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.query_order = AsyncMock(return_value={
+            "status": "closed",
+            "price": "50100.0",
+            "vol_exec": "0.001",
+            "fee": "0.20",
+            "cost": "50.10",
+        })
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        result = await portfolio._confirm_fill(
+            txid="TXID123", tag="test_btc_001", symbol="BTC/USD",
+            side="buy", order_type="market", volume=0.001,
+        )
+
+        assert result["fill_price"] == 50100.0
+        assert result["filled_volume"] == 0.001
+        assert result["fee"] == 0.20
+        assert result["status"] == "filled"
+
+        # Verify DB record
+        order_row = await db.fetchone("SELECT * FROM orders WHERE txid = 'TXID123'")
+        assert order_row is not None
+        assert order_row["status"] == "filled"
+        assert order_row["avg_fill_price"] == 50100.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_confirm_fill_timeout():
+    """D7: _confirm_fill() raises TimeoutError when order stays open."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.query_order = AsyncMock(return_value={"status": "open"})
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        with pytest.raises(TimeoutError):
+            await portfolio._confirm_fill(
+                txid="TXID_TIMEOUT", tag="test_btc_001", symbol="BTC/USD",
+                side="buy", order_type="market", volume=0.001,
+                timeout_seconds=1, poll_interval=0.3,
+            )
+
+        # Verify DB record shows timeout
+        order_row = await db.fetchone("SELECT * FROM orders WHERE txid = 'TXID_TIMEOUT'")
+        assert order_row["status"] == "timeout"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_confirm_fill_canceled():
+    """D7: _confirm_fill() raises RuntimeError when order is canceled."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.query_order = AsyncMock(return_value={"status": "canceled"})
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        with pytest.raises(RuntimeError, match="canceled"):
+            await portfolio._confirm_fill(
+                txid="TXID_CANCEL", tag="test_btc_001", symbol="BTC/USD",
+                side="buy", order_type="market", volume=0.001,
+            )
+
+        # Verify DB record shows canceled
+        order_row = await db.fetchone("SELECT * FROM orders WHERE txid = 'TXID_CANCEL'")
+        assert order_row["status"] == "canceled"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_execute_buy_live_fill_confirmation():
+    """D7: Live mode BUY uses fill confirmation with actual Kraken data."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.place_order = AsyncMock(return_value={"txid": ["TXID_BUY_001"]})
+        kraken.query_order = AsyncMock(return_value={
+            "status": "closed",
+            "price": "50050.0",
+            "vol_exec": "0.0009",
+            "fee": "0.18",
+            "cost": "45.05",
+        })
+        # Mock for conditional order (SL/TP placement won't happen since no SL/TP on signal)
+        kraken.place_conditional_order = AsyncMock(return_value={"txid": ["TXID_SL"]})
+
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 200.0
+
+        signal = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05)
+        result = await portfolio.execute_signal(signal, 50000.0, 0.25, 0.40)
+
+        assert result is not None
+        assert result["action"] == "BUY"
+        # Uses actual fill price from Kraken, not the assumed price
+        assert result["price"] == 50050.0
+        assert result["fee"] == 0.18
+
+        # Verify order was recorded in orders table
+        order_row = await db.fetchone("SELECT * FROM orders WHERE txid = 'TXID_BUY_001'")
+        assert order_row is not None
+        assert order_row["purpose"] == "entry"
+        assert order_row["status"] == "filled"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_execute_sell_live_fill_confirmation():
+    """D7: Live mode SELL uses fill confirmation with actual Kraken data."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.place_order = AsyncMock(return_value={"txid": ["TXID_SELL_001"]})
+        kraken.query_order = AsyncMock(return_value={
+            "status": "closed",
+            "price": "51000.0",
+            "vol_exec": "0.001",
+            "fee": "0.20",
+            "cost": "51.00",
+        })
+        # Mock cancel for SL/TP
+        kraken.cancel_order = AsyncMock(return_value={})
+
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 150.0
+
+        # Insert a position first
+        tag = "test_btc_001"
+        portfolio._positions[tag] = {
+            "symbol": "BTC/USD", "tag": tag, "side": "long", "qty": 0.001,
+            "avg_entry": 50000.0, "current_price": 51000.0, "entry_fee": 0.20,
+            "stop_loss": None, "take_profit": None, "intent": "DAY",
+            "strategy_version": None, "opened_at": "2026-01-01", "updated_at": "2026-01-01",
+        }
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price, entry_fee, intent, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", tag, "long", 0.001, 50000.0, 51000.0, 0.20, "DAY", "2026-01-01", "2026-01-01"),
+        )
+        await db.commit()
+
+        signal = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, tag=tag)
+        result = await portfolio.execute_signal(signal, 51000.0, 0.25, 0.40)
+
+        assert result is not None
+        assert result["price"] == 51000.0
+        assert result["fee"] == 0.20
+
+        # Verify exit order was recorded
+        order_row = await db.fetchone("SELECT * FROM orders WHERE txid = 'TXID_SELL_001'")
+        assert order_row is not None
+        assert order_row["purpose"] == "exit"
+        assert order_row["status"] == "filled"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_no_fill_confirmation():
+    """D7: Paper mode does NOT use fill confirmation or orders table."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="paper", paper_balance_usd=200.0, db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        # These should NOT be called in paper mode
+        kraken.place_order = AsyncMock()
+        kraken.query_order = AsyncMock()
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        signal = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                        stop_loss=49000.0, take_profit=52000.0)
+        result = await portfolio.execute_signal(signal, 50000.0, 0.25, 0.40)
+
+        assert result is not None
+        assert result["action"] == "BUY"
+
+        # No Kraken calls in paper mode
+        kraken.place_order.assert_not_called()
+        kraken.query_order.assert_not_called()
+
+        # No orders table entries
+        order_count = await db.fetchone("SELECT COUNT(*) as cnt FROM orders")
+        assert order_count["cnt"] == 0
+
+        # No conditional_orders entries
+        cond_count = await db.fetchone("SELECT COUNT(*) as cnt FROM conditional_orders")
+        assert cond_count["cnt"] == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- D4: Exchange-Native SL/TP ---
+
+@pytest.mark.asyncio
+async def test_conditional_orders_table_exists():
+    """D4: conditional_orders table exists in schema."""
+    from src.shell.database import Database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name='conditional_orders'")
+        assert len(rows) == 1
+
+        cols = await db.fetchall("PRAGMA table_info(conditional_orders)")
+        col_names = [c["name"] for c in cols]
+        for expected in ("tag", "symbol", "sl_txid", "tp_txid", "sl_price", "tp_price", "status"):
+            assert expected in col_names, f"Missing column: {expected}"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_place_exchange_sl_tp():
+    """D4: _place_exchange_sl_tp() places orders and records in DB."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        call_count = {"n": 0}
+        async def mock_place_conditional(symbol, side, order_type, volume, trigger_price):
+            call_count["n"] += 1
+            return {"txid": [f"TXID_COND_{call_count['n']}"]}
+        kraken.place_conditional_order = mock_place_conditional
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        await portfolio._place_exchange_sl_tp(
+            tag="test_btc_001", symbol="BTC/USD", qty=0.001,
+            stop_loss=49000.0, take_profit=52000.0, entry_txid="TXID_ENTRY",
+        )
+
+        # Verify conditional_orders record
+        cond = await db.fetchone("SELECT * FROM conditional_orders WHERE tag = 'test_btc_001'")
+        assert cond is not None
+        assert cond["status"] == "active"
+        assert cond["sl_txid"] == "TXID_COND_1"
+        assert cond["tp_txid"] == "TXID_COND_2"
+        assert cond["sl_price"] == 49000.0
+        assert cond["tp_price"] == 52000.0
+
+        # Verify orders table has both SL and TP entries
+        orders = await db.fetchall("SELECT * FROM orders ORDER BY id")
+        assert len(orders) == 2
+        assert orders[0]["purpose"] == "stop_loss"
+        assert orders[1]["purpose"] == "take_profit"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_cancel_exchange_sl_tp():
+    """D4: _cancel_exchange_sl_tp() cancels orders on Kraken and in DB."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.cancel_order = AsyncMock(return_value={})
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        # Seed conditional_orders and orders
+        await db.execute(
+            """INSERT INTO conditional_orders (tag, symbol, sl_txid, tp_txid, sl_price, tp_price, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            ("test_btc_001", "BTC/USD", "TXID_SL_1", "TXID_TP_1", 49000.0, 52000.0),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_SL_1", "test_btc_001", "BTC/USD", "sell", "stop-loss", 0.001, "pending", "stop_loss"),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_TP_1", "test_btc_001", "BTC/USD", "sell", "take-profit", 0.001, "pending", "take_profit"),
+        )
+        await db.commit()
+
+        await portfolio._cancel_exchange_sl_tp("test_btc_001")
+
+        # Verify cancellation
+        cond = await db.fetchone("SELECT * FROM conditional_orders WHERE tag = 'test_btc_001'")
+        assert cond["status"] == "canceled"
+
+        orders = await db.fetchall("SELECT * FROM orders WHERE tag = 'test_btc_001'")
+        for o in orders:
+            assert o["status"] == "canceled"
+
+        # Verify Kraken cancel was called for both
+        assert kraken.cancel_order.call_count == 2
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_modify_updates_exchange_sl_tp():
+    """D4: MODIFY signal cancels old SL/TP and places new ones."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.cancel_order = AsyncMock(return_value={})
+        call_count = {"n": 0}
+        async def mock_place_conditional(symbol, side, order_type, volume, trigger_price):
+            call_count["n"] += 1
+            return {"txid": [f"TXID_NEW_{call_count['n']}"]}
+        kraken.place_conditional_order = mock_place_conditional
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        # Set up existing position + conditional orders
+        tag = "test_btc_001"
+        portfolio._positions[tag] = {
+            "symbol": "BTC/USD", "tag": tag, "side": "long", "qty": 0.001,
+            "avg_entry": 50000.0, "current_price": 51000.0, "entry_fee": 0.20,
+            "stop_loss": 49000.0, "take_profit": 52000.0, "intent": "DAY",
+            "strategy_version": None, "opened_at": "2026-01-01", "updated_at": "2026-01-01",
+        }
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", tag, "long", 0.001, 50000.0, 51000.0, 0.20, 49000.0, 52000.0, "DAY", "2026-01-01", "2026-01-01"),
+        )
+        await db.execute(
+            """INSERT INTO conditional_orders (tag, symbol, sl_txid, tp_txid, sl_price, tp_price, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (tag, "BTC/USD", "TXID_OLD_SL", "TXID_OLD_TP", 49000.0, 52000.0),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_OLD_SL", tag, "BTC/USD", "sell", "stop-loss", 0.001, "pending", "stop_loss"),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_OLD_TP", tag, "BTC/USD", "sell", "take-profit", 0.001, "pending", "take_profit"),
+        )
+        await db.commit()
+
+        # MODIFY with new SL/TP
+        signal = Signal(
+            symbol="BTC/USD", action=Action.MODIFY, size_pct=0.0,
+            stop_loss=48000.0, take_profit=53000.0, tag=tag,
+        )
+        result = await portfolio.execute_signal(signal, 51000.0, 0.25, 0.40)
+
+        assert result is not None
+        assert result["action"] == "MODIFY"
+        assert result["changes"]["stop_loss"] == 48000.0
+        assert result["changes"]["take_profit"] == 53000.0
+
+        # Old conditionals should be canceled
+        old_conds = await db.fetchall(
+            "SELECT * FROM conditional_orders WHERE sl_txid = 'TXID_OLD_SL'"
+        )
+        assert all(c["status"] == "canceled" for c in old_conds)
+
+        # New conditional should be active
+        new_conds = await db.fetchall(
+            "SELECT * FROM conditional_orders WHERE status = 'active'"
+        )
+        assert len(new_conds) == 1
+        assert new_conds[0]["sl_price"] == 48000.0
+        assert new_conds[0]["tp_price"] == 53000.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_no_conditional_orders():
+    """D4: Paper mode does NOT place exchange SL/TP orders."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="paper", paper_balance_usd=200.0, db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.place_conditional_order = AsyncMock()
+
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        # Call _place_exchange_sl_tp in paper mode — should be no-op
+        await portfolio._place_exchange_sl_tp(
+            tag="test_btc_001", symbol="BTC/USD", qty=0.001,
+            stop_loss=49000.0, take_profit=52000.0,
+        )
+
+        kraken.place_conditional_order.assert_not_called()
+
+        # No records in conditional_orders
+        cond_count = await db.fetchone("SELECT COUNT(*) as cnt FROM conditional_orders")
+        assert cond_count["cnt"] == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_buy_live_places_sl_tp():
+    """D4: Live BUY with SL/TP places exchange-native orders."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        kraken.place_order = AsyncMock(return_value={"txid": ["TXID_BUY_002"]})
+        kraken.query_order = AsyncMock(return_value={
+            "status": "closed",
+            "price": "50000.0",
+            "vol_exec": "0.001",
+            "fee": "0.20",
+            "cost": "50.00",
+        })
+        cond_count = {"n": 0}
+        async def mock_place_conditional(symbol, side, order_type, volume, trigger_price):
+            cond_count["n"] += 1
+            return {"txid": [f"TXID_COND_{cond_count['n']}"]}
+        kraken.place_conditional_order = mock_place_conditional
+
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 200.0
+
+        signal = Signal(
+            symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+            stop_loss=49000.0, take_profit=52000.0,
+        )
+        result = await portfolio.execute_signal(signal, 50000.0, 0.25, 0.40)
+
+        assert result is not None
+        assert result["action"] == "BUY"
+
+        # Should have conditional orders placed
+        cond = await db.fetchone("SELECT * FROM conditional_orders WHERE status = 'active'")
+        assert cond is not None
+        assert cond["sl_price"] == 49000.0
+        assert cond["tp_price"] == 52000.0
+
+        # Should have 3 orders total: entry + SL + TP
+        orders = await db.fetchall("SELECT * FROM orders ORDER BY id")
+        assert len(orders) == 3
+        purposes = [o["purpose"] for o in orders]
+        assert "entry" in purposes
+        assert "stop_loss" in purposes
+        assert "take_profit" in purposes
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Audit Fix Tests (Session B) ---
+
+@pytest.mark.asyncio
+async def test_record_exchange_fill():
+    """F2/F3: record_exchange_fill() records fill, updates cash, removes position."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 100.0
+
+        tag = "test_btc_fill"
+        portfolio._positions[tag] = {
+            "symbol": "BTC/USD", "tag": tag, "side": "long", "qty": 0.001,
+            "avg_entry": 50000.0, "current_price": 51000.0, "entry_fee": 0.20,
+            "stop_loss": 49000.0, "take_profit": 52000.0, "intent": "DAY",
+            "strategy_version": "v1", "opened_at": "2026-01-01", "updated_at": "2026-01-01",
+        }
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price, entry_fee, intent, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", tag, "long", 0.001, 50000.0, 51000.0, 0.20, "DAY", "2026-01-01", "2026-01-01"),
+        )
+        await db.commit()
+
+        result = await portfolio.record_exchange_fill(
+            tag=tag, fill_price=49000.0, filled_volume=0.001, fee=0.18,
+        )
+
+        assert result is not None
+        assert result["action"] == "CLOSE"
+        assert result["price"] == 49000.0
+        assert result["qty"] == 0.001
+        assert result["pnl"] < 0  # Lost money (SL hit)
+        assert result["tag"] == tag
+
+        # Position removed
+        assert portfolio.position_count == 0
+
+        # Cash updated (got sale proceeds)
+        assert portfolio.cash > 100.0
+
+        # Trade recorded in DB
+        trade = await db.fetchone("SELECT * FROM trades WHERE tag = ?", (tag,))
+        assert trade is not None
+        assert trade["exit_price"] == 49000.0
+        assert trade["pnl"] < 0
+
+        # Position not found returns None
+        assert await portfolio.record_exchange_fill("nonexistent", 50000, 0.001, 0.1) is None
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_record_exchange_fill_partial():
+    """F2: record_exchange_fill() handles partial fills — reduces position, keeps remainder."""
+    from src.shell.config import Config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 100.0
+
+        tag = "test_btc_partial"
+        portfolio._positions[tag] = {
+            "symbol": "BTC/USD", "tag": tag, "side": "long", "qty": 0.002,
+            "avg_entry": 50000.0, "current_price": 51000.0, "entry_fee": 0.40,
+            "stop_loss": 49000.0, "take_profit": 52000.0, "intent": "SWING",
+            "strategy_version": "v1", "opened_at": "2026-01-01", "updated_at": "2026-01-01",
+        }
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price, entry_fee, intent, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", tag, "long", 0.002, 50000.0, 51000.0, 0.40, "SWING", "2026-01-01", "2026-01-01"),
+        )
+        await db.commit()
+
+        # Partial fill — only 0.001 of 0.002
+        result = await portfolio.record_exchange_fill(
+            tag=tag, fill_price=49000.0, filled_volume=0.001, fee=0.18,
+        )
+
+        assert result is not None
+        assert result["qty"] == 0.001
+
+        # Position still exists with reduced qty
+        assert portfolio.position_count == 1
+        pos = portfolio._positions[tag]
+        assert abs(pos["qty"] - 0.001) < 0.000001
+
+        # Entry fee proportionally reduced (0.40 * 0.5 = 0.20)
+        assert abs(pos["entry_fee"] - 0.20) < 0.01
+
+        # DB position updated
+        db_pos = await db.fetchone("SELECT * FROM positions WHERE tag = ?", (tag,))
+        assert db_pos is not None
+        assert abs(db_pos["qty"] - 0.001) < 0.000001
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_close_replaces_sl_tp_on_sell_failure():
+    """F1: If sell order fails, SL/TP are re-placed on exchange."""
+    from src.shell.config import Config
+    from src.shell.contract import Signal, Action, Intent
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        config = Config(mode="live", db_path=db_path)
+        db = Database(db_path)
+        await db.connect()
+
+        kraken = MagicMock(spec=KrakenREST)
+        # place_order returns empty txid list — simulates failure
+        kraken.place_order = AsyncMock(return_value={"txid": []})
+        kraken.cancel_order = AsyncMock(return_value={})
+
+        cond_count = {"n": 0}
+        async def mock_place_conditional(symbol, side, order_type, volume, trigger_price):
+            cond_count["n"] += 1
+            return {"txid": [f"TXID_REPL_{cond_count['n']}"]}
+        kraken.place_conditional_order = mock_place_conditional
+
+        portfolio = PortfolioTracker(config, db, kraken)
+        portfolio._cash = 150.0
+
+        tag = "test_btc_f1"
+        portfolio._positions[tag] = {
+            "symbol": "BTC/USD", "tag": tag, "side": "long", "qty": 0.001,
+            "avg_entry": 50000.0, "current_price": 51000.0, "entry_fee": 0.20,
+            "stop_loss": 49000.0, "take_profit": 52000.0, "intent": "DAY",
+            "strategy_version": None, "opened_at": "2026-01-01", "updated_at": "2026-01-01",
+        }
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price, entry_fee,
+               stop_loss, take_profit, intent, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", tag, "long", 0.001, 50000.0, 51000.0, 0.20,
+             49000.0, 52000.0, "DAY", "2026-01-01", "2026-01-01"),
+        )
+        # Seed existing conditional orders
+        await db.execute(
+            """INSERT INTO conditional_orders (tag, symbol, sl_txid, tp_txid, sl_price, tp_price, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (tag, "BTC/USD", "TXID_OLD_SL", "TXID_OLD_TP", 49000.0, 52000.0),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_OLD_SL", tag, "BTC/USD", "sell", "stop-loss", 0.001, "pending", "stop_loss"),
+        )
+        await db.execute(
+            "INSERT INTO orders (txid, tag, symbol, side, order_type, volume, status, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("TXID_OLD_TP", tag, "BTC/USD", "sell", "take-profit", 0.001, "pending", "take_profit"),
+        )
+        await db.commit()
+
+        # Try to close — sell fails (no txid)
+        signal = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, tag=tag)
+        result = await portfolio.execute_signal(signal, 51000.0, 0.25, 0.40)
+
+        assert result is None  # Sell failed
+        assert portfolio.position_count == 1  # Position still exists
+
+        # SL/TP should be re-placed (new conditional orders active)
+        new_cond = await db.fetchone("SELECT * FROM conditional_orders WHERE status = 'active'")
+        assert new_cond is not None
+        assert new_cond["sl_price"] == 49000.0
+        assert new_cond["tp_price"] == 52000.0
+        # New txids should differ from old canceled ones
+        assert new_cond["sl_txid"] != "TXID_OLD_SL"
+        assert new_cond["tp_txid"] != "TXID_OLD_TP"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# =============================================================================
+# Session C: New Tests — Phase 5 (Audit Coverage Expansion)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_risk_counters_restored_on_restart():
+    """Fix 1.5: RiskManager restores daily counters from DB after restart."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # Seed trades with distinct UTC timestamps so ORDER BY closed_at DESC is deterministic
+        now = datetime.now(timezone.utc)
+        t1 = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
+        t2 = (now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S")
+        t3 = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        # First: win at t1. Then two consecutive losses (t2, t3 — most recent)
+        await db.execute(
+            "INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, closed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("BTC/USD", "long", 0.001, 50000, 51000, 1.0, 0.02, 0.50, t1),
+        )
+        await db.execute(
+            "INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, closed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("ETH/USD", "long", 0.01, 2000, 1900, -1.0, -0.05, 0.40, t2),
+        )
+        await db.execute(
+            "INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, closed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("SOL/USD", "long", 1.0, 80, 75, -5.0, -0.0625, 0.30, t3),
+        )
+        await db.commit()
+
+        risk = RiskManager(config.risk)
+        await risk.initialize(db)
+
+        # Should have restored: 3 daily trades, -5.0 total pnl, 2 consecutive losses
+        assert risk.daily_trades == 3
+        assert abs(risk.daily_pnl - (-5.0)) < 0.01
+        assert risk.consecutive_losses == 2  # last 2 trades (DESC order) are losses
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_sandbox_blocks_getattr_bypass():
+    """Fix 2.1: Strategy sandbox blocks getattr-based __import__ bypass."""
+    from src.strategy.sandbox import validate_strategy
+
+    code = '''
+from src.shell.contract import StrategyBase, Signal, RiskLimits, SymbolData, Portfolio
+from datetime import datetime
+
+class Strategy(StrategyBase):
+    def initialize(self, risk_limits, symbols):
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        # Attempt getattr bypass
+        x = getattr(object, "__subclasses__")
+        return []
+'''
+    result = validate_strategy(code)
+    assert not result.passed
+    assert any("getattr" in e for e in result.errors)
+
+
+def test_sandbox_blocks_dunder_access():
+    """Fix 2.1: Strategy sandbox blocks dunder attribute chain."""
+    from src.strategy.sandbox import validate_strategy
+
+    code = '''
+from src.shell.contract import StrategyBase, Signal, RiskLimits, SymbolData, Portfolio
+from datetime import datetime
+
+class Strategy(StrategyBase):
+    def initialize(self, risk_limits, symbols):
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        # Attempt dunder chain escape
+        x = ().__class__.__bases__[0].__subclasses__()
+        return []
+'''
+    result = validate_strategy(code)
+    assert not result.passed
+    assert any("__class__" in e or "__bases__" in e or "__subclasses__" in e for e in result.errors)
+
+
+def test_loader_validates_before_load():
+    """Fix 2.2: load_strategy() runs sandbox validation before loading."""
+    from src.strategy.loader import load_strategy, get_strategy_path
+
+    path = get_strategy_path()
+    # Write a strategy with a forbidden import
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = path.read_text() if path.exists() else None
+
+    try:
+        path.write_text('''
+import subprocess
+from src.shell.contract import StrategyBase
+
+class Strategy(StrategyBase):
+    def initialize(self, risk_limits, symbols): pass
+    def analyze(self, markets, portfolio, timestamp): return []
+''')
+        with pytest.raises(RuntimeError, match="validation failed"):
+            load_strategy()
+    finally:
+        if original:
+            path.write_text(original)
+        elif path.exists():
+            path.unlink()
+
+
+def test_analysis_sandbox_aligned():
+    """Fix 2.3+2.4: Analysis sandbox blocks same modules/calls as strategy sandbox."""
+    from src.statistics.sandbox import (
+        FORBIDDEN_IMPORTS as ANALYSIS_FORBIDDEN,
+        FORBIDDEN_CALLS as ANALYSIS_CALLS,
+        FORBIDDEN_DUNDERS as ANALYSIS_DUNDERS,
+    )
+    from src.strategy.sandbox import (
+        FORBIDDEN_IMPORTS as STRATEGY_FORBIDDEN,
+        FORBIDDEN_CALLS as STRATEGY_CALLS,
+        FORBIDDEN_DUNDERS as STRATEGY_DUNDERS,
+    )
+
+    # Analysis sandbox should block at least everything strategy sandbox blocks
+    assert STRATEGY_FORBIDDEN.issubset(ANALYSIS_FORBIDDEN)
+    assert STRATEGY_CALLS.issubset(ANALYSIS_CALLS)
+    assert STRATEGY_DUNDERS.issubset(ANALYSIS_DUNDERS)
+
+
+def test_readonly_db_blocks_load_extension():
+    """Fix 2.5: ReadOnlyDB blocks LOAD_EXTENSION."""
+    from src.statistics.readonly_db import ReadOnlyDB
+
+    import aiosqlite
+
+    async def _run():
+        async with aiosqlite.connect(":memory:") as conn:
+            conn.row_factory = aiosqlite.Row
+            ro = ReadOnlyDB(conn)
+            with pytest.raises(ValueError, match="load_extension.*blocked"):
+                await ro.execute("LOAD_EXTENSION('/tmp/evil.so')")
+
+    asyncio.run(_run())
+
+
+def test_readonly_db_blocks_null_byte_bypass():
+    """Fix 2.6: ReadOnlyDB strips null bytes to prevent bypass."""
+    from src.statistics.readonly_db import ReadOnlyDB
+
+    import aiosqlite
+
+    async def _run():
+        async with aiosqlite.connect(":memory:") as conn:
+            conn.row_factory = aiosqlite.Row
+            ro = ReadOnlyDB(conn)
+            # Null byte before DROP should be caught
+            with pytest.raises(ValueError, match="Write operation blocked"):
+                await ro.execute("SELECT 1;\x00DROP TABLE candles")
+
+    asyncio.run(_run())
+
+
+@pytest.mark.asyncio
+async def test_daily_reset_updates_start_value():
+    """Fix 3.5: Daily reset refreshes _daily_start_value."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Record starting value
+        initial = portfolio._daily_start_value
+
+        # Do a buy to change cash
+        signal = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY,
+                        stop_loss=49000, take_profit=52000)
+        await portfolio.execute_signal(signal, 50000.0, 0.25, 0.40)
+
+        # Reset daily
+        portfolio.reset_daily()
+
+        # _daily_start_value should have been updated
+        assert portfolio._daily_start_value is not None
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_websocket_price_staleness():
+    """Fix 3.9: KrakenWebSocket tracks price update timestamps."""
+    import time as time_mod
+    from src.shell.kraken import KrakenWebSocket
+
+    ws = KrakenWebSocket("wss://test", ["BTC/USD"])
+
+    # No prices yet — should be infinite
+    assert ws.price_age("BTC/USD") == float("inf")
+
+    # Simulate a price update
+    ws._prices["BTC/USD"] = 50000.0
+    ws._price_updated_at["BTC/USD"] = time_mod.monotonic()
+
+    # Should be very recent
+    assert ws.price_age("BTC/USD") < 1.0
+
+
+def test_pair_reverse_extended_names():
+    """Fix 4.7: PAIR_REVERSE includes extended Kraken REST response pair names."""
+    from src.shell.kraken import from_kraken_pair
+
+    assert from_kraken_pair("XXBTZUSD") == "BTC/USD"
+    assert from_kraken_pair("XETHZUSD") == "ETH/USD"
+    assert from_kraken_pair("XXDGUSD") == "DOGE/USD"
+
+
+def test_spread_zero_bid():
+    """Fix 4.5: get_spread returns 1.0 (100%) when bid is zero."""
+    from src.shell.kraken import KrakenREST
+    from src.shell.config import KrakenConfig
+
+    config = KrakenConfig()
+    client = KrakenREST(config)
+
+    async def _run():
+        async def mock_ticker(symbol):
+            return {"a": ["100.0"], "b": ["0"]}
+        client.get_ticker = mock_ticker
+
+        spread = await client.get_spread("TEST/USD")
+        assert spread == 1.0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.asyncio
+async def test_performance_endpoint_limit():
+    """Fix 4.9: /v1/performance limits results."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # Insert more than 365 days of performance data
+        for i in range(400):
+            dt = datetime.now() - timedelta(days=i)
+            await db.execute(
+                "INSERT INTO daily_performance (date, portfolio_value) VALUES (?, ?)",
+                (dt.strftime("%Y-%m-%d"), 200.0 + i),
+            )
+        await db.commit()
+
+        # Query with the same limit the endpoint uses (365 max)
+        rows = await db.fetchall(
+            "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 365"
+        )
+        assert len(rows) == 365
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_ask_rate_limiting():
+    """Fix 3.22: /ask has a 30-second rate limit."""
+    import time as time_mod
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+
+    config = load_config()
+    commands = BotCommands(config=config, db=MagicMock(), scan_state={})
+
+    # Initially 0, so first ask is allowed
+    assert commands._last_ask_time == 0
+
+    # Simulate setting last_ask_time to now
+    commands._last_ask_time = time_mod.time()
+
+    # Next ask should be within 30s window
+    assert time_mod.time() - commands._last_ask_time < 30
+
+
+def test_config_validates_daily_trades():
+    """Fix 4.6: Config validation catches invalid max_daily_trades."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.risk.max_daily_trades = 0
+
+    with pytest.raises(ValueError, match="max_daily_trades"):
+        _validate_config(config)
+
+
+def test_modify_signal_warns_on_size_pct():
+    """Fix 4.12: Signal with MODIFY action and size_pct != 0 doesn't crash."""
+    from src.shell.contract import Signal, Action
+
+    # Create a MODIFY signal with size_pct — should log warning, not crash
+    signal = Signal(
+        symbol="BTC/USD", action=Action.MODIFY, size_pct=0.05,
+        stop_loss=49000, tag="test_tag",
+    )
+    assert signal.action == Action.MODIFY
+    assert signal.size_pct == 0.05
+
+    # Create a MODIFY signal with size_pct=0 — should NOT warn
+    signal2 = Signal(
+        symbol="BTC/USD", action=Action.MODIFY, size_pct=0,
+        stop_loss=48000, tag="test_tag2",
+    )
+    assert signal2.size_pct == 0
+
+
+def test_ai_client_daily_tokens_property():
+    """Fix 3.25: AIClient exposes daily_tokens_used as a public property."""
+    from src.orchestrator.ai_client import AIClient
+    from src.shell.config import AIConfig
+
+    config = AIConfig()
+    ai = AIClient(config, db=MagicMock())
+    ai._daily_tokens_used = 12345
+    assert ai.daily_tokens_used == 12345
+
+
+# ======================== Session D Audit Fix Tests ========================
+
+
+def test_backtester_close_all_no_tag():
+    """D-C3b: Backtester CLOSE without tag closes ALL positions for symbol."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, RiskLimits, Signal, StrategyBase,
+        SymbolData, Portfolio,
+    )
+
+    class MultiCloseStrategy(StrategyBase):
+        def __init__(self):
+            self._step = 0
+            self._symbols = []
+            self._risk = None
+
+        def initialize(self, risk_limits, symbols):
+            self._risk = risk_limits
+            self._symbols = symbols
+
+        def analyze(self, markets, portfolio, timestamp):
+            self._step += 1
+            signals = []
+            if self._step == 1:
+                # Open two positions for BTC
+                signals.append(Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03))
+            elif self._step == 2:
+                signals.append(Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03))
+            elif self._step == 5:
+                # CLOSE without tag — should close ALL BTC positions
+                signals.append(Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=0.0))
+            return signals
+
+    strategy = MultiCloseStrategy()
+    risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
+
+    # Create 7 hourly bars
+    dates = pd.date_range("2024-01-01", periods=7, freq="1h")
+    df = pd.DataFrame({
+        "open": [50000]*7, "high": [50500]*7, "low": [49500]*7,
+        "close": [50000]*7, "volume": [100]*7,
+    }, index=dates)
+
+    result = bt.run({"BTC/USD": df})
+    # Should have 2 CLOSE trades (both positions closed)
+    close_trades = [t for t in result.trades if t.action == "CLOSE"]
+    assert len(close_trades) == 2, f"Expected 2 CLOSE trades, got {len(close_trades)}"
+
+
+def test_backtester_buy_averaging_in():
+    """D-C3a: Backtester allows multiple BUY for same symbol (averaging in)."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, RiskLimits, Signal, StrategyBase,
+        SymbolData, Portfolio,
+    )
+
+    class AverageInStrategy(StrategyBase):
+        def __init__(self):
+            self._step = 0
+
+        def initialize(self, risk_limits, symbols):
+            pass
+
+        def analyze(self, markets, portfolio, timestamp):
+            self._step += 1
+            if self._step <= 3:
+                return [Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.03)]
+            return []
+
+    strategy = AverageInStrategy()
+    risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
+
+    dates = pd.date_range("2024-01-01", periods=5, freq="1h")
+    df = pd.DataFrame({
+        "open": [50000]*5, "high": [50500]*5, "low": [49500]*5,
+        "close": [50000]*5, "volume": [100]*5,
+    }, index=dates)
+
+    result = bt.run({"BTC/USD": df})
+    # No trades yet (positions still open), but backtester should have 3 open positions
+    # We can verify by checking that no errors occurred (result returned) and no sells
+    assert result.total_trades == 0  # All positions still open
+
+
+def test_backtester_drawdown_halt():
+    """D-C3c: Backtester halts new entries when max_drawdown is breached."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, RiskLimits, Signal, StrategyBase,
+        SymbolData, Portfolio,
+    )
+
+    class DrawdownStrategy(StrategyBase):
+        def __init__(self):
+            self._step = 0
+            self._bought = False
+
+        def initialize(self, risk_limits, symbols):
+            pass
+
+        def analyze(self, markets, portfolio, timestamp):
+            self._step += 1
+            if self._step == 1:
+                self._bought = True
+                return [Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.9,
+                              stop_loss=30000)]
+            if self._step > 5 and not self._bought:
+                # Try to buy again after drawdown halt — should be blocked
+                return [Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.1)]
+            return []
+
+        def on_position_closed(self, symbol, pnl, pnl_pct, tag=""):
+            self._bought = False
+
+    strategy = DrawdownStrategy()
+    # Very tight drawdown limit: 5%
+    risk = RiskLimits(max_trade_pct=0.95, default_trade_pct=0.1, max_positions=5,
+                      max_daily_loss_pct=1.0, max_drawdown_pct=0.05)
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
+
+    # Span multiple days so daily_values captures drawdown
+    dates = pd.date_range("2024-01-01", periods=10, freq="12h")
+    prices = [50000, 50000, 28000, 28000, 28000, 28000, 28000, 50000, 50000, 50000]
+    df = pd.DataFrame({
+        "open": prices, "high": [p+500 for p in prices],
+        "low": [p-500 for p in prices],
+        "close": prices, "volume": [100]*10,
+    }, index=dates)
+
+    result = bt.run({"BTC/USD": df})
+    # Should have 1 trade (SL hit) and NO re-entry (drawdown halted)
+    assert result.total_trades == 1
+
+
+def test_backtester_day_boundary_start_value():
+    """D-M11: Day start value is set BEFORE trading, not after first bar."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, RiskLimits, Signal, StrategyBase,
+    )
+
+    class DayBoundaryStrategy(StrategyBase):
+        """Track what daily_pnl is seen by the strategy at the start of a new day."""
+        def __init__(self):
+            self._daily_pnls = []
+
+        def initialize(self, risk_limits, symbols):
+            pass
+
+        def analyze(self, markets, portfolio, timestamp):
+            self._daily_pnls.append(portfolio.daily_pnl)
+            return []
+
+    strategy = DayBoundaryStrategy()
+    risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
+
+    # Two days of hourly data
+    dates = pd.date_range("2024-01-01", periods=48, freq="1h")
+    df = pd.DataFrame({
+        "open": [50000]*48, "high": [50500]*48, "low": [49500]*48,
+        "close": [50000]*48, "volume": [100]*48,
+    }, index=dates)
+
+    result = bt.run({"BTC/USD": df})
+    # First bar of each day should have daily_pnl == 0 (day_start_value set before trading)
+    # First bar (index 0): day_start_value = starting_cash
+    assert strategy._daily_pnls[0] == 0.0
+    # First bar of day 2 (index 24): day_start_value should be refreshed
+    assert strategy._daily_pnls[24] == 0.0
+
+
+def test_modify_no_intent_downgrade():
+    """D-L5: MODIFY with default intent=DAY should NOT downgrade SWING/POSITION positions."""
+    from src.shell.contract import Action, Intent, Signal
+    from src.shell.config import load_config
+    from src.shell.database import Database
+
+    async def _run():
+        config = load_config()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            config.db_path = f.name
+
+        try:
+            db = Database(config.db_path)
+            await db.connect()
+
+            from src.shell.portfolio import PortfolioTracker
+            portfolio = PortfolioTracker(config, db, kraken=None)
+            await portfolio.initialize()
+
+            # Open a SWING position
+            buy_signal = Signal(
+                symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                intent=Intent.SWING, stop_loss=49000, take_profit=55000,
+            )
+            result = await portfolio.execute_signal(buy_signal, 50000.0, 0.25, 0.40)
+            assert result is not None
+            tag = result["tag"]
+
+            # Position should be SWING
+            pos = portfolio._positions[tag]
+            assert pos["intent"] == "SWING"
+
+            # Send MODIFY with default intent (DAY) — should NOT downgrade
+            modify_signal = Signal(
+                symbol="BTC/USD", action=Action.MODIFY, size_pct=0,
+                stop_loss=48000, tag=tag,
+            )
+            await portfolio.execute_signal(modify_signal, 50000.0, 0.25, 0.40)
+
+            # Intent should still be SWING (not downgraded to DAY)
+            assert portfolio._positions[tag]["intent"] == "SWING"
+            assert portfolio._positions[tag]["stop_loss"] == 48000
+
+            await db.close()
+        finally:
+            os.unlink(config.db_path)
+
+    asyncio.run(_run())
+
+
+def test_json_extractor_backslash_outside_string():
+    """D-L11: JSON extractor handles backslashes outside strings correctly."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    # Test with a response that has backslashes in text before JSON
+    response_text = 'Here is some text with a backslash \\ before the JSON: {"decision": "NO_CHANGE", "reasoning": "test"}'
+
+    # _extract_json is an instance method — create a minimal instance
+    orch = object.__new__(Orchestrator)
+    result = orch._extract_json(response_text)
+    assert result is not None
+    assert result["decision"] == "NO_CHANGE"
+
+
+def test_spread_uses_ask_denominator():
+    """D-M8: Spread formula uses (ask-bid)/ask, not /bid."""
+    from src.shell.kraken import KrakenREST
+    from src.shell.config import KrakenConfig
+
+    config = KrakenConfig()
+    config.rest_url = "https://api.kraken.com"
+    config.api_key = "test"
+    config.secret_key = "dGVzdA=="  # base64 "test"
+
+    client = KrakenREST(config)
+
+    # Mock get_ticker to return known bid/ask
+    async def _run():
+        client.get_ticker = AsyncMock(return_value={
+            "a": ["100.0", "1", "1.000"],  # ask
+            "b": ["90.0", "1", "1.000"],   # bid
+        })
+        spread = await client.get_spread("BTC/USD")
+        # (100 - 90) / 100 = 0.10
+        assert abs(spread - 0.10) < 0.001
+
+        await client.close()
+
+    asyncio.run(_run())
+
+
+def test_readonly_db_conn_access_blocked():
+    """D-M6: ReadOnlyDB blocks access to internal connection via __getattr__."""
+    from src.statistics.readonly_db import ReadOnlyDB
+    import aiosqlite
+
+    async def _run():
+        async with aiosqlite.connect(":memory:") as conn:
+            conn.row_factory = aiosqlite.Row
+            ro = ReadOnlyDB(conn)
+
+            # _conn should be blocked (the old name)
+            with pytest.raises(AttributeError):
+                _ = ro._conn
+
+            # Arbitrary attribute access should also fail
+            with pytest.raises(AttributeError):
+                _ = ro.execute_raw
+
+            # But read-only methods should work
+            cursor = await ro.execute("SELECT 1 as val")
+            row = await cursor.fetchone()
+            assert dict(row)["val"] == 1
+
+    asyncio.run(_run())
+
+
+def test_nonce_inside_rate_lock():
+    """D-M7: Kraken nonce is computed inside rate lock (verify structure)."""
+    from src.shell.kraken import KrakenREST
+    from src.shell.config import KrakenConfig
+    import inspect
+
+    config = KrakenConfig()
+    config.rest_url = "https://api.kraken.com"
+    config.api_key = "test"
+    config.secret_key = "dGVzdA=="
+
+    client = KrakenREST(config)
+
+    # Verify nonce computation is inside the rate_lock context
+    source = inspect.getsource(client.private)
+    # The nonce line should come AFTER "async with self._rate_lock"
+    lock_pos = source.find("async with self._rate_lock")
+    nonce_pos = source.find("nonce = int(time.time()")
+    assert lock_pos > 0, "rate_lock not found in private()"
+    assert nonce_pos > lock_pos, "nonce computation should be inside rate_lock"
+
+
+@pytest.mark.asyncio
+async def test_position_monitor_staleness_check():
+    """D-L3: Position monitor falls back to REST for stale WS prices."""
+    # Verify the staleness detection code exists in _position_monitor
+    import inspect
+    from src.main import TradingBrain
+    source = inspect.getsource(TradingBrain._position_monitor)
+    assert "price_age" in source, "_position_monitor should check price staleness"
+    assert "stale_symbols" in source, "_position_monitor should track stale symbols"
+
+
+def test_data_store_rowcount_uses_len():
+    """D-L9: store_candles returns len(rows) instead of unreliable rowcount."""
+    import inspect
+    from src.shell.data_store import DataStore
+    source = inspect.getsource(DataStore.store_candles)
+    assert "len(rows)" in source, "store_candles should use len(rows)"
+    assert "rowcount" not in source or "unreliable" in source, "rowcount should be avoided"

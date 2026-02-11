@@ -6,6 +6,7 @@ and what they must return. The Shell enforces all constraints.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -116,6 +117,13 @@ class Signal:
     reasoning: str = ""
     slippage_tolerance: Optional[float] = None  # Override default; e.g. 0.0005 = 0.05%
     tag: Optional[str] = None                    # Position tag for multi-position / MODIFY
+
+    def __post_init__(self):
+        if self.action == Action.MODIFY and self.size_pct != 0:
+            logging.getLogger(__name__).warning(
+                "Signal MODIFY has size_pct=%s (ignored — MODIFY only updates SL/TP/intent)",
+                self.size_pct,
+            )
 
 
 # --- Strategy Interface ---

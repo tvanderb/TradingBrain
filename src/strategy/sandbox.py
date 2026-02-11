@@ -41,7 +41,9 @@ FORBIDDEN_IMPORTS = {
 
 FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "os.environ", "os.path"}
 
-FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile"}
+FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile", "getattr", "setattr", "delattr", "globals", "vars", "dir"}
+
+FORBIDDEN_DUNDERS = {"__builtins__", "__import__", "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__", "__code__"}
 
 
 @dataclass
@@ -91,6 +93,11 @@ def check_imports(code: str) -> list[str]:
                 dotted = _get_dotted_name(node.func)
                 if dotted and dotted in FORBIDDEN_ATTRS:
                     errors.append(f"Forbidden attribute call: {dotted}()")
+
+        # Block access to dangerous dunder attributes
+        elif isinstance(node, ast.Attribute):
+            if node.attr in FORBIDDEN_DUNDERS:
+                errors.append(f"Forbidden dunder access: .{node.attr}")
 
     return errors
 

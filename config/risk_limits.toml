@@ -7,25 +7,25 @@
 # on fat pitches rather than forcing steady small-edge trades.
 
 [position]
-max_position_pct = 0.15   # Max 15% of portfolio per position (bigger conviction bets)
+max_position_pct = 0.25   # Max 25% of portfolio per position — emergency backstop only
 max_positions = 5          # Max 5 concurrent positions
 max_leverage = 1.0         # No leverage
 
 [daily]
-max_daily_loss_pct = 0.06  # Stop trading after 6% daily loss (room for 2 bad trades)
+max_daily_loss_pct = 0.10  # Stop trading after 10% daily loss — emergency backstop
 max_daily_trades = 20      # Max trades per day
 
 [per_trade]
-max_trade_pct = 0.07       # Max 7% of portfolio per trade (bigger conviction bets)
+max_trade_pct = 0.10       # Max 10% of portfolio per trade — emergency backstop
 default_trade_pct = 0.03   # Default 3% per trade
 default_stop_loss_pct = 0.02
 default_take_profit_pct = 0.06
 
 [emergency]
 kill_switch = false
-max_drawdown_pct = 0.12    # 12% max drawdown ($24 on $200 — the real safety net)
+max_drawdown_pct = 0.40    # 40% max drawdown — true emergency backstop
 
 [rollback]
 # Shell-enforced automatic rollback triggers
-max_daily_loss_pct = 0.08       # 8% portfolio drop in a day -> halt + rollback
+max_daily_loss_pct = 0.15       # 15% portfolio drop in a day -> halt + rollback
 max_consecutive_losses = 999     # Disabled — drawdown is the safety net, not streak length

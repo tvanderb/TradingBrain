@@ -98,18 +98,18 @@ class FeeConfig:
 
 @dataclass
 class RiskConfig:
-    max_position_pct: float = 0.15
+    max_position_pct: float = 0.25
     max_positions: int = 5
     max_leverage: float = 1.0
-    max_daily_loss_pct: float = 0.06
+    max_daily_loss_pct: float = 0.10
     max_daily_trades: int = 20
-    max_trade_pct: float = 0.07
+    max_trade_pct: float = 0.10
     default_trade_pct: float = 0.03
     default_stop_loss_pct: float = 0.02
     default_take_profit_pct: float = 0.06
     kill_switch: bool = False
-    max_drawdown_pct: float = 0.12
-    rollback_daily_loss_pct: float = 0.08
+    max_drawdown_pct: float = 0.40
+    rollback_daily_loss_pct: float = 0.15
     rollback_consecutive_losses: int = 999
 
 
@@ -269,6 +269,12 @@ def _validate_config(config: Config) -> None:
         errors.append(f"paper_balance_usd must be > 0, got {config.paper_balance_usd}")
     if not (0 <= config.default_slippage_factor <= 0.05):
         errors.append(f"default_slippage_factor must be 0-0.05, got {config.default_slippage_factor}")
+    if config.risk.max_daily_trades < 1:
+        errors.append(f"max_daily_trades must be >= 1, got {config.risk.max_daily_trades}")
+    if config.risk.rollback_consecutive_losses < 1:
+        errors.append(f"rollback_consecutive_losses must be >= 1, got {config.risk.rollback_consecutive_losses}")
+    if config.fees.check_interval_hours < 1:
+        errors.append(f"fees.check_interval_hours must be >= 1, got {config.fees.check_interval_hours}")
     if hasattr(config, 'api') and config.api.enabled:
         if not (1 <= config.api.port <= 65535):
             errors.append(f"api.port must be 1-65535, got {config.api.port}")

@@ -8,7 +8,7 @@ Manages historical candle data with retention tiers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import structlog
@@ -42,34 +42,32 @@ class DataStore:
             ))
 
         cursor = await self._db.executemany(
-            """INSERT OR IGNORE INTO candles
+            """INSERT OR REPLACE INTO candles
                (symbol, timeframe, timestamp, open, high, low, close, volume)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         await self._db.commit()
-        return cursor.rowcount if cursor else len(rows)
+        return len(rows)  # rowcount unreliable for executemany in SQLite
 
     async def get_candles(
         self, symbol: str, timeframe: str, limit: int | None = None
     ) -> pd.DataFrame:
         """Get candles as a DataFrame, ordered by time ascending."""
-        sql = """SELECT timestamp, open, high, low, close, volume
-                 FROM candles WHERE symbol = ? AND timeframe = ?
-                 ORDER BY timestamp ASC"""
         params: list = [symbol, timeframe]
 
         if limit:
-            sql += " LIMIT ?"
-            params.append(limit)
-
-        # For LIMIT queries we want the most recent, so reverse the sort
-        if limit:
-            sql = f"""SELECT * FROM (
+            # For LIMIT queries, get most recent N rows ordered ascending
+            sql = """SELECT * FROM (
                 SELECT timestamp, open, high, low, close, volume
                 FROM candles WHERE symbol = ? AND timeframe = ?
                 ORDER BY timestamp DESC LIMIT ?
             ) ORDER BY timestamp ASC"""
+            params.append(limit)
+        else:
+            sql = """SELECT timestamp, open, high, low, close, volume
+                     FROM candles WHERE symbol = ? AND timeframe = ?
+                     ORDER BY timestamp ASC"""
 
         rows = await self._db.fetchall(sql, tuple(params))
         if not rows:
@@ -91,7 +89,7 @@ class DataStore:
 
     async def aggregate_5m_to_1h(self) -> int:
         """Aggregate 5-minute candles older than retention into 1-hour candles."""
-        cutoff = (datetime.now() - timedelta(days=self._config.candle_5m_retention_days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_5m_retention_days)).isoformat()
 
         # Get distinct symbols with 5m data older than cutoff
         symbols = await self._db.fetchall(
@@ -144,7 +142,7 @@ class DataStore:
 
     async def aggregate_1h_to_daily(self) -> int:
         """Aggregate 1-hour candles older than retention into daily candles."""
-        cutoff = (datetime.now() - timedelta(days=self._config.candle_1h_retention_days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_1h_retention_days)).isoformat()
 
         symbols = await self._db.fetchall(
             "SELECT DISTINCT symbol FROM candles WHERE timeframe = '1h' AND timestamp < ?",
@@ -196,7 +194,7 @@ class DataStore:
     async def prune_old_data(self) -> None:
         """Delete daily candles older than retention limit."""
         years = self._config.candle_1d_retention_years
-        cutoff = (datetime.now() - timedelta(days=years * 365)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=years * 365)).isoformat()
 
         result = await self._db.execute(
             "DELETE FROM candles WHERE timeframe = '1d' AND timestamp < ?",
@@ -205,7 +203,7 @@ class DataStore:
         await self._db.commit()
 
         # Prune old token usage logs (aggregate after 3 months)
-        token_cutoff = (datetime.now() - timedelta(days=90)).isoformat()
+        token_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         await self._db.execute(
             "DELETE FROM token_usage WHERE created_at < ?",
             (token_cutoff,),
@@ -218,7 +216,7 @@ class DataStore:
         )
 
         # Prune old signal history (6 months)
-        signal_cutoff = (datetime.now() - timedelta(days=180)).isoformat()
+        signal_cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
         await self._db.execute(
             "DELETE FROM signals WHERE created_at < ?",
             (signal_cutoff,),

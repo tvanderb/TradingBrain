@@ -68,10 +68,10 @@ class Notifier:
             })
 
     async def _dispatch(self, event_name: str, data: dict, telegram_text: str | None = None) -> None:
-        """Send to WebSocket (always) and Telegram (if configured)."""
+        """Send to WebSocket (always) and Telegram (if configured, non-blocking)."""
         await self._broadcast_ws(event_name, data)
         if telegram_text and self._should_telegram(event_name):
-            await self._send_telegram(telegram_text)
+            asyncio.create_task(self._send_telegram(telegram_text))
 
     # --- Trade Events ---
 

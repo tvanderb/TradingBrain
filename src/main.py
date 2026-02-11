@@ -66,6 +66,7 @@ class TradingBrain:
         self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
         self._api_runner: web.AppRunner | None = None
         self._ws_task: asyncio.Task | None = None
+        self._trade_lock = asyncio.Lock()  # Serializes trade execution across scan/monitor/emergency
         self._running = False
 
     async def start(self) -> None:
@@ -94,7 +95,11 @@ class TradingBrain:
         await self._portfolio.initialize()
         await self._risk.initialize(self._db)
 
-        # 3b. Bootstrap historical data if DB is sparse
+        # 3b. Reconcile unfilled orders from previous session (live mode only)
+        if not self._config.is_paper():
+            await self._reconcile_orders()
+
+        # 3c. Bootstrap historical data if DB is sparse
         await self._bootstrap_historical_data()
 
         # 4. Strategy
@@ -337,6 +342,130 @@ class TradingBrain:
 
                 log.info("bootstrap.complete", symbol=symbol, timeframe=tf_label, candles=total)
 
+    async def _reconcile_orders(self) -> None:
+        """Reconcile orders from previous session (live mode only).
+
+        Checks pending/open orders and conditional orders against Kraken.
+        """
+        # 1. Reconcile regular orders
+        pending_orders = await self._db.fetchall(
+            "SELECT * FROM orders WHERE status IN ('pending', 'open')"
+        )
+        for order in pending_orders:
+            txid = order["txid"]
+            try:
+                order_info = await self._kraken.query_order(txid)
+                status = order_info.get("status", "")
+
+                if status == "closed":
+                    fill_price = float(order_info.get("price", 0))
+                    filled_volume = float(order_info.get("vol_exec", 0))
+                    fee = float(order_info.get("fee", 0))
+                    cost = float(order_info.get("cost", 0))
+                    await self._db.execute(
+                        """UPDATE orders SET status = 'filled', filled_volume = ?,
+                           avg_fill_price = ?, fee = ?, cost = ?, filled_at = ? WHERE txid = ?""",
+                        (filled_volume, fill_price, fee, cost, datetime.now(timezone.utc).isoformat(), txid),
+                    )
+                    log.warning("reconcile.order_filled_while_down", txid=txid,
+                                symbol=order["symbol"], fill_price=fill_price)
+                    # Process the fill into portfolio/trades
+                    purpose = order.get("purpose", "entry")
+                    order_tag = order.get("tag")
+                    if purpose == "exit" and order_tag:
+                        result = await self._portfolio.record_exchange_fill(
+                            order_tag, fill_price, filled_volume, fee,
+                        )
+                        if result:
+                            log.warning("reconcile.exit_fill_processed", tag=order_tag, pnl=result.get("pnl"))
+                    elif purpose == "entry" and order_tag and filled_volume > 0:
+                        log.warning("reconcile.entry_fill_while_down",
+                                    tag=order_tag, symbol=order["symbol"],
+                                    note="Entry fill during downtime — position may need manual reconciliation")
+                elif status in ("canceled", "expired"):
+                    await self._db.execute(
+                        "UPDATE orders SET status = ? WHERE txid = ?", (status, txid),
+                    )
+                    log.info("reconcile.order_ended", txid=txid, status=status)
+                else:
+                    # Still open — cancel stale orders
+                    try:
+                        await self._kraken.cancel_order(txid)
+                    except Exception:
+                        pass
+                    await self._db.execute(
+                        "UPDATE orders SET status = 'canceled' WHERE txid = ?", (txid,),
+                    )
+                    log.warning("reconcile.stale_order_canceled", txid=txid, symbol=order["symbol"])
+            except Exception as e:
+                log.warning("reconcile.query_failed", txid=txid, error=str(e))
+
+        # 2. Reconcile conditional orders
+        active_conditionals = await self._db.fetchall(
+            "SELECT * FROM conditional_orders WHERE status = 'active'"
+        )
+        for cond in active_conditionals:
+            cond_tag = cond["tag"]
+            # Check if position still exists
+            pos = await self._db.fetchone(
+                "SELECT * FROM positions WHERE tag = ?", (cond_tag,)
+            )
+            if not pos:
+                # Position gone — cancel orphaned conditional orders
+                for txid_key in ("sl_txid", "tp_txid"):
+                    txid = cond.get(txid_key)
+                    if txid:
+                        try:
+                            await self._kraken.cancel_order(txid)
+                        except Exception:
+                            pass
+                        await self._db.execute(
+                            "UPDATE orders SET status = 'canceled' WHERE txid = ?", (txid,),
+                        )
+                await self._db.execute(
+                    "UPDATE conditional_orders SET status = 'canceled', updated_at = ? WHERE tag = ?",
+                    (datetime.now(timezone.utc).isoformat(), cond_tag),
+                )
+                log.warning("reconcile.orphan_conditional_canceled", tag=cond_tag)
+                continue
+
+            # Position exists — verify SL/TP orders still live on Kraken
+            needs_replace = False
+            found_fill = False
+            for txid_key in ("sl_txid", "tp_txid"):
+                txid = cond.get(txid_key)
+                if not txid:
+                    continue
+                try:
+                    order_info = await self._kraken.query_order(txid)
+                    status = order_info.get("status", "")
+                    if status == "closed":
+                        log.warning("reconcile.conditional_filled_while_down",
+                                    tag=cond_tag, txid=txid, type=txid_key)
+                        found_fill = True
+                        # Will be handled by _check_conditional_orders on next cycle
+                    elif status in ("canceled", "expired"):
+                        log.warning("reconcile.conditional_order_gone",
+                                    tag=cond_tag, txid=txid, type=txid_key, status=status)
+                        needs_replace = True
+                except Exception as e:
+                    log.warning("reconcile.conditional_query_failed",
+                                tag=cond_tag, txid=txid, error=str(e))
+
+            # Re-place SL/TP if orders expired/canceled but no fill detected
+            if needs_replace and not found_fill:
+                if pos.get("stop_loss") or pos.get("take_profit"):
+                    log.info("reconcile.replacing_conditional_orders", tag=cond_tag)
+                    await self._portfolio._cancel_exchange_sl_tp(cond_tag)
+                    await self._portfolio._place_exchange_sl_tp(
+                        cond_tag, pos["symbol"], pos["qty"],
+                        pos.get("stop_loss"), pos.get("take_profit"),
+                    )
+
+        await self._db.commit()
+        log.info("reconcile.complete",
+                 orders=len(pending_orders), conditionals=len(active_conditionals))
+
     async def _on_ws_failure(self) -> None:
         """Called when WebSocket permanently fails after max retries."""
         await self._notifier.websocket_failed()
@@ -430,8 +559,8 @@ class TradingBrain:
             # Run strategy (with timeout to catch infinite loops in AI-rewritten code)
             try:
                 signals = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None, self._strategy.analyze, markets, portfolio, datetime.now()
+                    asyncio.get_running_loop().run_in_executor(
+                        None, self._strategy.analyze, dict(markets), portfolio, datetime.now()
                     ),
                     timeout=30,
                 )
@@ -442,11 +571,13 @@ class TradingBrain:
                 return
 
             # Process signals
+            executed_symbols = set()
             for signal in signals:
-                # Risk check
+                # Risk check (refresh portfolio_value after each execution for TOCTOU safety)
                 check = self._risk.check_signal(
                     signal, portfolio_value, self._portfolio.position_count,
                     self._portfolio.get_position_value(signal.symbol),
+                    daily_start_value=self._portfolio.daily_start_value,
                 )
 
                 if not check.passed:
@@ -472,13 +603,14 @@ class TradingBrain:
                     log.warning("scan.invalid_price", symbol=signal.symbol, price=price)
                     continue
                 sym_fees = self._pair_fees.get(signal.symbol)
-                raw_result = await self._portfolio.execute_signal(
-                    signal, price,
-                    sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
-                    sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                    strategy_regime=None,
-                    strategy_version=self._scan_state.get("strategy_version"),
-                )
+                async with self._trade_lock:
+                    raw_result = await self._portfolio.execute_signal(
+                        signal, price,
+                        sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                        sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+                        strategy_regime=None,
+                        strategy_version=self._scan_state.get("strategy_version"),
+                    )
 
                 # Normalize to list (multi-close returns list)
                 if raw_result is None:
@@ -488,7 +620,16 @@ class TradingBrain:
                 else:
                     results = [raw_result]
 
+                # Record failed signals in audit trail
+                if not results:
+                    await self._db.execute(
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'execution_failed')",
+                        (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
+                         signal.intent.value, signal.reasoning, None, signal.tag),
+                    )
+
                 if results:
+                    executed_symbols.add(signal.symbol)
                     # Record signal
                     result_tag = results[0].get("tag") if len(results) == 1 else signal.tag
                     await self._db.execute(
@@ -538,6 +679,9 @@ class TradingBrain:
                     # Update portfolio peak
                     self._risk.update_portfolio_peak(new_value)
 
+                    # Refresh portfolio_value for next signal's risk check (TOCTOU)
+                    portfolio_value = new_value
+
                     # Update scan_state with signal info
                     if signal.symbol in scan_symbols:
                         scan_symbols[signal.symbol]["signal"] = {
@@ -546,15 +690,16 @@ class TradingBrain:
                             "reasoning": signal.reasoning,
                         }
 
-            # Update scan_results with signal info for signals that were acted on
+            # Update scan_results with signal info for signals that were actually executed
             for signal in signals:
-                sym_data = scan_symbols.get(signal.symbol, {})
-                if sym_data and sym_data.get("signal"):
-                    await self._db.execute(
-                        """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
-                           WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
-                        (signal.action.value, signal.confidence, signal.symbol, signal.symbol),
-                    )
+                if signal.symbol in executed_symbols:
+                    sym_data = scan_symbols.get(signal.symbol, {})
+                    if sym_data and sym_data.get("signal"):
+                        await self._db.execute(
+                            """UPDATE scan_results SET signal_generated = 1, signal_action = ?, signal_confidence = ?
+                               WHERE symbol = ? AND id = (SELECT MAX(id) FROM scan_results WHERE symbol = ?)""",
+                            (signal.action.value, signal.confidence, signal.symbol, signal.symbol),
+                        )
 
             await self._db.commit()
 
@@ -584,14 +729,20 @@ class TradingBrain:
                 await self._notifier.system_error(f"Scan loop failed: {e}")
 
     async def _position_monitor(self) -> None:
-        """Check stop-loss and take-profit on open positions."""
+        """Check stop-loss and take-profit on open positions.
+
+        Dual-path: Live mode checks exchange-native orders first,
+        then falls back to client-side SL/TP. Paper mode uses client-side only.
+        """
         if not self._ws:
             return
 
-        prices = self._ws.prices
-        if not prices:
-            # Fallback: get prices via REST
-            for symbol in self._config.symbols:
+        prices = dict(self._ws.prices)
+        # Check staleness per-symbol — fall back to REST for stale prices (>5 min)
+        stale_symbols = [s for s in self._config.symbols if self._ws.price_age(s) > 300]
+        if not prices or stale_symbols:
+            fetch_symbols = stale_symbols if prices else self._config.symbols
+            for symbol in fetch_symbols:
                 try:
                     ticker = await self._kraken.get_ticker(symbol)
                     prices[symbol] = float(ticker["c"][0])
@@ -607,63 +758,197 @@ class TradingBrain:
                 )
             return
 
-        triggered = await self._portfolio.update_prices(prices)
-        for t in triggered:
-            symbol = t["symbol"]
-            tag = t["tag"]
-            reason = t["reason"]
-            price = t["price"]
+        # Live mode: check exchange-native conditional orders for fills
+        if not self._config.is_paper():
+            async with self._trade_lock:
+                await self._check_conditional_orders()
 
-            signal = Signal(
-                symbol=symbol, action=Action.CLOSE, size_pct=1.0,
-                intent=Intent.DAY, confidence=1.0,
-                reasoning=f"{reason} triggered at ${price:.2f}",
-                tag=tag,
+        # All modes: client-side SL/TP checking (primary for paper, fallback for live)
+        triggered = await self._portfolio.update_prices(prices)
+
+        # In live mode, skip client-side triggers for positions with active exchange orders
+        if not self._config.is_paper():
+            active_tags = set()
+            active_conds = await self._db.fetchall(
+                "SELECT tag FROM conditional_orders WHERE status = 'active'"
             )
-            sym_fees = self._pair_fees.get(symbol)
-            result = await self._portfolio.execute_signal(
-                signal, price,
-                sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
-                sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                strategy_regime=None,
-            )
-            if result and not isinstance(result, list):
-                if result.get("pnl") is not None:
-                    self._risk.record_trade_result(result["pnl"])
+            for c in active_conds:
+                active_tags.add(c["tag"])
+            triggered = [t for t in triggered if t["tag"] not in active_tags]
+
+        for t in triggered:
+            async with self._trade_lock:
+                await self._handle_sl_tp_trigger(t)
+
+    async def _handle_sl_tp_trigger(self, t: dict) -> None:
+        """Process a single SL/TP trigger — shared between client-side and exchange-fill paths."""
+        symbol = t["symbol"]
+        tag = t["tag"]
+        reason = t["reason"]
+        price = t["price"]
+
+        # Use the position's actual intent (not default DAY) for accurate callbacks
+        pos = self._portfolio._positions.get(tag) if tag else None
+        try:
+            pos_intent = Intent[pos.get("intent", "DAY")] if pos else Intent.DAY
+        except KeyError:
+            pos_intent = Intent.DAY
+
+        signal = Signal(
+            symbol=symbol, action=Action.CLOSE, size_pct=1.0,
+            intent=pos_intent, confidence=1.0,
+            reasoning=f"{reason} triggered at ${price:.2f}",
+            tag=tag,
+        )
+        sym_fees = self._pair_fees.get(symbol)
+        result = await self._portfolio.execute_signal(
+            signal, price,
+            sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+            sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+            strategy_regime=None,
+        )
+        if result:
+            results = result if isinstance(result, list) else [result]
+            for r in results:
+                if r.get("pnl") is not None:
+                    self._risk.record_trade_result(r["pnl"])
                 await self._notifier.stop_triggered(symbol, reason, price, tag=tag)
-                await self._notifier.trade_executed(result)
+                await self._notifier.trade_executed(r)
 
                 # Strategy callbacks (match scan loop behavior)
-                if result.get("pnl") is not None and self._strategy:
+                if r.get("pnl") is not None and self._strategy:
                     try:
                         self._strategy.on_position_closed(
-                            result["symbol"], result["pnl"], result.get("pnl_pct", 0),
-                            tag=result.get("tag", ""),
+                            r["symbol"], r["pnl"], r.get("pnl_pct", 0),
+                            tag=r.get("tag", ""),
                         )
                     except TypeError:
                         self._strategy.on_position_closed(
-                            result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                            r["symbol"], r["pnl"], r.get("pnl_pct", 0),
                         )
                 if self._strategy:
                     try:
                         self._strategy.on_fill(
-                            symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY,
-                            tag=result.get("tag", ""),
+                            symbol, Action.CLOSE, r["qty"], r["price"], pos_intent,
+                            tag=r.get("tag", ""),
                         )
                     except TypeError:
                         self._strategy.on_fill(
-                            symbol, Action.CLOSE, result["qty"], result["price"], Intent.DAY,
+                            symbol, Action.CLOSE, r["qty"], r["price"], pos_intent,
                         )
 
-                # Rollback triggers + peak update
-                new_value = await self._portfolio.total_value()
-                rollback = self._risk.check_rollback_triggers(
-                    new_value, self._portfolio.daily_start_value
+            # Rollback triggers + peak update (once after all results)
+            new_value = await self._portfolio.total_value()
+            rollback = self._risk.check_rollback_triggers(
+                new_value, self._portfolio.daily_start_value
+            )
+            if not rollback.passed:
+                await self._notifier.rollback_alert(rollback.reason, "previous")
+                await self._notifier.risk_halt(rollback.reason)
+            self._risk.update_portfolio_peak(new_value)
+
+    async def _check_conditional_orders(self) -> None:
+        """Poll Kraken for SL/TP order fills (live mode only)."""
+        active_conds = await self._db.fetchall(
+            "SELECT * FROM conditional_orders WHERE status = 'active'"
+        )
+        for cond in active_conds:
+            tag = cond["tag"]
+            symbol = cond["symbol"]
+
+            for txid_key, reason, other_key in [
+                ("sl_txid", "stop_loss", "tp_txid"),
+                ("tp_txid", "take_profit", "sl_txid"),
+            ]:
+                txid = cond.get(txid_key)
+                if not txid:
+                    continue
+
+                try:
+                    order_info = await self._kraken.query_order(txid)
+                except Exception as e:
+                    log.warning("check_conditional.query_failed", tag=tag, txid=txid, error=str(e))
+                    continue
+
+                if order_info.get("status") != "closed":
+                    continue
+
+                # This SL or TP order filled on Kraken
+                fill_price = float(order_info.get("price", 0))
+                filled_volume = float(order_info.get("vol_exec", 0))
+                fee = float(order_info.get("fee", 0))
+
+                log.info("check_conditional.filled", tag=tag, reason=reason,
+                         fill_price=fill_price, volume=filled_volume)
+
+                # Update order record
+                now = datetime.now(timezone.utc).isoformat()
+                await self._db.execute(
+                    """UPDATE orders SET status = 'filled', filled_volume = ?,
+                       avg_fill_price = ?, fee = ?, filled_at = ? WHERE txid = ?""",
+                    (filled_volume, fill_price, fee, now, txid),
                 )
-                if not rollback.passed:
-                    await self._notifier.rollback_alert(rollback.reason, "previous")
-                    await self._notifier.risk_halt(rollback.reason)
-                self._risk.update_portfolio_peak(new_value)
+
+                # Cancel the other order
+                other_txid = cond.get(other_key)
+                if other_txid:
+                    try:
+                        await self._kraken.cancel_order(other_txid)
+                    except Exception:
+                        pass
+                    await self._db.execute(
+                        "UPDATE orders SET status = 'canceled' WHERE txid = ?", (other_txid,),
+                    )
+
+                # Update conditional_orders status
+                fill_status = f"filled_{reason}"
+                await self._db.execute(
+                    "UPDATE conditional_orders SET status = ?, updated_at = ? WHERE tag = ?",
+                    (fill_status, now, tag),
+                )
+                await self._db.commit()
+
+                # Record trade via PortfolioTracker (handles full + partial fills)
+                result = await self._portfolio.record_exchange_fill(
+                    tag, fill_price, filled_volume, fee,
+                )
+                if result:
+                    self._risk.record_trade_result(result["pnl"])
+                    await self._notifier.stop_triggered(symbol, reason, fill_price, tag=tag)
+                    await self._notifier.trade_executed(result)
+
+                    # Strategy callbacks
+                    if self._strategy:
+                        try:
+                            self._strategy.on_position_closed(
+                                result["symbol"], result["pnl"], result["pnl_pct"], tag=tag,
+                            )
+                        except TypeError:
+                            self._strategy.on_position_closed(
+                                result["symbol"], result["pnl"], result["pnl_pct"],
+                            )
+                        try:
+                            self._strategy.on_fill(
+                                symbol, Action.CLOSE, result["qty"], result["price"],
+                                Intent.DAY, tag=tag,
+                            )
+                        except TypeError:
+                            self._strategy.on_fill(
+                                symbol, Action.CLOSE, result["qty"], result["price"],
+                                Intent.DAY,
+                            )
+
+                    # Rollback triggers + peak update
+                    new_value = await self._portfolio.total_value()
+                    rollback = self._risk.check_rollback_triggers(
+                        new_value, self._portfolio.daily_start_value
+                    )
+                    if not rollback.passed:
+                        await self._notifier.rollback_alert(rollback.reason, "previous")
+                        await self._notifier.risk_halt(rollback.reason)
+                    self._risk.update_portfolio_peak(new_value)
+
+                break  # Only one of SL/TP can fill
 
     async def _check_fees(self) -> None:
         """Update fee schedule from Kraken for all pairs."""
@@ -689,6 +974,8 @@ class TradingBrain:
         self._risk.reset_daily()
         self._portfolio.reset_daily()
         self._ai.reset_daily_tokens()
+        # Refresh daily start value for accurate daily P&L tracking
+        self._portfolio._daily_start_value = await self._portfolio.total_value()
 
     async def _nightly_orchestration(self) -> None:
         """Run the nightly AI review cycle with timeout enforcement."""
@@ -715,6 +1002,15 @@ class TradingBrain:
                     max_drawdown_pct=self._config.risk.max_drawdown_pct,
                 )
                 self._strategy.initialize(risk_limits, self._config.symbols)
+                # Attempt to restore strategy state after hot-reload
+                try:
+                    state_row = await self._db.fetchone(
+                        "SELECT state_json FROM strategy_state ORDER BY saved_at DESC LIMIT 1"
+                    )
+                    if state_row:
+                        self._strategy.load_state(json.loads(state_row["state_json"]))
+                except Exception:
+                    pass  # New version may not accept old state — that's OK
                 self._scan_state["strategy_hash"] = new_hash
 
                 # Update strategy version for trade recording
@@ -758,6 +1054,36 @@ class TradingBrain:
         log.warning("brain.emergency_stop")
         await self._notifier.system_error("Emergency stop initiated — closing all positions")
 
+        # Pause position monitor AND scan loop to avoid concurrent trades during emergency
+        if self._scheduler:
+            for job_id in ("position_monitor", "scan"):
+                try:
+                    self._scheduler.pause_job(job_id)
+                except Exception:
+                    pass
+
+        # Cancel all exchange-native conditional orders first
+        if not self._config.is_paper():
+            active_conds = await self._db.fetchall(
+                "SELECT * FROM conditional_orders WHERE status = 'active'"
+            )
+            for cond in active_conds:
+                for txid_key in ("sl_txid", "tp_txid"):
+                    txid = cond.get(txid_key)
+                    if txid:
+                        try:
+                            await self._kraken.cancel_order(txid)
+                        except Exception:
+                            pass
+                        await self._db.execute(
+                            "UPDATE orders SET status = 'canceled' WHERE txid = ?", (txid,),
+                        )
+                await self._db.execute(
+                    "UPDATE conditional_orders SET status = 'canceled', updated_at = ? WHERE tag = ?",
+                    (datetime.now(timezone.utc).isoformat(), cond["tag"]),
+                )
+            await self._db.commit()
+
         positions = await self._db.fetchall("SELECT * FROM positions")
         for pos in positions:
             for attempt in range(3):
@@ -770,11 +1096,12 @@ class TradingBrain:
                         tag=pos.get("tag"),
                     )
                     sym_fees = self._pair_fees.get(pos["symbol"])
-                    await self._portfolio.execute_signal(
-                        signal, price,
-                        sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
-                        sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                    )
+                    async with self._trade_lock:
+                        await self._portfolio.execute_signal(
+                            signal, price,
+                            sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                            sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+                        )
                     break  # Success
                 except Exception as e:
                     log.error("emergency.close_failed", symbol=pos["symbol"],
@@ -783,7 +1110,44 @@ class TradingBrain:
                         await asyncio.sleep(2)
 
         # Verify all positions were closed
-        remaining = await self._db.fetchall("SELECT symbol FROM positions")
+        remaining = await self._db.fetchall("SELECT symbol, tag FROM positions")
+
+        # Check if any remaining positions were closed by exchange SL/TP during stop
+        if remaining and not self._config.is_paper():
+            for r in list(remaining):
+                tag = r.get("tag")
+                if not tag:
+                    continue
+                orders = await self._db.fetchall(
+                    "SELECT txid FROM orders WHERE tag = ? AND purpose IN ('stop_loss', 'take_profit')",
+                    (tag,),
+                )
+                for order in orders:
+                    try:
+                        info = await self._kraken.query_order(order["txid"])
+                        if info.get("status") == "closed":
+                            fill_price = float(info.get("price", 0))
+                            filled_volume = float(info.get("vol_exec", 0))
+                            fee_val = float(info.get("fee", 0))
+                            result = await self._portfolio.record_exchange_fill(
+                                tag, fill_price, filled_volume, fee_val,
+                            )
+                            if result:
+                                log.info("emergency.conditional_filled_during_stop",
+                                         tag=tag, price=fill_price)
+                                remaining = [x for x in remaining if x.get("tag") != tag]
+                            break
+                    except Exception:
+                        pass
+
+        # Resume position monitor and scan loop
+        if self._scheduler:
+            for job_id in ("position_monitor", "scan"):
+                try:
+                    self._scheduler.resume_job(job_id)
+                except Exception:
+                    pass
+
         if remaining:
             symbols = [r["symbol"] for r in remaining]
             log.error("emergency.positions_remaining", symbols=symbols)
@@ -820,10 +1184,38 @@ class TradingBrain:
 
         # 3. Cancel unfilled orders (live mode)
         if not self._config.is_paper() and self._kraken:
+            # Cancel conditional orders individually first (more reliable than CancelAll)
+            try:
+                active_conds = await self._db.fetchall(
+                    "SELECT * FROM conditional_orders WHERE status = 'active'"
+                )
+                for cond in active_conds:
+                    for txid_key in ("sl_txid", "tp_txid"):
+                        txid = cond.get(txid_key)
+                        if txid:
+                            try:
+                                await self._kraken.cancel_order(txid)
+                            except Exception:
+                                pass
+            except Exception as e:
+                log.warning("shutdown.cancel_conditionals_failed", error=str(e))
             try:
                 await self._kraken.cancel_all_orders()
             except Exception as e:
                 log.warning("shutdown.cancel_orders_failed", error=str(e))
+
+            # Mark all active conditional orders as canceled in DB
+            try:
+                await self._db.execute(
+                    "UPDATE conditional_orders SET status = 'canceled', updated_at = ? WHERE status = 'active'",
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
+                await self._db.execute(
+                    "UPDATE orders SET status = 'canceled' WHERE status IN ('pending', 'open')",
+                )
+                await self._db.commit()
+            except Exception as e:
+                log.warning("shutdown.db_cleanup_failed", error=str(e))
 
         # 4. Stop API server
         if self._api_runner:
@@ -833,7 +1225,7 @@ class TradingBrain:
         if self._ws:
             await self._ws.stop()
 
-        # 5. Stop Telegram
+        # 5b. Stop Telegram
         if self._telegram:
             await self._telegram.stop()
 
@@ -894,7 +1286,7 @@ async def main() -> None:
     brain = TradingBrain()
 
     # Handle SIGTERM/SIGINT for graceful shutdown
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     _stop_task = None
 

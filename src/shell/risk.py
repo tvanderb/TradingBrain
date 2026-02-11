@@ -7,6 +7,7 @@ Every signal from the Strategy Module passes through here before execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import structlog
 
@@ -36,13 +37,39 @@ class RiskManager:
         self._halt_reason: str = ""
 
     async def initialize(self, db: Database) -> None:
-        """Load peak portfolio value from DB to restore drawdown protection after restart."""
+        """Load peak portfolio value and restore risk counters from DB after restart."""
         row = await db.fetchone(
             "SELECT MAX(portfolio_value) as peak FROM daily_performance"
         )
         if row and row["peak"] is not None:
             self._peak_portfolio = row["peak"]
             log.info("risk.peak_loaded", peak=round(self._peak_portfolio, 2))
+
+        # Restore daily counters from trades closed today (use UTC to match DB timestamps)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day_row = await db.fetchone(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE closed_at >= ?",
+            (today,),
+        )
+        if day_row:
+            self._daily_trades = day_row["cnt"]
+            self._daily_pnl = day_row["total_pnl"]
+
+        # Restore consecutive losses (count backwards from most recent trades)
+        recent = await db.fetchall(
+            "SELECT pnl FROM trades WHERE pnl IS NOT NULL ORDER BY closed_at DESC LIMIT 20"
+        )
+        streak = 0
+        for t in recent:
+            if t["pnl"] < 0:
+                streak += 1
+            else:
+                break
+        self._consecutive_losses = streak
+
+        if self._daily_trades > 0 or streak > 0:
+            log.info("risk.counters_restored", daily_trades=self._daily_trades,
+                     daily_pnl=round(self._daily_pnl, 2), consecutive_losses=streak)
 
     @property
     def is_halted(self) -> bool:
@@ -93,8 +120,10 @@ class RiskManager:
         portfolio_value: float,
         open_position_count: int,
         position_value_for_symbol: float = 0.0,
+        daily_start_value: float | None = None,
     ) -> RiskCheck:
         """Validate a signal against all risk limits. Returns pass/fail with reason."""
+        trade_value = 0.0  # Initialize before conditional blocks that use it
 
         # Always allow SELL/CLOSE/MODIFY — must be able to exit or adjust positions under any conditions
         is_exit = signal.action in (Action.SELL, Action.CLOSE, Action.MODIFY)
@@ -107,8 +136,9 @@ class RiskManager:
         if self._halted and not is_exit:
             return RiskCheck(False, f"Trading halted: {self._halt_reason}")
 
-        # Daily loss limit (only blocks new entries)
-        max_daily_loss = portfolio_value * self._config.max_daily_loss_pct
+        # Daily loss limit (only blocks new entries) — use start-of-day value as base
+        base_value = daily_start_value if daily_start_value and daily_start_value > 0 else portfolio_value
+        max_daily_loss = base_value * self._config.max_daily_loss_pct
         if self._daily_pnl < -max_daily_loss and not is_exit:
             return RiskCheck(False, f"Daily loss limit: ${self._daily_pnl:.2f} < -${max_daily_loss:.2f}")
 

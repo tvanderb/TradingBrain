@@ -41,9 +41,19 @@ FORBIDDEN_IMPORTS = {
 # - os: blocked (could write files)
 # - sqlite3/aiosqlite: blocked (should use ReadOnlyDB, not raw connections)
 # - pathlib: blocked (filesystem access)
-FORBIDDEN_IMPORTS.update({"os", "sqlite3", "aiosqlite", "pathlib"})
+FORBIDDEN_IMPORTS.update({
+    "os", "sqlite3", "aiosqlite", "pathlib",
+    "sys", "builtins", "ctypes", "importlib", "types",
+    "code", "codeop", "runpy", "pkgutil",
+    "threading", "multiprocessing", "pickle", "shelve", "marshal",
+    "io", "tempfile", "gc", "inspect", "atexit", "signal",
+})
 
-FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile", "print"}
+FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile", "print", "getattr", "setattr", "delattr", "globals", "vars", "dir"}
+
+FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "os.environ", "os.path"}
+
+FORBIDDEN_DUNDERS = {"__builtins__", "__import__", "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__", "__code__"}
 
 
 @dataclass
@@ -77,8 +87,28 @@ def check_analysis_imports(code: str) -> list[str]:
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
                 errors.append(f"Forbidden function call: {node.func.id}()")
+            elif isinstance(node.func, ast.Attribute):
+                dotted = _get_dotted_name(node.func)
+                if dotted and dotted in FORBIDDEN_ATTRS:
+                    errors.append(f"Forbidden attribute call: {dotted}()")
+
+        # Block access to dangerous dunder attributes
+        elif isinstance(node, ast.Attribute):
+            if node.attr in FORBIDDEN_DUNDERS:
+                errors.append(f"Forbidden dunder access: .{node.attr}")
 
     return errors
+
+
+def _get_dotted_name(node) -> str | None:
+    """Reconstruct dotted attribute name from AST node (e.g., os.system)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _get_dotted_name(node.value)
+        if parent:
+            return f"{parent}.{node.attr}"
+    return None
 
 
 def validate_analysis_module(code: str, module_name: str) -> AnalysisSandboxResult:

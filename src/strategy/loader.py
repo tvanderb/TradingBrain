@@ -36,11 +36,20 @@ def get_code_hash(path: Path) -> str:
 def load_strategy() -> StrategyBase:
     """Load the active strategy module and return a Strategy instance.
 
+    Validates against sandbox rules before loading.
     Raises RuntimeError if the strategy file is missing or invalid.
     """
+    from src.strategy.sandbox import validate_strategy
+
     path = get_strategy_path()
     if not path.exists():
         raise RuntimeError(f"Strategy file not found: {path}")
+
+    # Validate sandbox rules before loading
+    code = path.read_text()
+    result = validate_strategy(code)
+    if not result.passed:
+        raise RuntimeError(f"Strategy validation failed: {result.errors}")
 
     module_name = "strategy_active"
 

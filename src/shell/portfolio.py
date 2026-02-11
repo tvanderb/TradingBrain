@@ -7,7 +7,10 @@ supporting multiple positions per symbol.
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+import json
+import time as _time
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -227,6 +230,125 @@ class PortfolioTracker:
             return signal.slippage_tolerance
         return self._config.default_slippage_factor
 
+    async def _confirm_fill(
+        self, txid: str, tag: str, symbol: str, side: str, order_type: str,
+        volume: float, purpose: str = "entry", timeout_seconds: int = 30,
+        poll_interval: float = 2.0,
+    ) -> dict:
+        """Poll Kraken for actual fill data after placing an order.
+
+        Returns dict with: fill_price, filled_volume, fee, cost, status.
+        Raises TimeoutError if order doesn't fill in time.
+        Raises RuntimeError if order is canceled/expired.
+        """
+        now = datetime.now().isoformat()
+        await self._db.execute(
+            """INSERT INTO orders
+               (txid, tag, symbol, side, order_type, volume, status, purpose, placed_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (txid, tag, symbol, side, order_type, volume, purpose, now),
+        )
+        await self._db.commit()
+
+        deadline = _time.monotonic() + timeout_seconds
+        while _time.monotonic() < deadline:
+            try:
+                order_info = await self._kraken.query_order(txid)
+            except Exception as e:
+                log.warning("confirm_fill.query_failed", txid=txid, error=str(e))
+                await asyncio.sleep(poll_interval)
+                continue
+
+            status = order_info.get("status", "")
+
+            if status == "closed":
+                fill_price = float(order_info.get("price", 0))
+                filled_volume = float(order_info.get("vol_exec", 0))
+                fee = float(order_info.get("fee", 0))
+                cost = float(order_info.get("cost", 0))
+                filled_at = datetime.now().isoformat()
+
+                await self._db.execute(
+                    """UPDATE orders SET status = 'filled', filled_volume = ?,
+                       avg_fill_price = ?, fee = ?, cost = ?, filled_at = ?,
+                       kraken_response = ? WHERE txid = ?""",
+                    (filled_volume, fill_price, fee, cost, filled_at,
+                     json.dumps(order_info), txid),
+                )
+                await self._db.commit()
+
+                log.info("confirm_fill.success", txid=txid, symbol=symbol,
+                         fill_price=fill_price, filled_volume=filled_volume, fee=fee)
+                return {
+                    "fill_price": fill_price,
+                    "filled_volume": filled_volume,
+                    "fee": fee,
+                    "cost": cost,
+                    "status": "filled",
+                }
+
+            if status in ("canceled", "expired"):
+                await self._db.execute(
+                    "UPDATE orders SET status = ? WHERE txid = ?", (status, txid),
+                )
+                await self._db.commit()
+                raise RuntimeError(f"Order {txid} {status}")
+
+            await asyncio.sleep(poll_interval)
+
+        # Timeout — one final check (order may have filled between last poll and timeout)
+        try:
+            final_info = await self._kraken.query_order(txid)
+            if final_info.get("status") == "closed":
+                fill_price = float(final_info.get("price", 0))
+                filled_volume = float(final_info.get("vol_exec", 0))
+                fee = float(final_info.get("fee", 0))
+                cost = float(final_info.get("cost", 0))
+                filled_at = datetime.now().isoformat()
+                await self._db.execute(
+                    """UPDATE orders SET status = 'filled', filled_volume = ?,
+                       avg_fill_price = ?, fee = ?, cost = ?, filled_at = ?,
+                       kraken_response = ? WHERE txid = ?""",
+                    (filled_volume, fill_price, fee, cost, filled_at,
+                     json.dumps(final_info), txid),
+                )
+                await self._db.commit()
+                log.info("confirm_fill.success_at_timeout", txid=txid, symbol=symbol,
+                         fill_price=fill_price, filled_volume=filled_volume, fee=fee)
+                return {
+                    "fill_price": fill_price, "filled_volume": filled_volume,
+                    "fee": fee, "cost": cost, "status": "filled",
+                }
+            # Check for partial fills — process what was filled instead of losing it
+            vol_exec = float(final_info.get("vol_exec", 0))
+            if vol_exec > 0:
+                fill_price = float(final_info.get("price", 0))
+                fee = float(final_info.get("fee", 0))
+                cost = float(final_info.get("cost", 0))
+                filled_at = datetime.now().isoformat()
+                await self._db.execute(
+                    """UPDATE orders SET status = 'partial_fill', filled_volume = ?,
+                       avg_fill_price = ?, fee = ?, cost = ?, filled_at = ?,
+                       kraken_response = ? WHERE txid = ?""",
+                    (vol_exec, fill_price, fee, cost, filled_at,
+                     json.dumps(final_info), txid),
+                )
+                await self._db.commit()
+                log.warning("confirm_fill.partial_at_timeout", txid=txid,
+                            vol_exec=vol_exec, volume=volume, fill_price=fill_price)
+                return {
+                    "fill_price": fill_price, "filled_volume": vol_exec,
+                    "fee": fee, "cost": cost, "status": "partial_fill",
+                }
+        except Exception:
+            pass
+
+        await self._db.execute(
+            "UPDATE orders SET status = 'timeout' WHERE txid = ?", (txid,),
+        )
+        await self._db.commit()
+        raise TimeoutError(f"Order {txid} did not fill within {timeout_seconds}s")
+
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
@@ -281,13 +403,18 @@ class PortfolioTracker:
         qty = trade_value / price
 
         if self._config.is_paper():
-            # Paper: simulate fill with slippage
-            slippage = price * self._get_slippage(signal)
-            fill_price = price + slippage
+            # Paper: simulate fill (slippage only for market orders)
+            if signal.order_type == OrderType.MARKET:
+                slippage = price * self._get_slippage(signal)
+                fill_price = price + slippage
+            else:
+                fill_price = signal.limit_price if signal.limit_price else price
             qty = trade_value / fill_price
             fee = trade_value * (fee_pct / 100)
         else:
-            # Live: place order on Kraken
+            # Live: place order on Kraken with fill confirmation
+            # Generate tag early for order tracking
+            tag_for_order = signal.tag or self._generate_tag(signal.symbol)
             limit_price = price if signal.order_type == OrderType.LIMIT else None
             if signal.order_type == OrderType.LIMIT and limit_price and not signal.limit_price:
                 limit_price = price * (1 + self._get_slippage(signal))
@@ -300,12 +427,45 @@ class PortfolioTracker:
                 qty,
                 limit_price,
             )
-            fill_price = price
-            log.warning("portfolio.live_fill_assumed", symbol=signal.symbol,
-                        assumed_price=price, note="Actual fill may differ")
+            txid = (result.get("txid") or [None])[0]
+            if not txid:
+                log.error("portfolio.no_txid", symbol=signal.symbol, result=result)
+                return None
 
-        # Deduct cash
-        self._cash -= (qty * fill_price + fee)
+            try:
+                fill_data = await self._confirm_fill(
+                    txid, tag_for_order, signal.symbol, "buy",
+                    signal.order_type.value.lower(), qty, purpose="entry",
+                )
+                fill_price = fill_data["fill_price"]
+                qty = fill_data["filled_volume"]
+                fee = fill_data["fee"]
+            except (TimeoutError, RuntimeError) as e:
+                log.error("portfolio.fill_failed", symbol=signal.symbol, txid=txid, error=str(e))
+                try:
+                    await self._kraken.cancel_order(txid)
+                except Exception:
+                    pass
+                return None
+
+            # Override tag with the one we generated for order tracking
+            signal = Signal(
+                symbol=signal.symbol, action=signal.action, size_pct=signal.size_pct,
+                confidence=signal.confidence, intent=signal.intent,
+                reasoning=signal.reasoning, tag=tag_for_order,
+                stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                order_type=signal.order_type, limit_price=signal.limit_price,
+                slippage_tolerance=signal.slippage_tolerance,
+            )
+
+        # Deduct cash (live buys may exceed pre-check due to price movement)
+        actual_cost = qty * fill_price + fee
+        if actual_cost > self._cash:
+            log.critical("portfolio.cash_negative_after_fill",
+                         actual_cost=actual_cost, available=self._cash,
+                         symbol=signal.symbol, fill_price=fill_price,
+                         note="Order already filled on exchange — proceeding despite negative cash")
+        self._cash -= actual_cost
         self._fees_today += fee
 
         # Resolve tag: if signal has a tag and it exists, average in
@@ -376,6 +536,21 @@ class PortfolioTracker:
         log.info("portfolio.buy", symbol=signal.symbol, tag=tag, qty=round(qty, 8),
                  price=round(fill_price, 2), fee=round(fee, 4), intent=signal.intent.value)
 
+        # Place exchange-native SL/TP (live mode only, no-op for paper)
+        if signal.stop_loss or signal.take_profit:
+            entry_txid = None
+            if not self._config.is_paper():
+                # Retrieve the entry txid from the orders table
+                order_row = await self._db.fetchone(
+                    "SELECT txid FROM orders WHERE tag = ? AND purpose = 'entry' ORDER BY id DESC LIMIT 1",
+                    (tag,),
+                )
+                entry_txid = order_row["txid"] if order_row else None
+            await self._place_exchange_sl_tp(
+                tag, signal.symbol, qty, signal.stop_loss, signal.take_profit,
+                entry_txid=entry_txid,
+            )
+
         return {
             "symbol": signal.symbol, "action": "BUY", "qty": qty,
             "price": fill_price, "fee": fee, "intent": signal.intent.value,
@@ -419,24 +594,64 @@ class PortfolioTracker:
     ) -> dict | None:
         pos = self._positions[tag]
         symbol = pos["symbol"]
+
+        # Cancel exchange-native SL/TP before closing (full close only)
+        sl_tp_canceled = False
+        if qty >= pos["qty"] - 0.000001:
+            await self._cancel_exchange_sl_tp(tag)
+            sl_tp_canceled = True
+
         # Use version from position if not provided (e.g., SL/TP triggered by position monitor)
         if strategy_version is None:
             strategy_version = pos.get("strategy_version")
 
         if self._config.is_paper():
-            slippage = price * self._get_slippage(signal)
-            fill_price = price - slippage  # Slippage works against us
+            # Paper: simulate fill (slippage only for market orders)
+            if signal.order_type == OrderType.MARKET:
+                slippage = price * self._get_slippage(signal)
+                fill_price = price - slippage  # Slippage works against us
+            else:
+                fill_price = signal.limit_price if signal.limit_price else price
+            fee_pct = maker_fee if signal.order_type == OrderType.LIMIT else taker_fee
+            sale_value = qty * fill_price
+            fee = sale_value * (fee_pct / 100)
         else:
             order_type = signal.order_type.value.lower()
-            limit_price = signal.limit_price if signal.order_type == OrderType.LIMIT else None
+            if signal.order_type == OrderType.LIMIT and not signal.limit_price:
+                limit_price = price * (1 - self._get_slippage(signal))
+            elif signal.limit_price:
+                limit_price = signal.limit_price
+            else:
+                limit_price = None
             result = await self._kraken.place_order(symbol, "sell", order_type, qty, limit_price)
-            fill_price = price
-            log.warning("portfolio.live_fill_assumed", symbol=symbol,
-                        assumed_price=price, note="Actual fill may differ")
+            txid = (result.get("txid") or [None])[0]
+            if not txid:
+                log.error("portfolio.no_txid_sell", symbol=symbol, result=result)
+                if sl_tp_canceled:
+                    await self._place_exchange_sl_tp(
+                        tag, symbol, pos["qty"], pos.get("stop_loss"), pos.get("take_profit"),
+                    )
+                return None
 
-        sale_value = qty * fill_price
-        fee_pct = maker_fee if signal.order_type == OrderType.LIMIT else taker_fee
-        fee = sale_value * (fee_pct / 100)
+            try:
+                fill_data = await self._confirm_fill(
+                    txid, tag, symbol, "sell", order_type, qty, purpose="exit",
+                )
+                fill_price = fill_data["fill_price"]
+                qty = fill_data["filled_volume"]
+                fee = fill_data["fee"]
+            except (TimeoutError, RuntimeError) as e:
+                log.error("portfolio.sell_fill_failed", symbol=symbol, txid=txid, error=str(e))
+                try:
+                    await self._kraken.cancel_order(txid)
+                except Exception:
+                    pass
+                if sl_tp_canceled:
+                    await self._place_exchange_sl_tp(
+                        tag, symbol, pos["qty"], pos.get("stop_loss"), pos.get("take_profit"),
+                    )
+                return None
+            sale_value = qty * fill_price
 
         self._cash += (sale_value - fee)
         self._fees_today += fee
@@ -504,8 +719,9 @@ class PortfolioTracker:
         if signal.take_profit is not None:
             changes["take_profit"] = signal.take_profit
             pos["take_profit"] = signal.take_profit
-        if signal.intent != Intent.DAY or changes:
-            # Only update intent if explicitly different or if there are other changes
+        # Only update intent on MODIFY if explicitly set to non-default
+        # (Signal defaults to DAY, so DAY could mean "not explicitly set" — skip to avoid downgrade)
+        if signal.action != Action.MODIFY or signal.intent != Intent.DAY:
             if signal.intent.value != pos.get("intent", "DAY"):
                 changes["intent"] = signal.intent.value
                 pos["intent"] = signal.intent.value
@@ -531,11 +747,181 @@ class PortfolioTracker:
         )
         await self._db.commit()
 
+        # Update exchange-native SL/TP if SL or TP changed
+        if "stop_loss" in changes or "take_profit" in changes:
+            await self._cancel_exchange_sl_tp(signal.tag)
+            await self._place_exchange_sl_tp(
+                signal.tag, pos["symbol"], pos["qty"],
+                pos.get("stop_loss"), pos.get("take_profit"),
+            )
+
         log.info("portfolio.modify", tag=signal.tag, changes=changes)
 
         return {
             "symbol": pos["symbol"], "action": "MODIFY", "tag": signal.tag,
             "changes": changes, "fee": 0, "qty": pos["qty"], "price": pos.get("current_price", pos["avg_entry"]),
+        }
+
+    async def _place_exchange_sl_tp(
+        self, tag: str, symbol: str, qty: float,
+        stop_loss: float | None, take_profit: float | None,
+        entry_txid: str | None = None,
+    ) -> None:
+        """Place SL/TP orders on Kraken for a position. Paper mode: no-op."""
+        if self._config.is_paper():
+            return
+        if not stop_loss and not take_profit:
+            return
+
+        sl_txid = None
+        tp_txid = None
+        now = datetime.now().isoformat()
+
+        # Place stop-loss
+        if stop_loss:
+            for attempt in range(3):
+                try:
+                    result = await self._kraken.place_conditional_order(
+                        symbol, "sell", "stop-loss", qty, stop_loss,
+                    )
+                    sl_txid = (result.get("txid") or [None])[0]
+                    if sl_txid:
+                        await self._db.execute(
+                            """INSERT INTO orders
+                               (txid, tag, symbol, side, order_type, volume, status, purpose, placed_at)
+                               VALUES (?, ?, ?, 'sell', 'stop-loss', ?, 'pending', 'stop_loss', ?)""",
+                            (sl_txid, tag, symbol, qty, now),
+                        )
+                    break
+                except Exception as e:
+                    log.warning("exchange_sl.place_failed", tag=tag, attempt=attempt + 1, error=str(e))
+                    if attempt < 2:
+                        await asyncio.sleep(1)
+
+        # Place take-profit
+        if take_profit:
+            for attempt in range(3):
+                try:
+                    result = await self._kraken.place_conditional_order(
+                        symbol, "sell", "take-profit", qty, take_profit,
+                    )
+                    tp_txid = (result.get("txid") or [None])[0]
+                    if tp_txid:
+                        await self._db.execute(
+                            """INSERT INTO orders
+                               (txid, tag, symbol, side, order_type, volume, status, purpose, placed_at)
+                               VALUES (?, ?, ?, 'sell', 'take-profit', ?, 'pending', 'take_profit', ?)""",
+                            (tp_txid, tag, symbol, qty, now),
+                        )
+                    break
+                except Exception as e:
+                    log.warning("exchange_tp.place_failed", tag=tag, attempt=attempt + 1, error=str(e))
+                    if attempt < 2:
+                        await asyncio.sleep(1)
+
+        if sl_txid or tp_txid:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO conditional_orders
+                   (tag, symbol, entry_txid, sl_txid, tp_txid, sl_price, tp_price, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'active')""",
+                (tag, symbol, entry_txid, sl_txid, tp_txid, stop_loss, take_profit),
+            )
+            await self._db.commit()
+            log.info("exchange_sl_tp.placed", tag=tag, sl_txid=sl_txid, tp_txid=tp_txid)
+        else:
+            log.error("exchange_sl_tp.all_failed", tag=tag,
+                       note="Position unprotected on exchange — client-side SL/TP still active")
+
+    async def _cancel_exchange_sl_tp(self, tag: str) -> None:
+        """Cancel exchange-native SL/TP orders for a position. Paper mode: no-op."""
+        if self._config.is_paper():
+            return
+
+        cond = await self._db.fetchone(
+            "SELECT * FROM conditional_orders WHERE tag = ? AND status = 'active'", (tag,),
+        )
+        if not cond:
+            return
+
+        for txid_key in ("sl_txid", "tp_txid"):
+            txid = cond.get(txid_key)
+            if txid:
+                try:
+                    await self._kraken.cancel_order(txid)
+                except Exception as e:
+                    log.warning("exchange_sl_tp.cancel_failed", tag=tag, txid=txid, error=str(e))
+                await self._db.execute(
+                    "UPDATE orders SET status = 'canceled' WHERE txid = ?", (txid,),
+                )
+
+        await self._db.execute(
+            "UPDATE conditional_orders SET status = 'canceled', updated_at = ? WHERE tag = ?",
+            (datetime.now().isoformat(), tag),
+        )
+        await self._db.commit()
+        log.info("exchange_sl_tp.canceled", tag=tag)
+
+    async def record_exchange_fill(
+        self, tag: str, fill_price: float, filled_volume: float, fee: float,
+    ) -> dict | None:
+        """Record a trade filled by the exchange (SL/TP). No new exchange calls.
+
+        Handles both full and partial fills. Updates cash, position, and trades table.
+        Returns trade result dict, or None if position not found.
+        """
+        pos = self._positions.get(tag)
+        if not pos:
+            return None
+
+        symbol = pos["symbol"]
+        entry = pos["avg_entry"]
+        entry_fee = pos.get("entry_fee", 0.0)
+        close_fraction = min(filled_volume / pos["qty"], 1.0) if pos["qty"] > 0 else 1.0
+        entry_fee_portion = entry_fee * close_fraction
+        total_fee = entry_fee_portion + fee
+        pnl = (fill_price - entry) * filled_volume - total_fee
+        pnl_pct = pnl / (entry * filled_volume) if entry * filled_volume > 0 else 0.0
+
+        now = datetime.now().isoformat()
+        await self._db.execute(
+            """INSERT INTO trades
+               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees,
+                intent, strategy_version, strategy_regime, opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, tag, pos.get("side", "long"), filled_volume, entry,
+             fill_price, pnl, pnl_pct, total_fee, pos.get("intent", "DAY"),
+             pos.get("strategy_version"), None, pos.get("opened_at", now), now),
+        )
+
+        # Update cash
+        sale_value = filled_volume * fill_price
+        self._cash += (sale_value - fee)
+        self._fees_today += fee
+
+        # Update or remove position (handles partial fills)
+        remaining = pos["qty"] - filled_volume
+        if remaining <= 0.000001:
+            del self._positions[tag]
+            await self._db.execute("DELETE FROM positions WHERE tag = ?", (tag,))
+        else:
+            pos["qty"] = remaining
+            pos["entry_fee"] = entry_fee - entry_fee_portion
+            pos["updated_at"] = now
+            await self._db.execute(
+                "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
+                (remaining, pos["entry_fee"], now, tag),
+            )
+
+        await self._db.commit()
+
+        log.info("portfolio.exchange_fill", symbol=symbol, tag=tag,
+                 qty=round(filled_volume, 8), price=round(fill_price, 2),
+                 pnl=round(pnl, 4), fee=round(fee, 4))
+
+        return {
+            "symbol": symbol, "action": "CLOSE", "qty": filled_volume,
+            "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct,
+            "fee": fee, "intent": pos.get("intent", "DAY"), "tag": tag,
         }
 
     async def update_prices(self, prices: dict[str, float]) -> list[dict]:
@@ -565,11 +951,19 @@ class PortfolioTracker:
         # Use configured timezone for date boundary (not UTC)
         tz = ZoneInfo(self._config.timezone)
         today = datetime.now(tz).strftime("%Y-%m-%d")
+        tomorrow = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Flush current prices to DB before snapshot query
+        for tag, pos in self._positions.items():
+            await self._db.execute(
+                "UPDATE positions SET current_price = ?, updated_at = ? WHERE tag = ?",
+                (pos.get("current_price", pos["avg_entry"]), datetime.now().isoformat(), tag),
+            )
 
         tv = await self.total_value()
         trades = await self._db.fetchall(
-            "SELECT pnl, fees FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL",
-            (today,),
+            "SELECT pnl, fees FROM trades WHERE closed_at >= ? AND closed_at < ? AND pnl IS NOT NULL",
+            (today, tomorrow),
         )
         wins = sum(1 for t in trades if t["pnl"] > 0)
         losses = sum(1 for t in trades if t["pnl"] < 0)

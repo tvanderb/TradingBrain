@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 
@@ -26,16 +27,16 @@ class WebSocketManager:
         return len(self._clients)
 
     async def broadcast(self, event: dict) -> None:
-        """Send event to all connected clients."""
+        """Send event to all connected clients concurrently."""
         if not self._clients:
             return
         msg = json.dumps(event, default=str)
-        closed = set()
-        for ws in self._clients:
-            try:
-                await ws.send_str(msg)
-            except Exception:
-                closed.add(ws)
+        clients = list(self._clients)
+        results = await asyncio.gather(
+            *[ws.send_str(msg) for ws in clients],
+            return_exceptions=True,
+        )
+        closed = {clients[i] for i, r in enumerate(results) if isinstance(r, Exception)}
         if closed:
             self._clients -= closed
             log.warning("ws.clients_dropped", count=len(closed), remaining=len(self._clients))
@@ -44,10 +45,8 @@ class WebSocketManager:
         """WebSocket endpoint handler. Auth via ?token= query param."""
         api_key = request.app.get(api_key_key, "")
         token = request.query.get("token", "")
-        if not api_key:
-            raise web.HTTPUnauthorized(text="API key not configured")
-        if not hmac.compare_digest(token, api_key):
-            raise web.HTTPUnauthorized(text="Invalid token")
+        if not api_key or not hmac.compare_digest(token, api_key):
+            raise web.HTTPUnauthorized(text="Unauthorized")
 
         if len(self._clients) >= self.MAX_CLIENTS:
             raise web.HTTPServiceUnavailable(text="Too many WebSocket connections")

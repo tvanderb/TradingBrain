@@ -143,8 +143,22 @@ class Backtester:
 
         prev_day = None
         day_start_value = cash
+        daily_pnl = 0.0
+        halted_today = False
+        drawdown_halted = False
+        total_value = cash  # Track across iterations for day boundary detection
 
         for ts in timestamps:
+            # Day boundary check — BEFORE trading so day_start_value is correct
+            current_day = ts.date() if hasattr(ts, 'date') else None
+            if current_day and current_day != prev_day:
+                if prev_day is not None:
+                    daily_values.append(total_value)
+                    peak_value = max(peak_value, total_value)
+                day_start_value = total_value
+                daily_pnl = 0.0
+                halted_today = False
+                prev_day = current_day
             # Build SymbolData for each symbol at this point
             markets = {}
             prices = {}
@@ -231,7 +245,11 @@ class Backtester:
 
                 fee_pct = self._get_taker_fee(signal.symbol) / 100
 
-                if signal.action == Action.BUY and not self._has_position_for_symbol(signal.symbol, positions):
+                # Risk halt simulation: skip new entries if daily loss or drawdown exceeded
+                if signal.action == Action.BUY and (halted_today or drawdown_halted):
+                    continue
+
+                if signal.action == Action.BUY:
                     # Enforce max_positions
                     if len(positions) >= self._risk_limits.max_positions:
                         continue
@@ -257,35 +275,59 @@ class Backtester:
                     except TypeError:
                         self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent)
 
+                    # Recalculate total_value after trade
+                    total_value = cash + sum(
+                        pos["qty"] * prices.get(pos.get("symbol", ""), pos["avg_entry"])
+                        for pos in positions.values()
+                    )
+
                 elif signal.action in (Action.SELL, Action.CLOSE):
-                    resolved = self._resolve_position(signal, positions)
-                    if not resolved:
-                        continue
-                    tag, pos = resolved
-                    fill_price = price * (1 - self._slippage)  # slippage: sell lower
-                    qty = pos["qty"]
-                    sale = qty * fill_price
-                    exit_fee = sale * fee_pct
-                    entry_fee = pos.get("entry_fee", 0.0)
-                    fee = entry_fee + exit_fee
-                    pnl = (fill_price - pos["avg_entry"]) * qty - fee
-                    pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
-                    cash += (sale - exit_fee)
+                    # CLOSE without tag: close ALL positions for this symbol (matches live behavior)
+                    if signal.action == Action.CLOSE and not signal.tag:
+                        to_close = [
+                            (t, p) for t, p in positions.items()
+                            if p.get("symbol") == signal.symbol
+                        ]
+                    else:
+                        # SELL (oldest/FIFO) or CLOSE with specific tag
+                        resolved = self._resolve_position(signal, positions)
+                        to_close = [resolved] if resolved else []
 
-                    all_trades.append(BacktestTrade(
-                        symbol=signal.symbol, action=signal.action.value,
-                        qty=qty, price=fill_price, fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
-                    ))
+                    for tag, pos in to_close:
+                        fill_price = price * (1 - self._slippage)  # slippage: sell lower
+                        qty = pos["qty"]
+                        sale = qty * fill_price
+                        exit_fee = sale * fee_pct
+                        entry_fee = pos.get("entry_fee", 0.0)
+                        fee = entry_fee + exit_fee
+                        pnl = (fill_price - pos["avg_entry"]) * qty - fee
+                        pnl_pct = pnl / (pos["avg_entry"] * qty) if pos["avg_entry"] * qty > 0 else 0.0
+                        cash += (sale - exit_fee)
 
-                    try:
-                        self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent, tag=tag)
-                    except TypeError:
-                        self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
-                    try:
-                        self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct, tag=tag)
-                    except TypeError:
-                        self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
-                    del positions[tag]
+                        all_trades.append(BacktestTrade(
+                            symbol=signal.symbol, action=signal.action.value,
+                            qty=qty, price=fill_price, fee=fee, pnl=pnl, pnl_pct=pnl_pct, timestamp=ts,
+                        ))
+
+                        try:
+                            self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent, tag=tag)
+                        except TypeError:
+                            self._strategy.on_fill(signal.symbol, signal.action, qty, fill_price, signal.intent)
+                        try:
+                            self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct, tag=tag)
+                        except TypeError:
+                            self._strategy.on_position_closed(signal.symbol, pnl, pnl_pct)
+                        del positions[tag]
+
+                    # Recalculate total_value after trade(s)
+                    total_value = cash + sum(
+                        pos["qty"] * prices.get(pos.get("symbol", ""), pos["avg_entry"])
+                        for pos in positions.values()
+                    )
+                    # Track daily P&L for risk halt simulation
+                    daily_pnl = total_value - day_start_value
+                    if day_start_value > 0 and (-daily_pnl / day_start_value) >= self._risk_limits.max_daily_loss_pct:
+                        halted_today = True
 
                 elif signal.action == Action.MODIFY:
                     # In-place modification of SL/TP
@@ -342,18 +384,22 @@ class Backtester:
                         self._strategy.on_position_closed(sym, pnl, pnl_pct)
                     del positions[tag]
 
-            # Track daily values
-            current_day = ts.date() if hasattr(ts, 'date') else None
-            if current_day and current_day != prev_day:
-                daily_values.append(total_value)
-                peak_value = max(peak_value, total_value)
-                day_start_value = total_value
-                prev_day = current_day
+                    # Recalculate total_value after SL/TP close
+                    total_value = cash + sum(
+                        p["qty"] * prices.get(p.get("symbol", ""), p["avg_entry"])
+                        for p in positions.values()
+                    )
+                    daily_pnl = total_value - day_start_value
+                    if day_start_value > 0 and (-daily_pnl / day_start_value) >= self._risk_limits.max_daily_loss_pct:
+                        halted_today = True
 
-        # Capture final day's value
-        if prev_day is not None:
-            daily_values.append(total_value)
-            peak_value = max(peak_value, total_value)
+            # Check max_drawdown halt (persists across days — matches emergency stop behavior)
+            if peak_value > 0 and (peak_value - total_value) / peak_value >= self._risk_limits.max_drawdown_pct:
+                drawdown_halted = True
+
+        # Capture final day's value (day boundary at top only records previous day)
+        daily_values.append(total_value)
+        peak_value = max(peak_value, total_value)
 
         # Compute metrics
         result = BacktestResult(trades=all_trades)

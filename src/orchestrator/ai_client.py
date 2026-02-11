@@ -61,6 +61,10 @@ class AIClient:
             log.info("ai.tokens_seeded", used_today=self._daily_tokens_used)
 
     @property
+    def daily_tokens_used(self) -> int:
+        return self._daily_tokens_used
+
+    @property
     def tokens_remaining(self) -> int:
         return max(0, self._config.daily_token_limit - self._daily_tokens_used)
 

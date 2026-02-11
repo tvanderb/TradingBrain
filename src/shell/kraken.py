@@ -45,6 +45,16 @@ PAIR_REVERSE.update({
     "XBT/USD": "BTC/USD",
     "XDG/USD": "DOGE/USD",
 })
+# Extended REST response names (Kraken returns these for legacy pairs)
+PAIR_REVERSE.update({
+    "XXBTZUSD": "BTC/USD",
+    "XETHZUSD": "ETH/USD",
+    "XXDGUSD": "DOGE/USD",
+    "XXRPZUSD": "XRP/USD",
+    "XADAZUSD": "ADA/USD",
+    "XDOTZUSD": "DOT/USD",
+    # SOL, LINK, AVAX are newer pairs — Kraken uses simple names (SOLUSD, LINKUSD, AVAXUSD)
+})
 
 
 def to_kraken_pair(symbol: str) -> str:
@@ -102,14 +112,20 @@ class KrakenREST:
         return data["result"]
 
     async def private(self, endpoint: str, data: dict | None = None) -> dict:
-        await self._rate_limit()
-        urlpath = f"/0/private/{endpoint}"
-        url = f"{self._base_url}{urlpath}"
-        data = data or {}
-        nonce = int(time.time() * 1000)
-        self._last_nonce = max(self._last_nonce + 1, nonce)
-        data["nonce"] = str(self._last_nonce)
-        headers = self._sign(urlpath, data)
+        async with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_call_time
+            if elapsed < self._min_call_interval:
+                await asyncio.sleep(self._min_call_interval - elapsed)
+            self._last_call_time = time.monotonic()
+            # Nonce computation inside lock to prevent concurrent collisions
+            urlpath = f"/0/private/{endpoint}"
+            url = f"{self._base_url}{urlpath}"
+            data = data or {}
+            nonce = int(time.time() * 1000)
+            self._last_nonce = max(self._last_nonce + 1, nonce)
+            data["nonce"] = str(self._last_nonce)
+            headers = self._sign(urlpath, data)
         resp = await self._client.post(url, data=data, headers=headers)
         resp.raise_for_status()
         result = resp.json()
@@ -122,7 +138,7 @@ class KrakenREST:
         """Fetch OHLC candles for a symbol."""
         pair = to_kraken_pair(symbol)
         params: dict[str, Any] = {"pair": pair, "interval": interval}
-        if since:
+        if since is not None:
             params["since"] = since
 
         result = await self.public("OHLC", params)
@@ -159,8 +175,9 @@ class KrakenREST:
         ask = float(ticker["a"][0])
         bid = float(ticker["b"][0])
         if bid == 0:
-            return 0.0
-        return (ask - bid) / bid
+            log.warning("kraken.zero_bid", symbol=symbol, ask=ask)
+            return 1.0  # 100% spread — effectively blocks trading on this pair
+        return (ask - bid) / ask
 
     async def get_trade_volume(self) -> dict:
         """Get fee tier from 30-day trade volume."""
@@ -198,6 +215,15 @@ class KrakenREST:
     async def get_open_orders(self) -> dict:
         return await self.private("OpenOrders")
 
+    async def query_order(self, txid: str) -> dict:
+        """Query status of a specific order. Returns order info dict.
+        Keys: status (pending/open/closed/canceled/expired), vol_exec, price, fee, cost.
+        """
+        result = await self.private("QueryOrders", {"txid": txid, "trades": "true"})
+        if txid not in result:
+            raise RuntimeError(f"Order {txid} not found in Kraken response")
+        return result[txid]
+
     async def place_order(
         self,
         symbol: str,
@@ -218,6 +244,23 @@ class KrakenREST:
             data["price"] = str(price)
         return await self.private("AddOrder", data)
 
+    async def place_conditional_order(
+        self, symbol: str, side: str, order_type: str,
+        volume: float, trigger_price: float,
+    ) -> dict:
+        """Place stop-loss or take-profit order on Kraken.
+        order_type: 'stop-loss' or 'take-profit'.
+        """
+        pair = to_kraken_pair(symbol)
+        data: dict[str, Any] = {
+            "pair": pair,
+            "type": side,
+            "ordertype": order_type,
+            "volume": str(volume),
+            "price": str(trigger_price),
+        }
+        return await self.private("AddOrder", data)
+
     async def cancel_order(self, txid: str) -> dict:
         return await self.private("CancelOrder", {"txid": txid})
 
@@ -235,6 +278,7 @@ class KrakenWebSocket:
         self._running = False
         self._callbacks: dict[str, list[Callable]] = defaultdict(list)
         self._prices: dict[str, float] = {}
+        self._price_updated_at: dict[str, float] = {}
         self._retry_count = 0
         self._max_retries = 5
         self._on_failure: Callable[[], Coroutine] | None = None
@@ -309,6 +353,7 @@ class KrakenWebSocket:
                         price = float(item.get("last", 0))
                         if symbol and price:
                             self._prices[symbol] = price
+                            self._price_updated_at[symbol] = time.monotonic()
                             for cb in self._callbacks.get("ticker", []):
                                 try:
                                     await cb(symbol, price) if asyncio.iscoroutinefunction(cb) else cb(symbol, price)
@@ -327,6 +372,13 @@ class KrakenWebSocket:
             except (KeyError, ValueError) as e:
                 log.debug("websocket.msg_parse_error", error=str(e))
                 continue
+
+    def price_age(self, symbol: str) -> float:
+        """Return seconds since last price update for symbol, or inf if never updated."""
+        last = self._price_updated_at.get(symbol)
+        if last is None:
+            return float("inf")
+        return time.monotonic() - last
 
     async def stop(self) -> None:
         self._running = False

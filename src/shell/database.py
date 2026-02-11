@@ -215,6 +215,42 @@ CREATE TABLE IF NOT EXISTS capital_events (
     notes TEXT
 );
 
+-- Exchange orders (fill confirmation tracking)
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    txid TEXT NOT NULL UNIQUE,
+    tag TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    order_type TEXT NOT NULL,
+    volume REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    filled_volume REAL DEFAULT 0,
+    avg_fill_price REAL,
+    fee REAL DEFAULT 0,
+    cost REAL DEFAULT 0,
+    placed_at TEXT DEFAULT (datetime('now')),
+    filled_at TEXT,
+    kraken_response TEXT,
+    purpose TEXT DEFAULT 'entry',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Conditional orders (exchange-native SL/TP)
+CREATE TABLE IF NOT EXISTS conditional_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    entry_txid TEXT,
+    sl_txid TEXT,
+    tp_txid TEXT,
+    sl_price REAL,
+    tp_price REAL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes for common queries
 -- Note: idx_positions_tag and idx_positions_symbol created after special migrations
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
@@ -226,6 +262,11 @@ CREATE INDEX IF NOT EXISTS idx_scan_results_ts ON scan_results(timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_results_symbol ON scan_results(symbol, timestamp);
 CREATE INDEX IF NOT EXISTS idx_thoughts_cycle ON orchestrator_thoughts(cycle_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_observations_date ON orchestrator_observations(date);
+CREATE INDEX IF NOT EXISTS idx_orders_txid ON orders(txid);
+CREATE INDEX IF NOT EXISTS idx_orders_tag ON orders(tag);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_conditional_orders_tag ON conditional_orders(tag);
+CREATE INDEX IF NOT EXISTS idx_conditional_orders_status ON conditional_orders(status);
 """
 
 # Migrations for existing databases (columns added after initial schema)
@@ -336,6 +377,7 @@ class Database:
                      row.get("intent", "DAY"), row.get("strategy_version"),
                      row.get("opened_at"), row.get("updated_at")),
                 )
+            await self._conn.commit()
             log.info("database.special_migration.complete",
                      migration="positions_add_tag", backfilled=len(rows))
 
