@@ -148,17 +148,12 @@ What it cannot do:
 If your strategy outputs a `regime` classification (e.g., "trending", "ranging"), this is the **strategy's opinion**, not ground truth. It is logged for correlation analysis but should not be treated as fact.
 
 ### Sandbox Restrictions
-Strategy code runs in a sandboxed environment. Blocked modules: subprocess, os, shutil, socket, http, urllib, requests, httpx, websockets, aiohttp, sqlite3, aiosqlite, pathlib, sys, builtins, ctypes, importlib, types, threading, multiprocessing, pickle, io, tempfile, gc, inspect, operator. Blocked attribute access: __builtins__, __import__, __class__, __subclasses__, __bases__, __mro__, __globals__, __code__, __getattribute__, __dict__. Name-mangled private attributes are also blocked. Available imports: pandas, numpy, ta, src.shell.contract, src.strategy.skills.*.
+Strategy code runs in a sandboxed environment. Blocked modules: subprocess, os, shutil, socket, http, urllib, requests, httpx, websockets, aiohttp, sqlite3, aiosqlite, pathlib, sys, builtins, ctypes, importlib, types, threading, multiprocessing, pickle, io, tempfile, gc, inspect, operator. Blocked attribute access: __builtins__, __import__, __class__, __subclasses__, __bases__, __mro__, __globals__, __code__, __getattribute__, __dict__. Name-mangled private attributes are also blocked.
 
-### Available Skills Library
-Pre-built indicator functions in `src.strategy.skills.indicators` (import via `from src.strategy.skills.indicators import ...`):
-- `ema(series, period) → pd.Series` — Exponential moving average
-- `rsi(series, period=14) → float` — Relative Strength Index
-- `bollinger_bands(series, period=20, std_dev=2.0) → tuple[float, float, float]` — Upper, middle, lower bands
-- `macd(series, fast=12, slow=26, signal=9) → tuple[float, float, float]` — MACD line, signal line, histogram
-- `atr(df, period=14) → float` — Average True Range (requires OHLC DataFrame)
-- `volume_ratio(volume, period=20) → float` — Current volume relative to moving average
-- `classify_regime(df) → str` — Simple regime classification from OHLC data
+Available imports for your strategy code:
+- pandas, numpy, ta (100+ technical indicators), scipy (stats, signal, optimize)
+- Standard library: math, statistics, collections, dataclasses, datetime, functools, itertools, random, copy
+- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, OpenPosition, ClosedTrade)
 
 ### Risk Counter Persistence
 Risk counters (daily trade count, daily P&L, consecutive losses) are restored from the database on system restart. The daily reset uses the configured timezone. The consecutive loss counter persists across days — only a winning trade resets it.
@@ -206,9 +201,8 @@ You MUST:
 1. Inherit from StrategyBase (imported from src.shell.contract)
 2. Implement initialize() and analyze() methods
 3. Return list[Signal] from analyze()
-4. Use only: pandas, numpy, ta library for indicators
-5. Keep the strategy in a single file
-6. Include clear docstring explaining the strategy
+4. Keep the strategy in a single file
+5. Include clear docstring explaining the strategy
 
 You MUST NOT:
 - Import os, subprocess, socket, http, or any network/filesystem modules
@@ -217,9 +211,21 @@ You MUST NOT:
 - Generate SHORT signals — the system is long-only (no margin, no leverage)
 
 Available imports:
-- pandas, numpy, ta
-- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData)
-- src.strategy.skills.indicators (ema, rsi, bollinger_bands, macd, atr, volume_ratio, classify_regime)
+- pandas, numpy, ta, scipy (scipy.stats, scipy.signal, scipy.optimize)
+- Standard library: math, statistics, collections, dataclasses, datetime, functools, itertools, random, copy
+- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, OpenPosition, ClosedTrade)
+
+The `ta` library provides 100+ technical indicators:
+- ta.trend: SMA, EMA, MACD, ADX, Ichimoku, Aroon, CCI, DPO, KST, PSAR
+- ta.momentum: RSI, Stochastic, Williams %R, ROC, TSI, Ultimate Oscillator
+- ta.volatility: ATR, Bollinger Bands, Keltner Channel, Donchian, Ulcer Index
+- ta.volume: OBV, VWAP, MFI, Chaikin Money Flow, Force Index, EMV
+Usage: ta.trend.ema_indicator(close, window=12) or ta.momentum.rsi(close, window=14)
+
+scipy.stats provides statistical tools:
+- zscore, pearsonr, spearmanr, linregress, norm.cdf/ppf, skew, kurtosis
+scipy.signal: argrelextrema (support/resistance level detection)
+scipy.optimize: minimize (position sizing optimization)
 
 The strategy receives:
 - markets: dict[str, SymbolData] with candles_5m (30d), candles_1h (1yr), candles_1d (7yr), current_price, spread, volume_24h, maker_fee_pct, taker_fee_pct
@@ -1002,11 +1008,11 @@ Is this classification correct?
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 code_hash = deploy_strategy(code, version)
 
-                # Record in strategy index with parent version lineage
+                # Record in strategy index with parent version lineage + source code (L4 fallback)
                 await self._db.execute(
                     """INSERT INTO strategy_versions
-                       (version, parent_version, code_hash, risk_tier, description, backtest_result, market_conditions, deployed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                       (version, parent_version, code_hash, risk_tier, description, backtest_result, market_conditions, deployed_at, code)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)""",
                     (
                         version,
                         parent_version,
@@ -1015,6 +1021,7 @@ Is this classification correct?
                         changes[:500],
                         backtest_summary[:500],
                         decision.get("market_observations", "")[:500],
+                        code,
                     ),
                 )
 

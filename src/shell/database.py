@@ -215,6 +215,13 @@ CREATE TABLE IF NOT EXISTS capital_events (
     notes TEXT
 );
 
+-- System metadata (key-value store for persistent settings)
+CREATE TABLE IF NOT EXISTS system_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Exchange orders (fill confirmation tracking)
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,6 +293,8 @@ MIGRATIONS = [
     ("signals", "tag", "ALTER TABLE signals ADD COLUMN tag TEXT"),
     # Close reason tracking (signal, stop_loss, take_profit, emergency, reconciliation)
     ("trades", "close_reason", "ALTER TABLE trades ADD COLUMN close_reason TEXT"),
+    # Store strategy source code for DB-based fallback recovery
+    ("strategy_versions", "code", "ALTER TABLE strategy_versions ADD COLUMN code TEXT"),
 ]
 
 
@@ -340,51 +349,47 @@ class Database:
             existing = await self._conn.execute("SELECT * FROM positions")
             rows = [dict(r) for r in await existing.fetchall()]
 
-            # Drop old table and indexes
-            await self._conn.execute("DROP TABLE IF EXISTS positions")
-
-            # Recreate with new schema (from SCHEMA above, already has tag + UNIQUE(tag))
-            await self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS positions (
+            # Atomic migration: wrap in explicit transaction so crash between
+            # DROP and INSERT doesn't lose position data (L8 fix)
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute("DROP TABLE IF EXISTS positions")
+                await self._conn.execute("""CREATE TABLE positions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    tag TEXT NOT NULL,
-                    side TEXT NOT NULL DEFAULT 'long',
-                    qty REAL NOT NULL,
-                    avg_entry REAL NOT NULL,
-                    current_price REAL DEFAULT 0,
-                    unrealized_pnl REAL DEFAULT 0,
-                    entry_fee REAL DEFAULT 0,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    intent TEXT NOT NULL DEFAULT 'DAY',
-                    strategy_version TEXT,
+                    symbol TEXT NOT NULL, tag TEXT NOT NULL,
+                    side TEXT NOT NULL DEFAULT 'long', qty REAL NOT NULL,
+                    avg_entry REAL NOT NULL, current_price REAL DEFAULT 0,
+                    unrealized_pnl REAL DEFAULT 0, entry_fee REAL DEFAULT 0,
+                    stop_loss REAL, take_profit REAL,
+                    intent TEXT NOT NULL DEFAULT 'DAY', strategy_version TEXT,
                     opened_at TEXT DEFAULT (datetime('now')),
-                    updated_at TEXT DEFAULT (datetime('now')),
-                    UNIQUE(tag)
-                );
-                CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag);
-                CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
-            """)
-
-            # Backfill existing positions with auto-generated tags
-            tag_counters: dict[str, int] = {}
-            for row in rows:
-                symbol = row["symbol"]
-                tag_counters[symbol] = tag_counters.get(symbol, 0) + 1
-                tag = f"auto_{symbol.replace('/', '')}_{tag_counters[symbol]:03d}"
+                    updated_at TEXT DEFAULT (datetime('now')), UNIQUE(tag))""")
                 await self._conn.execute(
-                    """INSERT INTO positions
-                       (symbol, tag, side, qty, avg_entry, current_price, unrealized_pnl,
-                        entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (symbol, tag, row.get("side", "long"), row["qty"], row["avg_entry"],
-                     row.get("current_price", 0), row.get("unrealized_pnl", 0),
-                     row.get("entry_fee", 0), row.get("stop_loss"), row.get("take_profit"),
-                     row.get("intent", "DAY"), row.get("strategy_version"),
-                     row.get("opened_at"), row.get("updated_at")),
-                )
-            await self._conn.commit()
+                    "CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag)")
+                await self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
+
+                # Backfill existing positions with auto-generated tags
+                tag_counters: dict[str, int] = {}
+                for row in rows:
+                    symbol = row["symbol"]
+                    tag_counters[symbol] = tag_counters.get(symbol, 0) + 1
+                    tag = f"auto_{symbol.replace('/', '')}_{tag_counters[symbol]:03d}"
+                    await self._conn.execute(
+                        """INSERT INTO positions
+                           (symbol, tag, side, qty, avg_entry, current_price, unrealized_pnl,
+                            entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (symbol, tag, row.get("side", "long"), row["qty"], row["avg_entry"],
+                         row.get("current_price", 0), row.get("unrealized_pnl", 0),
+                         row.get("entry_fee", 0), row.get("stop_loss"), row.get("take_profit"),
+                         row.get("intent", "DAY"), row.get("strategy_version"),
+                         row.get("opened_at"), row.get("updated_at")),
+                    )
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
             log.info("database.special_migration.complete",
                      migration="positions_add_tag", backfilled=len(rows))
 

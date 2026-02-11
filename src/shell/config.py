@@ -253,6 +253,8 @@ def load_config() -> Config:
 
 def _validate_config(config: Config) -> None:
     """Validate config values are within sane ranges."""
+    from zoneinfo import ZoneInfo
+
     errors = []
 
     if not (0 < config.risk.max_trade_pct <= 1):
@@ -284,6 +286,25 @@ def _validate_config(config: Config) -> None:
     if hasattr(config, 'api') and config.api.enabled:
         if not (1 <= config.api.port <= 65535):
             errors.append(f"api.port must be 1-65535, got {config.api.port}")
+
+    # L6: Timezone validity
+    try:
+        ZoneInfo(config.timezone)
+    except (KeyError, Exception):
+        errors.append(f"Invalid timezone: '{config.timezone}'")
+
+    # L6: Symbol format — must contain "/" and end with "USD"
+    for sym in config.symbols:
+        if "/" not in sym:
+            errors.append(f"Symbol must contain '/' separator: '{sym}'")
+        elif not sym.endswith("USD"):
+            errors.append(f"Symbol must end with 'USD': '{sym}'")
+
+    # L6: Trade size consistency
+    if config.risk.default_trade_pct > config.risk.max_trade_pct:
+        errors.append(f"default_trade_pct ({config.risk.default_trade_pct}) > max_trade_pct ({config.risk.max_trade_pct})")
+    if config.risk.max_trade_pct > config.risk.max_position_pct:
+        errors.append(f"max_trade_pct ({config.risk.max_trade_pct}) > max_position_pct ({config.risk.max_position_pct})")
 
     if errors:
         raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

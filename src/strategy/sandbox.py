@@ -69,7 +69,6 @@ def _get_dotted_name(node: ast.expr) -> str | None:
 
 ALLOWED_SRC_IMPORTS = {
     "src.shell.contract",
-    "src.strategy.skills",
 }
 
 
@@ -94,7 +93,7 @@ def check_imports(code: str) -> list[str]:
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: {alias.name}")
                 elif root == "src" and not _is_allowed_src_import(alias.name):
-                    errors.append(f"Forbidden import: {alias.name} (only src.shell.contract and src.strategy.skills.* allowed)")
+                    errors.append(f"Forbidden import: {alias.name} (only src.shell.contract allowed)")
 
         elif isinstance(node, ast.ImportFrom):
             if node.module:
@@ -102,7 +101,7 @@ def check_imports(code: str) -> list[str]:
                 if root in FORBIDDEN_IMPORTS:
                     errors.append(f"Forbidden import: from {node.module}")
                 elif root == "src" and not _is_allowed_src_import(node.module):
-                    errors.append(f"Forbidden import: from {node.module} (only src.shell.contract and src.strategy.skills.* allowed)")
+                    errors.append(f"Forbidden import: from {node.module} (only src.shell.contract allowed)")
 
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:

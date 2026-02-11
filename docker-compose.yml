@@ -4,6 +4,8 @@ services:
     container_name: trading-brain
     restart: unless-stopped
     user: "1000:1000"
+    # WARNING: 'docker compose restart' does NOT re-read .env changes.
+    # Use 'docker compose up -d --force-recreate' or deploy/restart.sh instead.
     env_file: .env
     volumes:
       - ./data:/app/data

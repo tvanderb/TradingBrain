@@ -53,7 +53,8 @@ async def test_database_schema():
                      "strategy_versions", "orchestrator_log", "orchestrator_thoughts",
                      "orchestrator_observations",
                      "token_usage", "fee_schedule", "strategy_state", "paper_tests",
-                     "scan_results", "capital_events", "orders", "conditional_orders"]
+                     "scan_results", "capital_events", "orders", "conditional_orders",
+                     "system_meta"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -279,29 +280,6 @@ def test_sandbox_rejects_syntax_error():
     from src.strategy.sandbox import validate_strategy
     result = validate_strategy("def foo(")
     assert not result.passed
-
-
-# --- Indicators ---
-
-def test_compute_indicators():
-    from strategy.skills.indicators import compute_indicators
-
-    dates = pd.date_range(end=datetime.now(), periods=100, freq="5min")
-    df = pd.DataFrame({
-        "open": np.random.uniform(69000, 71000, 100),
-        "high": np.random.uniform(70000, 72000, 100),
-        "low": np.random.uniform(68000, 70000, 100),
-        "close": np.random.uniform(69000, 71000, 100),
-        "volume": np.random.uniform(10, 100, 100),
-    }, index=dates)
-
-    indicators = compute_indicators(df)
-    assert "rsi" in indicators
-    assert "ema_fast" in indicators
-    assert "ema_slow" in indicators
-    assert "vol_ratio" in indicators
-    assert "regime" in indicators
-    assert 0 <= indicators["rsi"] <= 100
 
 
 # --- Portfolio ---
@@ -4972,7 +4950,7 @@ def test_sandbox_blocks_transitive_src_imports():
     """I1: Sandbox blocks transitive src.* imports that could access shell internals."""
     from src.strategy.sandbox import validate_strategy
 
-    # Attempt to import src.shell.config (allowed: only src.shell.contract and src.strategy.skills.*)
+    # Attempt to import src.shell.config (allowed: only src.shell.contract)
     code = '''
 from src.shell.config import Config
 from src.shell.contract import StrategyBase, Signal
@@ -5000,11 +4978,12 @@ class Strategy(StrategyBase):
     result_ok = validate_strategy(code_ok)
     assert result_ok.passed
 
-    # Verify src.strategy.skills.* passes AST import check (not full validation — module may not exist)
+    # Verify src.strategy.skills.* is NOW blocked (skills library removed)
     from src.strategy.sandbox import check_imports
-    code_skills = 'from src.strategy.skills.indicators import sma\n'
+    code_skills = 'from src.strategy.skills.indicators import ema\n'
     errors = check_imports(code_skills)
-    assert errors == []  # AST check should allow src.strategy.skills.*
+    assert len(errors) > 0
+    assert "src.strategy.skills" in errors[0]
 
     # Verify src.shell.database is blocked
     code_blocked = 'from src.shell.database import Database\n'
@@ -5451,9 +5430,9 @@ def test_prompt_content_accuracy():
     assert "operator" in LAYER_2_SYSTEM
     assert "Name-mangled" in LAYER_2_SYSTEM or "__getattribute__" in LAYER_2_SYSTEM
 
-    # Skills library in LAYER_2
-    assert "ema" in LAYER_2_SYSTEM
-    assert "bollinger_bands" in LAYER_2_SYSTEM
+    # Available imports in LAYER_2 (skills library removed, replaced with expanded toolkit)
+    assert "scipy" in LAYER_2_SYSTEM
+    assert "src.shell.contract" in LAYER_2_SYSTEM
 
     # Risk counter persistence
     assert "consecutive loss" in LAYER_2_SYSTEM.lower()
@@ -5462,7 +5441,9 @@ def test_prompt_content_accuracy():
     # CODE_GEN_SYSTEM updates
     assert "maker_fee_pct" in CODE_GEN_SYSTEM
     assert "LIMIT" in CODE_GEN_SYSTEM
-    assert "skills.indicators" in CODE_GEN_SYSTEM
+    assert "scipy" in CODE_GEN_SYSTEM
+    assert "ta.trend" in CODE_GEN_SYSTEM
+    assert "ta.momentum" in CODE_GEN_SYSTEM
 
     # Sharpe/Sortino in truth benchmarks description
     assert "Sharpe" in LAYER_2_SYSTEM
@@ -5490,3 +5471,424 @@ def test_websocket_nan_price_ignored():
     ws._price_updated_at["BTC/USD"] = time.monotonic()
     assert ws.price_age("BTC/USD") < 1.0
     assert ws.price_age("ETH/USD") == float("inf")
+
+
+# --- Restart Safety (L1-L9) ---
+
+@pytest.mark.asyncio
+async def test_system_meta_persists_starting_capital():
+    """L1: First boot stores paper_balance_usd in system_meta."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Verify system_meta has the starting capital
+        row = await db.fetchone("SELECT value FROM system_meta WHERE key = 'paper_starting_capital'")
+        assert row is not None
+        assert float(row["value"]) == config.paper_balance_usd
+        assert portfolio.cash == config.paper_balance_usd
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_cash_survives_config_change():
+    """L1: Changing paper_balance_usd in config doesn't alter reconciled cash."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+
+        # First boot — stores starting capital
+        p1 = PortfolioTracker(config, db, kraken)
+        await p1.initialize()
+        original_cash = p1.cash
+        assert original_cash == config.paper_balance_usd
+
+        # Execute a trade that costs money (fees)
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        await p1.execute_signal(buy, 50000, 0.25, 0.40)
+        cash_after_buy = p1.cash
+
+        # "Restart" with a DIFFERENT config value
+        config2 = load_config()
+        config2.db_path = config.db_path
+        config2.paper_balance_usd = 9999.0  # Changed config
+
+        p2 = PortfolioTracker(config2, db, kraken)
+        await p2.initialize()
+
+        # Cash should be reconciled from DB (not from new config)
+        assert abs(p2.cash - cash_after_buy) < 0.01
+        assert p2.cash != 9999.0  # Must NOT use new config value
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_paper_cash_always_reconciles():
+    """L1: Cash formula runs unconditionally — no dependency on daily_performance snapshot."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        kraken = KrakenREST(config.kraken)
+        p1 = PortfolioTracker(config, db, kraken)
+        await p1.initialize()
+
+        # Buy a position (ties up cash in position costs)
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+                     intent=Intent.DAY, stop_loss=48000, take_profit=55000)
+        result = await p1.execute_signal(buy, 50000, 0.25, 0.40)
+        assert result is not None
+        cash_with_pos = p1.cash
+
+        # Verify daily_performance is EMPTY (no snapshot taken yet)
+        snap = await db.fetchone("SELECT COUNT(*) as cnt FROM daily_performance")
+        assert snap["cnt"] == 0
+
+        # "Restart" — should still reconcile correctly without any snapshot
+        p2 = PortfolioTracker(config, db, kraken)
+        await p2.initialize()
+
+        # Cash should match (reconciled from first principles)
+        assert abs(p2.cash - cash_with_pos) < 0.01
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_risk_halt_eval_drawdown():
+    """L2: Drawdown beyond max triggers halt on startup."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+
+    config = RiskConfig(max_drawdown_pct=0.10, rollback_daily_loss_pct=0.15,
+                        rollback_consecutive_losses=999, max_daily_loss_pct=0.10)
+    rm = RiskManager(config)
+    rm._peak_portfolio = 1000.0  # Simulate peak
+
+    # 15% drawdown > 10% limit
+    rm.evaluate_halt_state(portfolio_value=850.0, daily_start_value=900.0)
+    assert rm.is_halted
+    assert "drawdown" in rm.halt_reason.lower()
+
+
+def test_risk_halt_eval_consecutive_losses():
+    """L2: Consecutive losses at/above limit triggers halt."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+
+    config = RiskConfig(max_drawdown_pct=0.40, rollback_daily_loss_pct=0.15,
+                        rollback_consecutive_losses=5, max_daily_loss_pct=0.10)
+    rm = RiskManager(config)
+    rm._consecutive_losses = 5
+
+    rm.evaluate_halt_state(portfolio_value=100.0, daily_start_value=100.0)
+    assert rm.is_halted
+    assert "consecutive" in rm.halt_reason.lower()
+
+
+def test_risk_halt_eval_daily_loss():
+    """L2: Daily loss beyond limit triggers halt."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+
+    config = RiskConfig(max_drawdown_pct=0.40, rollback_daily_loss_pct=0.15,
+                        rollback_consecutive_losses=999, max_daily_loss_pct=0.05)
+    rm = RiskManager(config)
+    rm._daily_pnl = -10.0  # Lost $10 today
+
+    # daily_start_value=100, max_daily_loss = 100 * 0.05 = $5. Lost $10 > $5.
+    rm.evaluate_halt_state(portfolio_value=90.0, daily_start_value=100.0)
+    assert rm.is_halted
+    assert "daily" in rm.halt_reason.lower()
+
+
+def test_risk_halt_eval_clean():
+    """L2: Within all limits → not halted."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+
+    config = RiskConfig(max_drawdown_pct=0.40, rollback_daily_loss_pct=0.15,
+                        rollback_consecutive_losses=999, max_daily_loss_pct=0.10)
+    rm = RiskManager(config)
+    rm._peak_portfolio = 100.0
+    rm._daily_pnl = -1.0  # Small loss
+    rm._consecutive_losses = 2
+
+    rm.evaluate_halt_state(portfolio_value=98.0, daily_start_value=100.0)
+    assert not rm.is_halted
+
+
+@pytest.mark.asyncio
+async def test_orphaned_position_detection():
+    """L3: Position for symbol not in config is detected as orphaned."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # Seed a position for a symbol NOT in config
+        await db.execute(
+            """INSERT INTO positions
+               (symbol, tag, side, qty, avg_entry, current_price, intent)
+               VALUES (?, ?, 'long', 0.01, 5.0, 5.0, 'DAY')""",
+            ("FAKE/USD", "auto_FAKEUSD_001"),
+        )
+        await db.commit()
+
+        kraken = KrakenREST(config.kraken)
+        portfolio = PortfolioTracker(config, db, kraken)
+        await portfolio.initialize()
+
+        # Check orphaned detection logic
+        config_symbols = set(config.symbols)
+        position_symbols = {pos["symbol"] for pos in portfolio.positions.values()}
+        orphaned = position_symbols - config_symbols
+        assert "FAKE/USD" in orphaned
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_strategy_fallback_db():
+    """L4: When filesystem strategy missing, loads from DB."""
+    from src.shell.database import Database
+    from src.strategy.loader import load_strategy_with_fallback, get_strategy_path, ACTIVE_DIR
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    # Read real strategy code before we hide the file
+    strategy_path = get_strategy_path()
+    real_code = strategy_path.read_text() if strategy_path.exists() else None
+    assert real_code is not None, "Need a strategy file for this test"
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Store code in strategy_versions
+        await db.execute(
+            """INSERT INTO strategy_versions
+               (version, code_hash, code, deployed_at) VALUES (?, ?, ?, datetime('now'))""",
+            ("v_test_fallback", "abc123", real_code),
+        )
+        await db.commit()
+
+        # Temporarily rename the strategy file to simulate missing
+        backup_path = strategy_path.with_suffix(".py.bak")
+        strategy_path.rename(backup_path)
+
+        try:
+            result = await load_strategy_with_fallback(db)
+            assert result is not None  # Should recover from DB
+        finally:
+            # Restore the strategy file
+            if backup_path.exists():
+                backup_path.rename(strategy_path)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_strategy_fallback_paused():
+    """L4: All sources fail → returns None (paused mode)."""
+    from src.shell.database import Database
+    from src.strategy.loader import load_strategy_with_fallback, get_strategy_path
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    strategy_path = get_strategy_path()
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # No code in strategy_versions DB either
+        # Temporarily rename the strategy file
+        backup_path = strategy_path.with_suffix(".py.bak2")
+        strategy_path.rename(backup_path)
+
+        try:
+            result = await load_strategy_with_fallback(db)
+            assert result is None  # All sources failed
+        finally:
+            if backup_path.exists():
+                backup_path.rename(strategy_path)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+def test_config_validates_timezone():
+    """L6: Invalid timezone raises ValueError."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.timezone = "Invalid/Timezone_That_Does_Not_Exist"
+    with pytest.raises(ValueError, match="Invalid timezone"):
+        _validate_config(config)
+
+
+def test_config_validates_symbol_format():
+    """L6: Symbol without '/' raises ValueError."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.symbols = ["BTCUSD"]  # Missing slash
+    with pytest.raises(ValueError, match="must contain '/'"):
+        _validate_config(config)
+
+
+def test_config_validates_trade_size_consistency():
+    """L6: default_trade_pct > max_trade_pct raises ValueError."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.risk.default_trade_pct = 0.20
+    config.risk.max_trade_pct = 0.10
+    with pytest.raises(ValueError, match="default_trade_pct"):
+        _validate_config(config)
+
+
+@pytest.mark.asyncio
+async def test_live_mode_fails_on_bad_credentials():
+    """L7: Live mode raises RuntimeError when Kraken auth fails."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+
+    config = load_config()
+    config.mode = "live"
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        # Mock Kraken client that fails on get_balance
+        kraken = MagicMock()
+        kraken.get_balance = AsyncMock(side_effect=Exception("Invalid key"))
+        portfolio = PortfolioTracker(config, db, kraken)
+
+        with pytest.raises(RuntimeError, match="failed to fetch Kraken balance"):
+            await portfolio.initialize()
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_special_migration_transactional():
+    """L8: Special migration is atomic — schema is consistent after."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Verify positions table has tag column and correct schema
+        cursor = await db.execute("PRAGMA table_info(positions)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert "tag" in columns
+        assert "symbol" in columns
+        assert "qty" in columns
+
+        # Verify UNIQUE constraint on tag
+        await db.execute(
+            "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES ('BTC/USD', 'test_tag_1', 1, 50000)"
+        )
+        with pytest.raises(Exception):  # IntegrityError for duplicate tag
+            await db.execute(
+                "INSERT INTO positions (symbol, tag, qty, avg_entry) VALUES ('ETH/USD', 'test_tag_1', 1, 3000)"
+            )
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_system_meta_table_exists():
+    """L1: system_meta table is created in schema."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name='system_meta'")
+        assert len(rows) == 1
+
+        # Test key-value insert/read
+        await db.execute("INSERT INTO system_meta (key, value) VALUES ('test_key', '42')")
+        await db.commit()
+        row = await db.fetchone("SELECT value FROM system_meta WHERE key = 'test_key'")
+        assert row["value"] == "42"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)

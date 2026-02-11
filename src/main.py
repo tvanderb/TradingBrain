@@ -31,7 +31,7 @@ from src.shell.risk import RiskManager
 from src.orchestrator.ai_client import AIClient
 from src.orchestrator.orchestrator import Orchestrator
 from src.orchestrator.reporter import Reporter
-from src.strategy.loader import load_strategy, get_strategy_path, get_code_hash
+from src.strategy.loader import load_strategy, load_strategy_with_fallback, get_strategy_path, get_code_hash
 from src.telegram.bot import TelegramBot
 from src.telegram.commands import BotCommands
 from src.telegram.notifications import Notifier
@@ -96,16 +96,30 @@ class TradingBrain:
         await self._portfolio.initialize()
         await self._risk.initialize(self._db, tz_name=self._config.timezone)
 
-        # 3b. Reconcile unfilled orders from previous session (live mode only)
+        # 3b. Evaluate halt conditions (L2: must run before any trading)
+        portfolio_value = await self._portfolio.total_value()
+        self._risk.evaluate_halt_state(portfolio_value, self._portfolio.daily_start_value)
+        if self._risk.is_halted:
+            log.warning("brain.halted_on_startup", reason=self._risk.halt_reason)
+
+        # 3c. Orphaned position detection (L3)
+        config_symbols = set(self._config.symbols)
+        position_symbols = {pos["symbol"] for pos in self._portfolio.positions.values()}
+        orphaned = position_symbols - config_symbols
+        if orphaned:
+            log.error("portfolio.orphaned_positions", symbols=list(orphaned))
+            self._scan_state["orphaned_positions"] = list(orphaned)
+
+        # 3d. Reconcile unfilled orders from previous session (live mode only)
         if not self._config.is_paper():
             await self._reconcile_orders()
 
-        # 3c. Bootstrap historical data if DB is sparse
+        # 3e. Bootstrap historical data if DB is sparse
         await self._bootstrap_historical_data()
 
-        # 4. Strategy
-        try:
-            self._strategy = load_strategy()
+        # 4. Strategy (L4: fallback chain with paused mode)
+        self._strategy = await load_strategy_with_fallback(self._db)
+        if self._strategy:
             risk_limits = RiskLimits(
                 max_trade_pct=self._config.risk.max_trade_pct,
                 default_trade_pct=self._config.risk.default_trade_pct,
@@ -134,9 +148,15 @@ class TradingBrain:
                 "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
             )
             self._scan_state["strategy_version"] = version_row["version"] if version_row else None
-        except Exception as e:
-            log.error("strategy.load_failed", error=str(e))
-            raise
+        else:
+            log.error("brain.paused_mode", reason="Strategy failed to load from all sources")
+            self._scan_state["paused"] = True
+
+        # 4b. Analysis module health check (L5)
+        from src.statistics.loader import MODULE_FILES, get_module_path
+        for name in MODULE_FILES:
+            if not get_module_path(name).exists():
+                log.warning("analysis.module_missing", module=name)
 
         # 5. AI client
         self._ai = AIClient(self._config.ai, self._db)
@@ -220,6 +240,18 @@ class TradingBrain:
         # 11. Notify
         await self._notifier.system_online(portfolio_value, self._portfolio.position_count)
 
+        # Startup alerts (L2 halt, L3 orphans)
+        if self._risk.is_halted:
+            await self._notifier.system_error(f"System started HALTED: {self._risk.halt_reason}")
+        if self._scan_state.get("orphaned_positions"):
+            await self._notifier.system_error(
+                f"WARNING: Unmonitored positions for: {', '.join(self._scan_state['orphaned_positions'])}. "
+                "Add symbols to config or close positions.")
+        if self._scan_state.get("paused"):
+            await self._notifier.system_error(
+                "System started in PAUSED mode: strategy failed to load. "
+                "Scan loop and position monitor are disabled. Nightly orchestration will attempt to deploy a strategy.")
+
         self._running = True
         log.info("brain.started", portfolio=f"${portfolio_value:.2f}",
                  positions=self._portfolio.position_count, mode=self._config.mode)
@@ -249,20 +281,22 @@ class TradingBrain:
 
     def _setup_jobs(self) -> None:
         """Configure all scheduled jobs."""
+        paused = self._scan_state.get("paused")
         scan_interval = self._strategy.scan_interval_minutes if self._strategy else 5
 
-        # Strategy scan
-        self._scheduler.add_job(
-            self._scan_loop, IntervalTrigger(minutes=scan_interval),
-            id="scan", name="Strategy Scan",
-            next_run_time=datetime.now() + timedelta(seconds=10),
-        )
-
-        # Position monitor (stop-loss / take-profit)
-        self._scheduler.add_job(
-            self._position_monitor, IntervalTrigger(seconds=30),
-            id="position_monitor", name="Position Monitor",
-        )
+        # Strategy scan + position monitor (skip if paused — no strategy loaded)
+        if not paused:
+            self._scheduler.add_job(
+                self._scan_loop, IntervalTrigger(minutes=scan_interval),
+                id="scan", name="Strategy Scan",
+                next_run_time=datetime.now() + timedelta(seconds=10),
+            )
+            self._scheduler.add_job(
+                self._position_monitor, IntervalTrigger(seconds=30),
+                id="position_monitor", name="Position Monitor",
+            )
+        else:
+            log.warning("scheduler.paused_mode", reason="No strategy — scan + monitor disabled")
 
         # Fee check
         self._scheduler.add_job(

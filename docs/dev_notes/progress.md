@@ -2157,3 +2157,83 @@ CODE_GEN_SYSTEM additions:
 1 new test: `test_prompt_content_accuracy`
 
 **Tests: 146/146 passing** (was 137/137, +9 new)
+
+## Session K (2026-02-11) — Remove Skills Library + Expand Strategy Toolkit
+
+### Context
+First live orchestrator cycle (3:30 AM) failed — all 3 code generation attempts imported `from src.strategy.skills.indicators import ...` which fails at runtime because `strategy/skills/` is not importable from the sandbox's perspective. Rather than fix import paths, decided to remove the skills library entirely (every function was a trivial wrapper around pandas/ta) and expand the available toolkit.
+
+### Changes
+
+**Phase 1: Delete Skills Library**
+- Deleted `strategy/skills/` directory (indicators.py, __init__.py)
+- Removed `src.strategy.skills` from `ALLOWED_SRC_IMPORTS` in sandbox.py
+- Updated error messages: "only src.shell.contract allowed"
+
+**Phase 2: Add scipy Dependency**
+- Added `scipy>=1.12` to pyproject.toml
+
+**Phase 3: Update Orchestrator Prompts**
+- LAYER_2_SYSTEM: Removed "Available Skills Library" subsection entirely. Updated sandbox section with comprehensive available imports list (pandas, numpy, ta, scipy, stdlib modules, src.shell.contract).
+- CODE_GEN_SYSTEM: Replaced imports section with expanded toolkit. Added `ta` library category guide (ta.trend, ta.momentum, ta.volatility, ta.volume with examples). Added scipy.stats/signal/optimize usage examples. Added stdlib modules list. Added OpenPosition/ClosedTrade to contract imports.
+
+**Phase 4: Update Tests**
+- Deleted `test_compute_indicators` (function no longer exists)
+- Updated `test_sandbox_blocks_transitive_src_imports`: skills import now correctly blocked
+- Updated `test_prompt_content_accuracy`: removed skills assertions, added scipy/ta.trend/ta.momentum assertions
+
+**Tests: 145/145 passing** (was 146, -1 deleted test)
+
+## Session L (2026-02-11) — Restart Safety: Fix All 9 Landmines (L1-L9)
+
+### Context
+First live deployment revealed L1 actively corrupting data: portfolio showed $103.01 when it should be ~$99.91. The `daily_performance` table was empty (no snapshot yet), so `portfolio.initialize()` fell back to `config.paper_balance_usd` ($100) as `starting` — but cash was already initialized to $100, and position costs weren't deducted. The $3 DOGE position value appeared as phantom profit. All 9 restart safety landmines documented in `docs/dev_notes/restart_safety.md` were fixed.
+
+### Changes by Landmine
+
+**L1 (Critical) — Paper Cash Reset Fix** (`src/shell/portfolio.py`)
+- New `system_meta` table stores `paper_starting_capital` on first boot
+- Config changes no longer retroactively rewrite the cash baseline
+- Cash ALWAYS reconciles from first principles: `starting_capital + deposits + total_pnl - position_costs`
+- Removed conditional snapshot-based path — formula runs unconditionally in paper mode
+- Added `positions` property on PortfolioTracker
+
+**L2 — Risk Halt Evaluation on Startup** (`src/shell/risk.py`, `src/main.py`)
+- New `evaluate_halt_state()` method checks drawdown, consecutive losses, daily loss, and rollback triggers
+- Called after portfolio+risk init, before any trading starts
+- Sends Telegram alert if system starts halted
+
+**L3 — Orphaned Position Detection** (`src/main.py`)
+- After portfolio init, compares position symbols vs config symbols
+- Logs error + sends Telegram alert for unmonitored positions
+
+**L4 — Strategy Fallback + Paused Mode** (`src/strategy/loader.py`, `src/main.py`, `src/orchestrator/orchestrator.py`)
+- `load_strategy_with_fallback(db)`: filesystem → DB (latest `strategy_versions.code`) → None
+- Paused mode: if strategy fails to load, scan loop + position monitor disabled; nightly orchestration still runs
+- Orchestrator stores strategy source code in `strategy_versions.code` column on deploy
+
+**L5 — Analysis Module Health Check** (`src/main.py`)
+- Logs warning if analysis module files are missing on startup
+
+**L6 — Extended Config Validation** (`src/shell/config.py`)
+- Timezone validity (`ZoneInfo` try/catch)
+- Symbol format (must contain `/` and end with `USD`)
+- Trade size consistency (`default_trade_pct <= max_trade_pct <= max_position_pct`)
+
+**L7 — Live Mode Fail-Fast** (`src/shell/portfolio.py`)
+- Changed `log.warning` to `raise RuntimeError` when Kraken balance fetch fails in live mode
+
+**L8 — Transactional Special Migration** (`src/shell/database.py`)
+- Wrapped positions table recreation in `BEGIN IMMEDIATE` / `COMMIT` with rollback on error
+- Crash between DROP and INSERT no longer loses position data
+
+**L9 — Docker Convenience** (`docker-compose.yml`, `deploy/restart.sh`)
+- Added `.env` reload warning comment to docker-compose.yml
+- Created `deploy/restart.sh` helper (`docker compose up -d --force-recreate` + tail logs)
+
+### Database Changes
+- New `system_meta` table (key-value store for persistent settings)
+- New `strategy_versions.code` column (TEXT, stores strategy source for DB fallback)
+- Both added as schema/migration — backward compatible
+
+**Tests: 161/161 passing** (+16 new tests)

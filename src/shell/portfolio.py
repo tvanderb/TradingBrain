@@ -109,58 +109,68 @@ class PortfolioTracker:
         matches.sort(key=lambda x: x[1].get("opened_at", ""))
         return matches
 
+    @property
+    def positions(self) -> dict[str, dict]:
+        return self._positions
+
     async def initialize(self) -> None:
         """Load positions from DB on startup."""
         rows = await self._db.fetchall("SELECT * FROM positions")
         for row in rows:
             self._positions[row["tag"]] = dict(row)
-        log.info("portfolio.loaded", positions=len(self._positions), cash=self._cash)
+        log.info("portfolio.loaded", positions=len(self._positions))
 
-        # Load cash from last daily snapshot if available
-        last_snap = await self._db.fetchone(
-            "SELECT cash, portfolio_value, date FROM daily_performance ORDER BY date DESC LIMIT 1"
-        )
-        if last_snap and last_snap.get("cash") is not None:
-            self._cash = last_snap["cash"]
-            # Reconcile: if trades closed after the snapshot, recalculate cash from first principles
-            # cash = starting_capital + deposits - withdrawals + sum(trade PnLs) - sum(open position entry costs)
-            snap_date = last_snap.get("date")
-            if snap_date:
-                post_snap = await self._db.fetchone(
-                    "SELECT COUNT(*) as cnt FROM trades WHERE datetime(closed_at) > datetime(? || 'T23:59:59')",
-                    (snap_date,),
-                )
-                if post_snap and post_snap["cnt"] > 0:
-                    # Full recalculation — more robust than replaying individual trades
-                    starting = self._config.paper_balance_usd
-                    deposits = await self._db.fetchone(
-                        "SELECT COALESCE(SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END), 0) as net FROM capital_events"
-                    )
-                    net_capital = deposits["net"] if deposits else 0
-                    all_pnl = await self._db.fetchone(
-                        "SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE pnl IS NOT NULL"
-                    )
-                    total_pnl = all_pnl["total"] if all_pnl else 0
-                    # Open position entry costs (cash tied up in positions)
-                    position_costs = sum(
-                        p["qty"] * p["avg_entry"] + p.get("entry_fee", 0)
-                        for p in self._positions.values()
-                    )
-                    self._cash = starting + net_capital + total_pnl - position_costs
-                    log.info("portfolio.cash_reconciled", stale_trades=post_snap["cnt"],
-                             cash=round(self._cash, 2))
-        elif self._config.is_paper():
-            self._cash = self._config.paper_balance_usd
+        if self._config.is_paper():
+            # L1 fix: Read starting capital from system_meta (survives config changes)
+            meta_row = await self._db.fetchone(
+                "SELECT value FROM system_meta WHERE key = 'paper_starting_capital'"
+            )
+            if meta_row:
+                starting_capital = float(meta_row["value"])
+                if abs(starting_capital - self._config.paper_balance_usd) > 0.01:
+                    log.warning("portfolio.config_mismatch",
+                                config_value=self._config.paper_balance_usd,
+                                db_value=starting_capital,
+                                note="Using DB value. Use /deposit or /withdraw to adjust capital.")
+            else:
+                starting_capital = self._config.paper_balance_usd
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('paper_starting_capital', ?)",
+                    (str(starting_capital),))
+                await self._db.commit()
+
+            self._starting_cash = starting_capital
+
+            # Always reconcile from first principles in paper mode (L1 fix)
+            # cash = starting_capital + deposits - withdrawals + sum(trade PnLs) - open position entry costs
+            deposits = await self._db.fetchone(
+                "SELECT COALESCE(SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END), 0) as net FROM capital_events"
+            )
+            net_capital = deposits["net"] if deposits else 0
+            all_pnl = await self._db.fetchone(
+                "SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE pnl IS NOT NULL"
+            )
+            total_pnl = all_pnl["total"] if all_pnl else 0
+            position_costs = sum(
+                p["qty"] * p["avg_entry"] + p.get("entry_fee", 0)
+                for p in self._positions.values()
+            )
+            self._cash = starting_capital + net_capital + total_pnl - position_costs
+            log.info("portfolio.cash_reconciled", starting=starting_capital,
+                     cash=round(self._cash, 2))
         else:
-            # Live mode — fetch balance from Kraken
+            # Live mode — fetch balance from Kraken (L7: fail-fast on auth failure)
             try:
                 balances = await self._kraken.get_balance()
                 self._cash = balances.get("ZUSD", balances.get("USD", 0.0))
                 log.info("portfolio.live_balance_loaded", cash=self._cash)
             except Exception as e:
-                log.warning("portfolio.live_balance_failed", error=str(e))
+                raise RuntimeError(f"Live mode: failed to fetch Kraken balance: {e}")
 
         # Use last daily snapshot to preserve daily P&L across restarts
+        last_snap = await self._db.fetchone(
+            "SELECT portfolio_value FROM daily_performance ORDER BY date DESC LIMIT 1"
+        )
         if last_snap and last_snap.get("portfolio_value") is not None:
             self._daily_start_value = last_snap["portfolio_value"]
         else:

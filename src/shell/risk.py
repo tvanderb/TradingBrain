@@ -100,6 +100,38 @@ class RiskManager:
     def peak_portfolio(self) -> float | None:
         return self._peak_portfolio
 
+    def evaluate_halt_state(self, portfolio_value: float, daily_start_value: float) -> None:
+        """Check all halt conditions against current state. Called once after startup."""
+        # Drawdown
+        if self._peak_portfolio is not None:
+            drawdown = (self._peak_portfolio - portfolio_value) / self._peak_portfolio
+            if drawdown > self._config.max_drawdown_pct:
+                self._halted = True
+                self._halt_reason = f"Max drawdown {drawdown:.1%} > {self._config.max_drawdown_pct:.1%}"
+                log.warning("risk.halt_on_startup", reason=self._halt_reason)
+                return
+        # Consecutive losses
+        if self._consecutive_losses >= self._config.rollback_consecutive_losses:
+            self._halted = True
+            self._halt_reason = f"{self._consecutive_losses} consecutive losses"
+            log.warning("risk.halt_on_startup", reason=self._halt_reason)
+            return
+        # Daily loss
+        if daily_start_value > 0:
+            max_daily_loss = daily_start_value * self._config.max_daily_loss_pct
+            if self._daily_pnl < -max_daily_loss:
+                self._halted = True
+                self._halt_reason = f"Daily loss limit: ${self._daily_pnl:.2f}"
+                log.warning("risk.halt_on_startup", reason=self._halt_reason)
+                return
+        # Daily portfolio drop (rollback trigger)
+        if daily_start_value > 0:
+            daily_loss_pct = (daily_start_value - portfolio_value) / daily_start_value
+            if daily_loss_pct > self._config.rollback_daily_loss_pct:
+                self._halted = True
+                self._halt_reason = f"Daily portfolio drop {daily_loss_pct:.1%}"
+                log.warning("risk.halt_on_startup", reason=self._halt_reason)
+
     def reset_daily(self) -> None:
         self._daily_trades = 0
         self._daily_pnl = 0.0

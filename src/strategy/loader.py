@@ -11,10 +11,14 @@ import importlib
 import importlib.util
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from src.shell.contract import StrategyBase
+
+if TYPE_CHECKING:
+    from src.shell.database import Database
 
 log = structlog.get_logger()
 
@@ -106,3 +110,35 @@ def deploy_strategy(code: str, version: str) -> str:
     code_hash = get_code_hash(current_path)
     log.info("strategy.deployed", version=version, hash=code_hash)
     return code_hash
+
+
+async def load_strategy_with_fallback(db: Database) -> StrategyBase | None:
+    """Load strategy with DB fallback chain (L4 fix).
+
+    1. Try filesystem (normal path)
+    2. On failure: recover from latest strategy_versions.code in DB
+    3. On failure: return None (paused mode)
+    """
+    # 1. Try filesystem
+    try:
+        return load_strategy()
+    except Exception as e:
+        log.warning("strategy.filesystem_load_failed", error=str(e))
+
+    # 2. Try DB fallback
+    try:
+        row = await db.fetchone(
+            "SELECT code, version FROM strategy_versions WHERE code IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+        )
+        if row and row["code"]:
+            log.info("strategy.recovering_from_db", version=row["version"])
+            path = get_strategy_path()
+            ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(row["code"])
+            return load_strategy()
+    except Exception as e:
+        log.error("strategy.db_fallback_failed", error=str(e))
+
+    # 3. All sources failed
+    log.error("strategy.all_sources_failed")
+    return None
