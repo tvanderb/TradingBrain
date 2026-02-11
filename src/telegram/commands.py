@@ -51,6 +51,8 @@ class BotCommands:
         self._notifier = notifier
         self._paused = False
         self._last_ask_time: float = 0
+        self._unauth_log_count: int = 0
+        self._unauth_log_last: float = 0
 
     @property
     def is_paused(self) -> bool:
@@ -77,8 +79,14 @@ class BotCommands:
             return False  # No configured users = locked down
         authorized = update.effective_user and update.effective_user.id in allowed
         if not authorized:
-            user_id = update.effective_user.id if update.effective_user else "unknown"
-            log.warning("telegram.unauthorized", user_id=user_id)
+            # Rate-limit unauthorized access logging to prevent log flooding
+            now = time.time()
+            self._unauth_log_count += 1
+            if now - self._unauth_log_last >= 60:
+                user_id = update.effective_user.id if update.effective_user else "unknown"
+                log.warning("telegram.unauthorized", user_id=user_id, suppressed=self._unauth_log_count - 1)
+                self._unauth_log_count = 0
+                self._unauth_log_last = now
         return authorized
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,27 +259,48 @@ class BotCommands:
         if not self._authorized(update):
             return
 
-        rows = await self._db.fetchall("SELECT * FROM positions")
-        if not rows:
+        # Use in-memory positions with live prices (not stale DB column)
+        if self._portfolio and self._portfolio._positions:
+            positions = self._portfolio._positions
+        else:
+            rows = await self._db.fetchall("SELECT * FROM positions")
+            if not rows:
+                await update.message.reply_text("No open positions.")
+                return
+            # Fallback: build dict from DB rows
+            positions = {r.get("tag", f"pos_{i}"): dict(r) for i, r in enumerate(rows)}
+
+        if not positions:
             await update.message.reply_text("No open positions.")
             return
 
+        # Get live prices from scan_state
+        live_prices = {}
+        if self._scan_state.get("symbols"):
+            for sym, data in self._scan_state["symbols"].items():
+                live_prices[sym] = data.get("price", 0)
+
         lines = ["Open Positions:"]
-        for p in rows:
+        for tag, p in positions.items():
             entry = p["avg_entry"]
-            current = p.get("current_price", entry)
+            symbol = p["symbol"]
+            # Prefer live price > in-memory current_price > entry price
+            current = live_prices.get(symbol) or p.get("current_price") or entry
             qty = p["qty"]
             pnl = (current - entry) * qty
             pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
 
-            tag = p.get("tag", "")
             tag_str = f" [{tag}]" if tag else ""
+            sl = p.get("stop_loss")
+            tp = p.get("take_profit")
+            sl_str = f"${sl:.2f}" if sl else "N/A"
+            tp_str = f"${tp:.2f}" if tp else "N/A"
             lines.append(
-                f"\n{p['symbol']}{tag_str} ({p.get('intent', 'DAY')})\n"
+                f"\n{symbol}{tag_str} ({p.get('intent', 'DAY')})\n"
                 f"  Qty: {qty:.6f} @ ${entry:.2f}\n"
                 f"  Now: ${current:.2f} ({pnl_pct:+.1f}%)\n"
                 f"  P&L: ${pnl:+.2f}\n"
-                f"  SL: ${p.get('stop_loss', 0):.2f} | TP: ${p.get('take_profit', 0):.2f}"
+                f"  SL: {sl_str} | TP: {tp_str}"
             )
 
         await self._send_long(update, "\n".join(lines))
@@ -398,13 +427,12 @@ class BotCommands:
             await update.message.reply_text("Usage: /ask <your question>")
             return
 
-        # Rate limiting: 30s between /ask commands
+        # Rate limiting: 30s between successful /ask commands
         now = time.time()
         if now - self._last_ask_time < 30:
             remaining = int(30 - (now - self._last_ask_time))
             await update.message.reply_text(f"Please wait {remaining}s between /ask commands.")
             return
-        self._last_ask_time = now
 
         # Input length limit
         question = question[:500]
@@ -476,6 +504,7 @@ class BotCommands:
             answer = await self._ai.ask_haiku(
                 prompt, system=ASK_SYSTEM_PROMPT, max_tokens=1000, purpose="user_ask"
             )
+            self._last_ask_time = time.time()  # Only rate-limit after successful call
             await self._send_long(update, answer)
         except Exception as e:
             log.error("telegram.ask_failed", error=str(e))

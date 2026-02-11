@@ -640,7 +640,11 @@ class TradingBrain:
                 if results:
                     executed_symbols.add(signal.symbol)
                     # Record signal
-                    result_tag = results[0].get("tag") if len(results) == 1 else signal.tag
+                    if len(results) == 1:
+                        result_tag = results[0].get("tag")
+                    else:
+                        # Multi-close: join all tags for audit trail
+                        result_tag = ",".join(r.get("tag", "") for r in results if r.get("tag"))
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
@@ -967,6 +971,9 @@ class TradingBrain:
             for symbol in self._config.symbols:
                 maker, taker = await self._kraken.get_fee_schedule(symbol)
                 self._pair_fees[symbol] = (maker, taker)
+                await self._db.execute(
+                    "DELETE FROM fee_schedule WHERE symbol = ?", (symbol,)
+                )
                 await self._db.execute(
                     "INSERT INTO fee_schedule (symbol, maker_fee_pct, taker_fee_pct) VALUES (?, ?, ?)",
                     (symbol, maker, taker),
