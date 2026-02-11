@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import importlib.util
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -97,6 +98,9 @@ def check_analysis_imports(code: str) -> list[str]:
         elif isinstance(node, ast.Attribute):
             if node.attr in FORBIDDEN_DUNDERS:
                 errors.append(f"Forbidden dunder access: .{node.attr}")
+            # Block name-mangled private access (e.g., _ReadOnlyDB__conn)
+            elif re.match(r"_\w+__\w+", node.attr):
+                errors.append(f"Forbidden name-mangled access: .{node.attr}")
 
     return errors
 

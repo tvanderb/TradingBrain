@@ -1845,3 +1845,44 @@ After triage: **13 actionable, 2 not actionable**
 
 ### Files Modified (10 source + 1 test)
 `main.py`, `portfolio.py`, `orchestrator.py`, `backtester.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `commands.py`, `tests/test_integration.py`
+
+## Session G (2026-02-10) — Audit Round 9
+
+### Audit Scope
+5 parallel audit agents — 9th audit round. User requested extreme thoroughness.
+
+### Raw Findings: 18 across all agents
+After triage: **17 actionable, 1 false positive**
+
+### False Positive (1)
+- `/v1/trades` returns open trades — trades table only has closed positions (inserted at close time)
+
+### Fixes Applied (17 findings)
+
+#### Critical (1)
+- **G1**: `validate_strategy` has no timeout — infinite loop in AI-generated code hangs entire event loop. Fixed: `concurrent.futures.ThreadPoolExecutor` with 10s timeout on `exec_module`, 15s on `initialize()`+`analyze()`.
+
+#### Medium (8)
+- **G2**: `_analyzing` flag cleared prematurely on strategy timeout while background thread still runs. Fixed: on timeout, `asyncio.shield` prevents future cancellation; background task clears flag when thread finishes.
+- **G3**: Partial SELL leaves exchange SL/TP with stale (too-large) qty. Fixed: always cancel+re-place SL/TP for remaining qty after partial sell (not just when `sl_tp_canceled`).
+- **G4**: BUY average-in without explicit SL/TP skips exchange order qty update. Fixed: check position's existing SL/TP (not just signal's) to determine if exchange orders need updating.
+- **G5**: `"decision": null` in AI JSON crashes cycle (`None.strip()`). Fixed: `str(decision.get("decision") or "NO_CHANGE")`.
+- **G6**: Non-integer `risk_tier`/`suggested_tier` from AI crashes with TypeError. Fixed: `int()` with try/except fallback.
+- **G7**: `schema` variable scoped inside market analysis try-block — cascading NameError if market analysis fails. Fixed: moved `schema = get_schema_description()` before both try blocks.
+- **G8**: Name-mangled `_ReadOnlyDB__conn` bypasses sandbox AST check. Fixed: regex `_\w+__\w+` blocks all name-mangled attribute access in both sandboxes.
+- **G9**: Negative `limit` query parameter bypasses row cap (`LIMIT -1` = all rows in SQLite). Fixed: `max(1, ...)` on all three endpoints.
+
+#### Low (8)
+- **G10**: `_check_conditional_orders` hardcodes `Intent.DAY` instead of using `result["intent"]`. Fixed.
+- **G11**: Signals skipped for invalid price leave no audit trail. Fixed: INSERT into signals with `rejected_reason='invalid_price'`.
+- **G12**: BUY average-in blocked by `max_positions` when not creating new position. Fixed: added `is_new_position` parameter to `check_signal()`.
+- **G13**: Backtest `RiskLimits` missing `max_position_pct` from config. Fixed: passed through.
+- **G14**: `truth.py` strategy version query returns NULL `deployed_at` rows first. Fixed: `WHERE deployed_at IS NOT NULL`.
+- **G15**: `rollback_daily_loss_pct` not validated in config. Fixed: added validation.
+- **G16**: WebSocket `_listen` crashes on non-dict JSON messages (AttributeError). Fixed: added to exception handler.
+- **G17**: `cmd_health` has no error handling around `compute_truth_benchmarks`. Fixed: try/except with user-facing error message.
+
+### Result: **130/130 tests passing**
+
+### Files Modified (12 source)
+`main.py`, `portfolio.py`, `risk.py`, `orchestrator.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `truth.py`, `config.py`, `kraken.py`, `commands.py`

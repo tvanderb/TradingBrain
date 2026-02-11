@@ -165,7 +165,12 @@ class BotCommands:
 
         from src.shell.truth import compute_truth_benchmarks
 
-        truth = await compute_truth_benchmarks(self._db)
+        try:
+            truth = await compute_truth_benchmarks(self._db)
+        except Exception as e:
+            log.error("telegram.health_failed", error=str(e))
+            await update.message.reply_text("Error computing fund health metrics.")
+            return
 
         lines = ["--- Fund Health ---"]
 

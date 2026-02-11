@@ -129,7 +129,7 @@ async def trades_handler(request: web.Request) -> web.Response:
     config = ctx["config"]
     db = ctx["db"]
 
-    limit = min(_safe_int(request.query.get("limit", "50"), 50), 500)
+    limit = max(1, min(_safe_int(request.query.get("limit", "50"), 50), 500))
     since = request.query.get("since")
     until = request.query.get("until")
     symbol = request.query.get("symbol")
@@ -162,7 +162,7 @@ async def performance_handler(request: web.Request) -> web.Response:
 
     since = request.query.get("since")
     until = request.query.get("until")
-    limit = min(_safe_int(request.query.get("limit", "365"), 365), 365)
+    limit = max(1, min(_safe_int(request.query.get("limit", "365"), 365), 365))
 
     query = "SELECT * FROM daily_performance WHERE 1=1"
     params = []
@@ -219,7 +219,7 @@ async def signals_handler(request: web.Request) -> web.Response:
     config = ctx["config"]
     db = ctx["db"]
 
-    limit = min(_safe_int(request.query.get("limit", "50"), 50), 500)
+    limit = max(1, min(_safe_int(request.query.get("limit", "50"), 50), 500))
     since = request.query.get("since")
     until = request.query.get("until")
     symbol = request.query.get("symbol")

@@ -543,10 +543,13 @@ class PortfolioTracker:
                  price=round(fill_price, 2), fee=round(fee, 4), intent=signal.intent.value)
 
         # Place exchange-native SL/TP (live mode only, no-op for paper)
-        if signal.stop_loss or signal.take_profit:
+        # Check both signal SL/TP AND existing position SL/TP (average-in without explicit SL/TP)
+        effective_sl = signal.stop_loss or (pos.get("stop_loss") if existing else None)
+        effective_tp = signal.take_profit or (pos.get("take_profit") if existing else None)
+        if effective_sl or effective_tp:
             entry_txid = None
             if not self._config.is_paper():
-                # Cancel old SL/TP before placing new ones (critical for average-in)
+                # Cancel old SL/TP before placing new ones (critical for average-in qty update)
                 if existing:
                     await self._cancel_exchange_sl_tp(tag)
                 # Retrieve the entry txid from the orders table
@@ -558,7 +561,7 @@ class PortfolioTracker:
             # Use total position qty (not just new fill qty) for SL/TP sizing
             sl_tp_qty = pos["qty"] if existing else qty
             await self._place_exchange_sl_tp(
-                tag, signal.symbol, sl_tp_qty, signal.stop_loss, signal.take_profit,
+                tag, signal.symbol, sl_tp_qty, effective_sl, effective_tp,
                 entry_txid=entry_txid,
             )
 
@@ -700,10 +703,14 @@ class PortfolioTracker:
                 "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
                 (remaining_qty, pos["entry_fee"], now, tag),
             )
-            # Re-place SL/TP for remaining quantity if they were canceled before the close
-            if sl_tp_canceled and (pos.get("stop_loss") or pos.get("take_profit")):
-                log.warning("portfolio.partial_fill_sl_tp_replace", tag=tag,
-                            remaining=round(remaining_qty, 8))
+            # Re-place SL/TP for remaining quantity (needed for both:
+            #   1. full-close that partially filled (sl_tp_canceled=True)
+            #   2. intentional partial sell (sl_tp_canceled=False, exchange SL/TP qty is now stale))
+            if pos.get("stop_loss") or pos.get("take_profit"):
+                if not sl_tp_canceled:
+                    await self._cancel_exchange_sl_tp(tag)
+                log.info("portfolio.partial_sl_tp_replace", tag=tag,
+                         remaining=round(remaining_qty, 8))
                 await self._place_exchange_sl_tp(
                     tag, symbol, remaining_qty, pos.get("stop_loss"), pos.get("take_profit"),
                 )

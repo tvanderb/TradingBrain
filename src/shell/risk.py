@@ -123,6 +123,7 @@ class RiskManager:
         open_position_count: int,
         position_value_for_symbol: float = 0.0,
         daily_start_value: float | None = None,
+        is_new_position: bool = True,
     ) -> RiskCheck:
         """Validate a signal against all risk limits. Returns pass/fail with reason."""
         trade_value = 0.0  # Initialize before conditional blocks that use it
@@ -148,8 +149,8 @@ class RiskManager:
         if self._daily_trades >= self._config.max_daily_trades and not is_exit:
             return RiskCheck(False, f"Daily trade limit: {self._daily_trades}/{self._config.max_daily_trades}")
 
-        # Max positions (only for new entries)
-        if signal.action == Action.BUY and open_position_count >= self._config.max_positions:
+        # Max positions (only for genuinely new positions, not average-in)
+        if signal.action == Action.BUY and is_new_position and open_position_count >= self._config.max_positions:
             return RiskCheck(False, f"Max positions: {open_position_count}/{self._config.max_positions}")
 
         # Per-trade size limit (only for new entries — exits/modifies can have size_pct=0)

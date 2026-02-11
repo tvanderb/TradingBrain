@@ -369,7 +369,7 @@ class KrakenWebSocket:
                             except Exception as e:
                                 log.error("websocket.callback_error", channel="ohlc", error=str(e))
 
-            except (KeyError, ValueError) as e:
+            except (KeyError, ValueError, AttributeError) as e:
                 log.debug("websocket.msg_parse_error", error=str(e))
                 continue
 

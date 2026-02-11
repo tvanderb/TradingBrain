@@ -11,7 +11,9 @@ Tests that strategy code:
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import importlib.util
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -99,6 +101,9 @@ def check_imports(code: str) -> list[str]:
         elif isinstance(node, ast.Attribute):
             if node.attr in FORBIDDEN_DUNDERS:
                 errors.append(f"Forbidden dunder access: .{node.attr}")
+            # Block name-mangled private access (e.g., _ClassName__attr)
+            elif re.match(r"_\w+__\w+", node.attr):
+                errors.append(f"Forbidden name-mangled access: .{node.attr}")
 
     return errors
 
@@ -189,7 +194,14 @@ def validate_strategy(code: str) -> SandboxResult:
         spec = importlib.util.spec_from_file_location(module_name, tmp_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+
+        # Run exec_module in thread with timeout (catches infinite loops at module level)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(spec.loader.exec_module, module)
+            try:
+                future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                return SandboxResult(False, ["Module import timed out (>10s) — possible infinite loop at module level"], [])
 
         # Step 4: Check Strategy class exists
         strategy_cls = getattr(module, "Strategy", None)
@@ -200,12 +212,18 @@ def validate_strategy(code: str) -> SandboxResult:
         if not isinstance(strategy, StrategyBase):
             return SandboxResult(False, ["Strategy must inherit from StrategyBase"], [])
 
-        # Step 5: Test initialize()
+        # Step 5: Test initialize() + analyze() with timeout (catches infinite loops)
         markets, portfolio, risk_limits = _make_sample_data()
-        strategy.initialize(risk_limits, list(markets.keys()))
+        def _run_strategy_test():
+            strategy.initialize(risk_limits, list(markets.keys()))
+            return strategy.analyze(markets, portfolio, datetime.now())
 
-        # Step 6: Test analyze()
-        signals = strategy.analyze(markets, portfolio, datetime.now())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_strategy_test)
+            try:
+                signals = future.result(timeout=15)
+            except concurrent.futures.TimeoutError:
+                return SandboxResult(False, ["Strategy initialize/analyze timed out (>15s) — possible infinite loop"], [])
 
         if not isinstance(signals, list):
             errors.append(f"analyze() must return list, got {type(signals).__name__}")

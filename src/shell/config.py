@@ -275,6 +275,8 @@ def _validate_config(config: Config) -> None:
         errors.append(f"rollback_consecutive_losses must be >= 1, got {config.risk.rollback_consecutive_losses}")
     if config.fees.check_interval_hours < 1:
         errors.append(f"fees.check_interval_hours must be >= 1, got {config.fees.check_interval_hours}")
+    if not (0 < config.risk.rollback_daily_loss_pct <= 1):
+        errors.append(f"rollback_daily_loss_pct must be 0-1, got {config.risk.rollback_daily_loss_pct}")
     if hasattr(config, 'api') and config.api.enabled:
         if not (1 <= config.api.port <= 65535):
             errors.append(f"api.port must be 1-65535, got {config.api.port}")

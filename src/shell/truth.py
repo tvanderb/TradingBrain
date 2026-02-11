@@ -127,7 +127,7 @@ async def compute_truth_benchmarks(db: Database) -> dict:
 
     # --- Strategy Version ---
     version_row = await db.fetchone(
-        "SELECT version FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
+        "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
     )
     benchmarks["current_strategy_version"] = version_row["version"] if version_row else None
 

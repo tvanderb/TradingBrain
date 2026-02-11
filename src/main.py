@@ -565,31 +565,47 @@ class TradingBrain:
             portfolio_value = portfolio.total_value
 
             # Run strategy (with timeout to catch infinite loops in AI-rewritten code)
+            executor_future = None
             try:
                 self._analyzing = True
-                signals = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(
-                        None, self._strategy.analyze, dict(markets), portfolio, datetime.now()
-                    ),
-                    timeout=30,
+                loop = asyncio.get_running_loop()
+                executor_future = loop.run_in_executor(
+                    None, self._strategy.analyze, dict(markets), portfolio, datetime.now()
                 )
+                signals = await asyncio.wait_for(asyncio.shield(executor_future), timeout=30)
             except asyncio.TimeoutError:
                 log.error("scan.strategy_timeout", note="strategy.analyze() took >30s")
                 if self._notifier:
                     await self._notifier.system_error("Strategy analyze() timed out (>30s) — possible infinite loop")
+                # Thread is still running — clear _analyzing only when it finishes
+                if executor_future is not None:
+                    async def _wait_for_executor():
+                        try:
+                            await executor_future
+                        except Exception:
+                            pass
+                        finally:
+                            self._analyzing = False
+                    asyncio.create_task(_wait_for_executor())
+                else:
+                    self._analyzing = False
                 return
             finally:
-                self._analyzing = False
+                # Only clear if we didn't timeout (timeout path handles it via task)
+                if executor_future is not None and executor_future.done():
+                    self._analyzing = False
 
             # Process signals
             executed_symbols = set()
             halt_notified = False
             for signal in signals:
                 # Risk check (refresh portfolio_value after each execution for TOCTOU safety)
+                is_new = not signal.tag or signal.tag not in self._portfolio._positions
                 check = self._risk.check_signal(
                     signal, portfolio_value, self._portfolio.position_count,
                     self._portfolio.get_position_value(signal.symbol),
                     daily_start_value=self._portfolio.daily_start_value,
+                    is_new_position=is_new,
                 )
 
                 if not check.passed:
@@ -614,6 +630,11 @@ class TradingBrain:
                 price = prices.get(signal.symbol, 0)
                 if price <= 0:
                     log.warning("scan.invalid_price", symbol=signal.symbol, price=price)
+                    await self._db.execute(
+                        "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'invalid_price')",
+                        (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
+                         signal.intent.value, signal.reasoning, None, signal.tag),
+                    )
                     continue
                 sym_fees = self._pair_fees.get(signal.symbol)
                 async with self._trade_lock:
@@ -943,6 +964,10 @@ class TradingBrain:
                     # Strategy callbacks (skip if analyze() in executor — thread-safety)
                     if not self._analyzing and self._strategy:
                         try:
+                            actual_intent = Intent[result.get("intent", "DAY")]
+                        except KeyError:
+                            actual_intent = Intent.DAY
+                        try:
                             self._strategy.on_position_closed(
                                 result["symbol"], result["pnl"], result["pnl_pct"], tag=tag,
                             )
@@ -956,13 +981,13 @@ class TradingBrain:
                         try:
                             self._strategy.on_fill(
                                 symbol, Action.CLOSE, result["qty"], result["price"],
-                                Intent.DAY, tag=tag,
+                                actual_intent, tag=tag,
                             )
                         except (TypeError, RuntimeError):
                             try:
                                 self._strategy.on_fill(
                                     symbol, Action.CLOSE, result["qty"], result["price"],
-                                    Intent.DAY,
+                                    actual_intent,
                                 )
                             except (TypeError, RuntimeError):
                                 pass

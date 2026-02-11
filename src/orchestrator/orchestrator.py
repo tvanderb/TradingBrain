@@ -424,7 +424,7 @@ class Orchestrator:
             decision = await self._analyze(context)
 
             # 3. Execute decision
-            decision_type = decision.get("decision", "NO_CHANGE").strip().upper()
+            decision_type = str(decision.get("decision") or "NO_CHANGE").strip().upper()
             deployed_version = None
 
             valid_strategy_types = {
@@ -488,11 +488,12 @@ class Orchestrator:
             log.error("orchestrator.truth_benchmarks_failed", error=str(e))
             ground_truth = {"error": str(e)}
 
+        schema = get_schema_description()
+
         # --- 2. MARKET ANALYSIS (flexible module, orchestrator can rewrite) ---
         try:
             market_module = load_analysis_module("market_analysis")
             ro_db = ReadOnlyDB(self._db.conn)
-            schema = get_schema_description()
             market_report = await asyncio.wait_for(
                 market_module.analyze(ro_db, schema), timeout=30,
             )
@@ -769,8 +770,11 @@ Respond in JSON format."""
 
     async def _execute_change(self, decision: dict, context: dict) -> str:
         """Execute a strategy change: generate -> review -> sandbox -> backtest."""
-        tier = max(1, min(3, decision.get("risk_tier", 1)))
-        changes = decision.get("specific_changes", "")
+        try:
+            tier = max(1, min(3, int(decision.get("risk_tier", 1))))
+        except (TypeError, ValueError):
+            tier = 1
+        changes = str(decision.get("specific_changes") or "")
         max_revisions = self._config.orchestrator.max_revisions
 
         # Get parent version for lineage tracking
@@ -917,7 +921,10 @@ Is this classification correct?
 
             if review.get("approved"):
                 # Determine actual risk tier
-                actual_tier = max(1, min(3, review.get("suggested_tier", tier)))
+                try:
+                    actual_tier = max(1, min(3, int(review.get("suggested_tier", tier))))
+                except (TypeError, ValueError):
+                    actual_tier = tier
                 paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
 
                 # Backtest against historical data before deploying
@@ -1083,7 +1090,7 @@ Is this classification correct?
             if decision_type == "MARKET_ANALYSIS_UPDATE"
             else "trade_performance"
         )
-        changes = decision.get("specific_changes", "")
+        changes = str(decision.get("specific_changes") or "")
         current_code = context.get(
             "market_analysis_code"
             if module_name == "market_analysis"
@@ -1251,6 +1258,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 max_positions=self._config.risk.max_positions,
                 max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                 max_drawdown_pct=self._config.risk.max_drawdown_pct,
+                max_position_pct=self._config.risk.max_position_pct,
             )
 
             # Pull per-pair fees from DB (live fee schedule from Kraken API)
