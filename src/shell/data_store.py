@@ -89,7 +89,9 @@ class DataStore:
 
     async def aggregate_5m_to_1h(self) -> int:
         """Aggregate 5-minute candles older than retention into 1-hour candles."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_5m_retention_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        cutoff_raw = datetime.now(timezone.utc) - timedelta(days=self._config.candle_5m_retention_days)
+        # Snap to hour boundary to avoid splitting a clock-hour across two aggregation runs
+        cutoff = cutoff_raw.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
         # Get distinct symbols with 5m data older than cutoff
         symbols = await self._db.fetchall(
@@ -142,7 +144,9 @@ class DataStore:
 
     async def aggregate_1h_to_daily(self) -> int:
         """Aggregate 1-hour candles older than retention into daily candles."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_1h_retention_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        cutoff_raw = datetime.now(timezone.utc) - timedelta(days=self._config.candle_1h_retention_days)
+        # Snap to day boundary to avoid splitting a clock-day across two aggregation runs
+        cutoff = cutoff_raw.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
         symbols = await self._db.fetchall(
             "SELECT DISTINCT symbol FROM candles WHERE timeframe = '1h' AND timestamp < ?",
@@ -203,7 +207,7 @@ class DataStore:
         await self._db.commit()
 
         # Prune old token usage logs (aggregate after 3 months)
-        token_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        token_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
         await self._db.execute(
             "DELETE FROM token_usage WHERE created_at < ?",
             (token_cutoff,),
@@ -216,7 +220,7 @@ class DataStore:
         )
 
         # Prune old signal history (6 months)
-        signal_cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+        signal_cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%Y-%m-%d %H:%M:%S")
         await self._db.execute(
             "DELETE FROM signals WHERE created_at < ?",
             (signal_cutoff,),

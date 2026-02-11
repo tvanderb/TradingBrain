@@ -301,6 +301,10 @@ class Backtester:
                         pos["qty"] * prices.get(pos.get("symbol", ""), pos["avg_entry"])
                         for pos in positions.values()
                     )
+                    # Check daily loss halt after BUY (fees reduce total_value)
+                    daily_pnl = total_value - day_start_value
+                    if day_start_value > 0 and (-daily_pnl / day_start_value) >= self._risk_limits.max_daily_loss_pct:
+                        halted_today = True
 
                 elif signal.action in (Action.SELL, Action.CLOSE):
                     # CLOSE without tag: close ALL positions for this symbol (matches live behavior)

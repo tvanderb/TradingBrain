@@ -3884,13 +3884,12 @@ async def test_risk_counters_restored_on_restart():
         db = Database(config.db_path)
         await db.connect()
 
-        # Seed trades with timestamps in configured timezone so date query matches
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(config.timezone)
-        now = datetime.now(tz)
-        t1 = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
-        t2 = (now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S")
-        t3 = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        # Seed trades with UTC timestamps (matching what portfolio.py stores)
+        from datetime import timezone as tz_utc
+        now = datetime.now(tz_utc.utc)
+        t1 = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+        t2 = (now - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+        t3 = (now - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
 
         # First: win at t1. Then two consecutive losses (t2, t3 — most recent)
         await db.execute(
@@ -4713,3 +4712,251 @@ def test_send_long_error_handling():
     source = inspect.getsource(BotCommands._send_long)
     assert "try:" in source, "_send_long should have error handling"
     assert "except" in source, "_send_long should catch exceptions"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Session H: Test Coverage Gap Fixes (T1–T4)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_api_positions_with_data():
+    """T1: /v1/positions returns unrealized P&L, tag, SL/TP with actual position data."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api import api_key_key
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed a position
+        await db.execute(
+            """INSERT INTO positions (symbol, tag, side, qty, avg_entry, current_price,
+               stop_loss, take_profit, intent, opened_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", "core_btc_001", "long", 0.01, 50000, 52000,
+             48000, 60000, "SWING", "2026-02-10 12:00:00"),
+        )
+        await db.commit()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=1000.0)
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "models": {}})
+        ai.tokens_remaining = 1500000
+
+        # Scan state has live price for BTC/USD
+        scan_state = {"symbols": {"BTC/USD": {"price": 53000, "spread": 0.2}}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+        app[api_key_key] = "test-key"
+        headers = {"Authorization": "Bearer test-key"}
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/v1/positions", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            positions = body["data"]
+            assert len(positions) == 1
+
+            pos = positions[0]
+            assert pos["symbol"] == "BTC/USD"
+            assert pos["tag"] == "core_btc_001"
+            assert pos["entry_price"] == 50000
+            assert pos["current_price"] == 53000  # From scan_state, not DB
+            assert pos["stop_loss"] == 48000
+            assert pos["take_profit"] == 60000
+
+            # Unrealized P&L: (53000 - 50000) * 0.01 = 30.0
+            assert pos["unrealized_pnl"] == 30.0
+            # Unrealized P&L %: (53000/50000 - 1) * 100 = 6.0
+            assert pos["unrealized_pnl_pct"] == 6.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_api_portfolio_and_risk_nontrivial():
+    """T2: /v1/portfolio and /v1/risk with non-trivial state (drawdown, daily PnL)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api import api_key_key
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        risk._daily_pnl = -25.0
+        risk._daily_trades = 3
+        risk._consecutive_losses = 2
+        risk._peak_portfolio = 1100.0  # Higher than current → drawdown
+
+        # Portfolio with actual positions
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=950.0)
+        portfolio.position_count = 2
+        pos_mock = MagicMock()
+        pos_mock.unrealized_pnl = 15.0
+        portfolio.get_portfolio = AsyncMock(return_value=MagicMock(
+            total_value=950.0, cash=700.0, positions=[pos_mock]
+        ))
+
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 500, "total_cost": 0.005, "models": {}})
+        ai.tokens_remaining = 1499500
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+        app[api_key_key] = "test-key"
+        headers = {"Authorization": "Bearer test-key"}
+
+        async with TestClient(TestServer(app)) as client:
+            # /v1/portfolio — verify allocation math
+            resp = await client.get("/v1/portfolio", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["total_value"] == 950.0
+            assert body["data"]["cash"] == 700.0
+            assert body["data"]["unrealized_pnl"] == 15.0
+            assert body["data"]["position_count"] == 1  # len(positions) from mock
+            cash_pct = body["data"]["allocation"]["cash_pct"]
+            assert abs(cash_pct - 73.7) < 0.1  # 700/950*100
+
+            # /v1/risk — verify non-zero risk state
+            resp = await client.get("/v1/risk", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            current = body["data"]["current"]
+            assert current["daily_pnl"] == -25.0
+            assert current["daily_trades"] == 3
+            assert current["consecutive_losses"] == 2
+            # Drawdown: (1100 - 950) / 1100 ≈ 0.1364
+            assert abs(current["drawdown_pct"] - 0.1364) < 0.001
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_websocket_auth_rejection_and_max_clients():
+    """T3: WebSocket rejects wrong token (401) and enforces max client limit (503)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api import api_key_key
+    from src.api.server import create_app
+    from src.api.websocket import WebSocketManager
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        app, ws_manager = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+        app[api_key_key] = "correct-token"
+
+        async with TestClient(TestServer(app)) as client:
+            # Wrong token → should fail with 401
+            resp = await client.get("/v1/events", params={"token": "wrong-token"})
+            assert resp.status == 401
+
+            # No token → should fail with 401
+            resp = await client.get("/v1/events")
+            assert resp.status == 401
+
+            # Correct token → should upgrade to WebSocket
+            async with client.ws_connect("/v1/events?token=correct-token") as ws:
+                assert ws_manager.client_count == 1
+
+            # After disconnect
+            assert ws_manager.client_count == 0
+
+            # Test max clients enforcement by filling up _clients with mocks
+            original_max = WebSocketManager.MAX_CLIENTS
+            WebSocketManager.MAX_CLIENTS = 0  # Set to 0 so next connect exceeds
+            try:
+                resp = await client.get("/v1/events", params={"token": "correct-token"})
+                assert resp.status == 503
+            finally:
+                WebSocketManager.MAX_CLIENTS = original_max
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_rate_limit_timestamp_set_on_success():
+    """T4: /ask sets _last_ask_time after successful AI call (not just on rejection)."""
+    import time as time_mod
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+
+    config = load_config()
+    mock_db = MagicMock()
+
+    # Mock DB queries that cmd_ask uses for context
+    mock_db.fetchall = AsyncMock(return_value=[])
+    mock_db.fetchone = AsyncMock(return_value=None)
+
+    mock_ai = MagicMock()
+    mock_ai.ask_haiku = AsyncMock(return_value="The fund is performing well.")
+
+    commands = BotCommands(config=config, db=mock_db, scan_state={}, ai_client=mock_ai)
+
+    # Verify initial state
+    assert commands._last_ask_time == 0
+
+    # Create mock update for /ask call
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = config.telegram.allowed_user_ids[0] if config.telegram.allowed_user_ids else 12345
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.args = ["How", "is", "the", "fund?"]
+
+    if not config.telegram.allowed_user_ids:
+        config.telegram.allowed_user_ids = [update.effective_user.id]
+
+    before = time_mod.time()
+    await commands.cmd_ask(update, context)
+    after = time_mod.time()
+
+    # AI should have been called
+    mock_ai.ask_haiku.assert_called_once()
+
+    # _last_ask_time should now be set to a timestamp between before and after
+    assert commands._last_ask_time >= before
+    assert commands._last_ask_time <= after
+
+    # Verify a response was sent (not a rate limit message)
+    reply_calls = update.message.reply_text.call_args_list
+    assert any("performing" in str(call).lower() or "fund" in str(call).lower()
+               for call in reply_calls), f"Expected AI response, got: {reply_calls}"

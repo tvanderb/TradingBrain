@@ -1084,7 +1084,7 @@ Is this classification correct?
 
         No paper testing required — analysis modules are read-only.
         """
-        decision_type = decision.get("decision", "")
+        decision_type = str(decision.get("decision") or "").strip().upper()
         module_name = (
             "market_analysis"
             if decision_type == "MARKET_ANALYSIS_UPDATE"
@@ -1230,7 +1230,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             mod = importlib.util.module_from_spec(spec)
             try:
                 await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
+                    asyncio.get_running_loop().run_in_executor(
                         None, spec.loader.exec_module, mod
                     ),
                     timeout=10,
@@ -1287,7 +1287,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             import asyncio
             try:
                 result = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
+                    asyncio.get_running_loop().run_in_executor(
                         None, bt.run, candle_data, "5m"
                     ),
                     timeout=60,

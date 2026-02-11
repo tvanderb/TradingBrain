@@ -1886,3 +1886,91 @@ After triage: **17 actionable, 1 false positive**
 
 ### Files Modified (12 source)
 `main.py`, `portfolio.py`, `risk.py`, `orchestrator.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `truth.py`, `config.py`, `kraken.py`, `commands.py`
+
+## Session H (2026-02-11) — Audit Round 10
+
+### Audit Scope
+5 parallel audit agents — 10th audit round across all sessions. User demanded thoroughness given each prior round continued to find issues. Each agent received the complete cumulative list of ~170 prior fixes to avoid re-reports.
+
+### Raw Findings: 16 across all agents
+After triage: **12 production fixes + 4 test coverage gaps**
+
+### Production Fixes
+
+#### Medium (6)
+
+- **H1**: Scan loop strategy callbacks catch only `TypeError`, not `(TypeError, RuntimeError)`.
+  - Position monitor and `_check_conditional_orders` already catch both, but the scan loop's `on_position_closed` and `on_fill` fallback calls (lines 688-691, 698-701 of main.py) only catch `TypeError`. If the AI-rewritten strategy raises `RuntimeError` from the fallback call, the exception propagates out of the result processing loop, skipping P&L recording, rollback checks, and peak updates for remaining results.
+  - **Fix**: Match the position monitor pattern — outer `except (TypeError, RuntimeError)`, inner try/except `(TypeError, RuntimeError)` with `pass`.
+
+- **H2**: `snapshot_daily` uses bare local date strings against UTC ISO timestamps.
+  - `closed_at` stores full UTC ISO like `'2026-02-11T03:00:00+00:00'`. Query compares against `'2026-02-11'` and `'2026-02-12'`. For US/Eastern (UTC-5), trades closed between midnight-5am UTC (which is 7pm-midnight Eastern previous day) have a UTC date that's one day ahead of the local date. These trades get attributed to the wrong local day in the daily snapshot.
+  - **Impact**: ~5 hours/day of trades attributed to wrong day in `daily_performance` table.
+  - **Fix**: Convert local day boundaries to full UTC ISO timestamps for query comparison.
+
+- **H3**: `risk.initialize` daily counter restoration has same timezone boundary mismatch.
+  - Same root cause as H2. After restart, `_daily_trades` and `_daily_pnl` may include trades from the previous local day or exclude trades from the current local day.
+  - **Fix**: Same approach — convert local day start to UTC ISO for the query.
+
+- **H4**: Analysis module routing uses raw un-normalized decision type.
+  - `_execute_analysis_change` reads `decision.get("decision", "")` directly (line 1087), without the `.strip().upper()` normalization applied at line 427. If the AI returns `"Market_Analysis_Update"` (mixed case), the routing to `_execute_analysis_change` works (line 437 uses the normalized value), but inside that method the module selection comparison fails, causing it to rewrite `trade_performance` instead of `market_analysis`.
+  - **Fix**: Apply same normalization: `str(decision.get("decision") or "").strip().upper()`.
+
+- **H5**: Analysis sandbox `exec_module` has no timeout.
+  - Strategy sandbox was fixed in Session G (G1) with ThreadPoolExecutor timeout for `exec_module`. The analysis sandbox at line 154 of `statistics/sandbox.py` still calls `exec_module` directly with no timeout. An infinite loop at module level in AI-generated analysis code hangs the orchestrator.
+  - **Fix**: Add ThreadPoolExecutor with 10s timeout, matching strategy sandbox.
+
+- **H6**: Candle aggregation boundary-hour data loss.
+  - When the retention cutoff lands mid-hour (which it almost always does), `aggregate_5m_to_1h` creates a partial hourly candle from pre-cutoff 5m candles, then deletes them. Next night, the remaining 5m candles for that same hour are aggregated into a new hourly candle, and `INSERT OR REPLACE` overwrites the previous partial. The first batch's OHLCV data is permanently lost.
+  - **Impact**: ~9 corrupted hourly candles per night (1 per symbol).
+  - **Fix**: Snap the cutoff to the nearest hour boundary (for 5m→1h) and day boundary (for 1h→daily).
+
+#### Low (6)
+
+- **H7**: Emergency stop doesn't update risk manager daily P&L/trade counters.
+  - After emergency stop closes all positions, `_risk._daily_pnl` still shows 0. New BUYs after scheduler resumes may pass daily loss limit check despite the fund having exceeded it.
+  - **Fix**: Capture result from `execute_signal` and call `risk.record_trade_result()`.
+
+- **H8**: `_close_qty` missing `close_fraction` clamp.
+  - `record_exchange_fill` clamps `close_fraction = min(filled_volume / pos["qty"], 1.0)` but `_close_qty` at line 677 doesn't. If Kraken fills slightly more than requested (rounding), `close_fraction > 1.0` causes minor P&L error.
+  - **Fix**: `close_fraction = min(qty / pos["qty"], 1.0)`.
+
+- **H9**: Backtester no daily loss halt check after BUY fees.
+  - After SELL/CLOSE the backtester checks daily loss halt, but after BUY it doesn't. Accumulated fees from many BUYs could push daily PnL past the halt threshold without triggering it.
+  - **Fix**: Add daily PnL check after BUY, matching SELL/CLOSE pattern.
+
+- **H10**: `asyncio.get_event_loop()` deprecated in Python 3.14.
+  - Two occurrences in orchestrator.py `_run_backtest`. Should be `get_running_loop()`.
+  - **Fix**: Replace both occurrences.
+
+- **H11**: `prune_old_data` uses `.isoformat()` vs SQLite `datetime('now')` format.
+  - Cutoff strings have `T` separator and `+00:00` suffix; DB timestamps use space separator and no suffix. SQLite string comparison causes ~24h over-deletion.
+  - **Fix**: Use `.strftime("%Y-%m-%d %H:%M:%S")` instead of `.isoformat()`.
+
+- **H12**: `cmd_thought` chunked sends have no error handling.
+  - Unlike `_send_long`, the `cmd_thought` message sending has no try/except. A Telegram API failure during multi-chunk sends causes an unhandled exception.
+  - **Fix**: Wrap in try/except matching `_send_long` pattern.
+
+### Test Coverage Gaps (4 new tests)
+
+- **T1**: `/v1/positions` with actual position data — verifies unrealized P&L computation, tag extraction, SL/TP formatting.
+- **T2**: `/v1/portfolio` and `/v1/risk` with non-trivial state — verifies computed drawdown, daily PnL percentage.
+- **T3**: WebSocket auth rejection (wrong token → 401) and max client limit (→ 503).
+- **T4**: Rate limit test verifies `_last_ask_time` is set after successful call (not manually injected).
+
+### Files to Modify
+- `src/main.py` — H1 (callbacks), H7 (emergency stop risk counters)
+- `src/shell/portfolio.py` — H2 (snapshot_daily timezone), H8 (close_fraction clamp)
+- `src/shell/risk.py` — H3 (initialize timezone)
+- `src/orchestrator/orchestrator.py` — H4 (decision normalize), H10 (get_running_loop)
+- `src/statistics/sandbox.py` — H5 (exec_module timeout)
+- `src/shell/data_store.py` — H6 (aggregation boundary), H11 (prune format)
+- `src/strategy/backtester.py` — H9 (BUY halt check)
+- `src/telegram/commands.py` — H12 (cmd_thought error handling)
+- `tests/test_integration.py` — T1, T2, T3, T4, risk counter test UTC fix
+
+### Implementation Results
+- **All 12 production fixes applied** (H1-H12)
+- **4 new tests written** (T1-T4)
+- **1 existing test fixed**: `test_risk_counters_restored_on_restart` — updated to use UTC timestamps matching H3's timezone-aware query
+- **Tests: 134/134 passing** (was 130/130)

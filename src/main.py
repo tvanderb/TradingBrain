@@ -685,21 +685,27 @@ class TradingBrain:
                                     result["symbol"], result["pnl"], result.get("pnl_pct", 0),
                                     tag=result.get("tag", ""),
                                 )
-                            except TypeError:
-                                self._strategy.on_position_closed(
-                                    result["symbol"], result["pnl"], result.get("pnl_pct", 0),
-                                )
+                            except (TypeError, RuntimeError):
+                                try:
+                                    self._strategy.on_position_closed(
+                                        result["symbol"], result["pnl"], result.get("pnl_pct", 0),
+                                    )
+                                except (TypeError, RuntimeError):
+                                    pass
 
                         try:
                             self._strategy.on_fill(
                                 signal.symbol, signal.action, result["qty"], result["price"],
                                 signal.intent, tag=result.get("tag", ""),
                             )
-                        except TypeError:
-                            self._strategy.on_fill(
-                                signal.symbol, signal.action, result["qty"], result["price"],
-                                signal.intent,
-                            )
+                        except (TypeError, RuntimeError):
+                            try:
+                                self._strategy.on_fill(
+                                    signal.symbol, signal.action, result["qty"], result["price"],
+                                    signal.intent,
+                                )
+                            except (TypeError, RuntimeError):
+                                pass
 
                         # Notify
                         await self._notifier.trade_executed(result)
@@ -1156,11 +1162,17 @@ class TradingBrain:
                     )
                     sym_fees = self._pair_fees.get(pos["symbol"])
                     async with self._trade_lock:
-                        await self._portfolio.execute_signal(
+                        result = await self._portfolio.execute_signal(
                             signal, price,
                             sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                             sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
                         )
+                    # Update risk counters so daily loss limit reflects emergency closes
+                    if result:
+                        results = result if isinstance(result, list) else [result]
+                        for r in results:
+                            if r.get("pnl") is not None:
+                                self._risk.record_trade_result(r["pnl"])
                     break  # Success
                 except Exception as e:
                     log.error("emergency.close_failed", symbol=pos["symbol"],

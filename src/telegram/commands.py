@@ -618,14 +618,17 @@ class BotCommands:
         text = row["full_response"]
         max_chunk = 4096 - len(header) - 50  # margin for chunk label
 
-        if len(text) <= max_chunk:
-            await update.message.reply_text(header + text)
-        else:
-            # Split into chunks
-            chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
-            for i, chunk in enumerate(chunks):
-                prefix = header if i == 0 else f"(part {i+1}/{len(chunks)})\n"
-                await update.message.reply_text(prefix + chunk)
+        try:
+            if len(text) <= max_chunk:
+                await update.message.reply_text(header + text)
+            else:
+                # Split into chunks
+                chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
+                for i, chunk in enumerate(chunks):
+                    prefix = header if i == 0 else f"(part {i+1}/{len(chunks)})\n"
+                    await update.message.reply_text(prefix + chunk)
+        except Exception as e:
+            log.error("telegram.thought_send_failed", error=str(e))
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

@@ -151,7 +151,15 @@ def validate_analysis_module(code: str, module_name: str) -> AnalysisSandboxResu
         spec = importlib.util.spec_from_file_location(sys_module_name, tmp_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[sys_module_name] = module
-        spec.loader.exec_module(module)
+
+        # Run exec_module in thread with timeout (catches infinite loops at module level)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(spec.loader.exec_module, module)
+            try:
+                future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                return AnalysisSandboxResult(False, ["Module import timed out (>10s) — possible infinite loop at module level"], [])
 
         # Step 4: Check Analysis class exists and inherits AnalysisBase
         analysis_cls = getattr(module, "Analysis", None)

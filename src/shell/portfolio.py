@@ -674,7 +674,7 @@ class PortfolioTracker:
         entry = pos["avg_entry"]
         # Apportion entry fee proportionally for partial closes
         total_entry_fee = pos.get("entry_fee", 0.0)
-        close_fraction = qty / pos["qty"] if pos["qty"] > 0 else 1.0
+        close_fraction = min(qty / pos["qty"], 1.0) if pos["qty"] > 0 else 1.0
         entry_fee_portion = total_entry_fee * close_fraction
         total_fee = entry_fee_portion + fee
         pnl = (fill_price - entry) * qty - total_fee
@@ -973,10 +973,13 @@ class PortfolioTracker:
 
     async def snapshot_daily(self) -> None:
         """Record end-of-day performance snapshot."""
-        # Use configured timezone for date boundary (not UTC)
+        # Use configured timezone for date boundary, converted to UTC ISO for comparison
         tz = ZoneInfo(self._config.timezone)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        tomorrow = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+        local_today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        local_tomorrow = local_today + timedelta(days=1)
+        today = local_today.strftime("%Y-%m-%d")  # For the date column
+        today_utc = local_today.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        tomorrow_utc = local_tomorrow.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         # Flush current prices to DB before snapshot query
         for tag, pos in self._positions.items():
@@ -987,8 +990,8 @@ class PortfolioTracker:
 
         tv = await self.total_value()
         trades = await self._db.fetchall(
-            "SELECT pnl, fees FROM trades WHERE closed_at >= ? AND closed_at < ? AND pnl IS NOT NULL",
-            (today, tomorrow),
+            "SELECT pnl, fees FROM trades WHERE datetime(closed_at) >= datetime(?) AND datetime(closed_at) < datetime(?) AND pnl IS NOT NULL",
+            (today_utc, tomorrow_utc),
         )
         wins = sum(1 for t in trades if t["pnl"] > 0)
         losses = sum(1 for t in trades if t["pnl"] < 0)

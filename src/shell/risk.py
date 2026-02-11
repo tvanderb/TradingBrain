@@ -48,10 +48,11 @@ class RiskManager:
 
         # Restore daily counters — use configured timezone to match daily reset boundary
         tz = ZoneInfo(tz_name)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
+        local_today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_utc = local_today.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         day_row = await db.fetchone(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE closed_at >= ?",
-            (today,),
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE datetime(closed_at) >= datetime(?)",
+            (today_utc,),
         )
         if day_row:
             self._daily_trades = day_row["cnt"]
