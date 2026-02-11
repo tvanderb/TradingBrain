@@ -29,7 +29,7 @@ db_size=$(stat -c%s "$DB" 2>/dev/null || echo 0)
 
 # DB queries — single sqlite3 call, pipe-separated
 IFS='|' read -r scans last_scan c5m c1h c1d versions thoughts obs sigs trades positions ai_calls \
-    orders cond_orders open_positions daily_perf_rows paper_tests \
+    orders cond_orders daily_perf_rows paper_tests \
     close_signal close_sl close_tp close_emergency close_recon \
     <<< $(sqlite3 "$DB" "
 SELECT
@@ -47,7 +47,6 @@ SELECT
   (SELECT COUNT(*) FROM token_usage),
   (SELECT COUNT(*) FROM orders),
   (SELECT COUNT(*) FROM conditional_orders WHERE status='active'),
-  (SELECT COUNT(*) FROM positions WHERE status='open'),
   (SELECT COUNT(*) FROM daily_performance),
   (SELECT COUNT(*) FROM paper_tests),
   (SELECT COUNT(*) FROM trades WHERE close_reason='signal'),
@@ -62,10 +61,10 @@ errors=$($COMPOSE logs --since 15m 2>&1 | grep -ciE 'error|exception|traceback' 
 errors=${errors:-0}
 
 # Build snapshot — single line JSON
-printf '{"ts":"%s","status":"up","cpu":"%s","mem":"%s","db_bytes":%s,"errors_15m":%s,"scans":%s,"last_scan":"%s","candles_5m":%s,"candles_1h":%s,"candles_1d":%s,"strategy_versions":%s,"thoughts":%s,"observations":%s,"signals":%s,"trades":%s,"positions":%s,"open_positions":%s,"ai_calls":%s,"orders":%s,"cond_orders_active":%s,"daily_perf_rows":%s,"paper_tests":%s,"close_signal":%s,"close_sl":%s,"close_tp":%s,"close_emergency":%s,"close_recon":%s}\n' \
+printf '{"ts":"%s","status":"up","cpu":"%s","mem":"%s","db_bytes":%s,"errors_15m":%s,"scans":%s,"last_scan":"%s","candles_5m":%s,"candles_1h":%s,"candles_1d":%s,"strategy_versions":%s,"thoughts":%s,"observations":%s,"signals":%s,"trades":%s,"positions":%s,"ai_calls":%s,"orders":%s,"cond_orders_active":%s,"daily_perf_rows":%s,"paper_tests":%s,"close_signal":%s,"close_sl":%s,"close_tp":%s,"close_emergency":%s,"close_recon":%s}\n' \
     "$ts" "$cpu" "$mem" "$db_size" "$errors" \
     "$scans" "$last_scan" "$c5m" "$c1h" "$c1d" \
-    "$versions" "$thoughts" "$obs" "$sigs" "$trades" "$positions" "$open_positions" "$ai_calls" \
+    "$versions" "$thoughts" "$obs" "$sigs" "$trades" "$positions" "$ai_calls" \
     "$orders" "$cond_orders" "$daily_perf_rows" "$paper_tests" \
     "$close_signal" "$close_sl" "$close_tp" "$close_emergency" "$close_recon" \
     >> "$OUT"
