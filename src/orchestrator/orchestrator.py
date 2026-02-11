@@ -1,6 +1,6 @@
 """Orchestrator — nightly AI review, strategy evolution, and analysis module evolution.
 
-Runs daily during the 12-3am EST window:
+Runs daily during the nightly EST window (configurable, default 3:30-6am):
 1. Gather context:
    - Ground truth benchmarks (rigid shell, cannot modify)
    - Market analysis module output (flexible, can rewrite)

@@ -27,10 +27,12 @@ region = "us-east5"
 
 [orchestrator]
 # Nightly review window (EST)
-start_hour = 0               # 12:00 AM EST
-end_hour = 3                 # 3:00 AM EST
+start_hour = 3               # 3:30 AM EST
+start_minute = 30
+end_hour = 6                 # 6:00 AM EST
 # Max revision cycles per night
 max_revisions = 3
+min_paper_test_trades = 5
 
 [telegram]
 enabled = true

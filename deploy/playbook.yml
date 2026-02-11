@@ -95,7 +95,9 @@
         - "{{ deploy_dir }}/data"
         - "{{ deploy_dir }}/config"
         - "{{ deploy_dir }}/strategy/active"
+        - "{{ deploy_dir }}/strategy/archive"
         - "{{ deploy_dir }}/statistics/active"
+        - "{{ deploy_dir }}/statistics/archive"
       tags: [sync]
 
     # --- Sync Project Files ---

@@ -286,7 +286,8 @@ class TradingBrain:
         # Nightly orchestration
         self._scheduler.add_job(
             self._nightly_orchestration,
-            CronTrigger(hour=self._config.orchestrator.start_hour, minute=0),
+            CronTrigger(hour=self._config.orchestrator.start_hour,
+                        minute=self._config.orchestrator.start_minute),
             id="orchestration", name="Nightly Orchestration",
         )
 
