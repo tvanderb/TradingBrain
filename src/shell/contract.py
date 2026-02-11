@@ -99,6 +99,7 @@ class RiskLimits:
     max_positions: int
     max_daily_loss_pct: float
     max_drawdown_pct: float
+    max_position_pct: float = 0.25
 
 
 # --- Output Types (Strategy -> Shell) ---

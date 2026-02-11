@@ -294,17 +294,22 @@ class Database:
 
     async def connect(self) -> None:
         self._conn = await aiosqlite.connect(self._path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA foreign_keys=ON")
-        await self._conn.executescript(SCHEMA)
-        await self._run_migrations()
-        await self._run_special_migrations()
-        # Position indexes created after special migrations (tag column may not exist before)
-        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag)")
-        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
-        await self._conn.commit()
-        log.info("database.connected", path=self._path)
+        try:
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._conn.execute("PRAGMA foreign_keys=ON")
+            await self._conn.executescript(SCHEMA)
+            await self._run_migrations()
+            await self._run_special_migrations()
+            # Position indexes created after special migrations (tag column may not exist before)
+            await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_tag ON positions(tag)")
+            await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
+            await self._conn.commit()
+            log.info("database.connected", path=self._path)
+        except Exception:
+            await self._conn.close()
+            self._conn = None
+            raise
 
     async def _run_migrations(self) -> None:
         """Apply column additions to existing databases."""

@@ -58,13 +58,16 @@ class BotCommands:
 
     async def _send_long(self, update: Update, text: str, max_len: int = 4000) -> None:
         """Send a message, chunking if it exceeds Telegram's limit."""
-        if len(text) <= max_len:
-            await update.message.reply_text(text)
-            return
-        chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
-        for i, chunk in enumerate(chunks):
-            prefix = "" if i == 0 else f"(part {i+1}/{len(chunks)})\n"
-            await update.message.reply_text(prefix + chunk)
+        try:
+            if len(text) <= max_len:
+                await update.message.reply_text(text)
+                return
+            chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
+            for i, chunk in enumerate(chunks):
+                prefix = "" if i == 0 else f"(part {i+1}/{len(chunks)})\n"
+                await update.message.reply_text(prefix + chunk)
+        except Exception as e:
+            log.error("telegram.send_long_failed", error=str(e))
 
     def _authorized(self, update: Update) -> bool:
         """Check if user is authorized. Rejects all users if no IDs configured."""

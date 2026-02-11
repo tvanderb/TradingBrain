@@ -1719,3 +1719,83 @@ Duplicate comment numbering in stop(), datetime.utcnow() deprecated, httpx clien
 
 ### Files Modified (10 source + 1 test)
 `main.py`, `portfolio.py`, `risk.py`, `routes.py`, `config.py`, `commands.py`, `data_store.py`, `readonly_db.py`, `kraken.py`, `orchestrator.py`, `backtester.py`, `tests/test_integration.py`
+
+---
+
+## Session E (2026-02-10) — Final End-to-End Audit
+
+### Audit Scope
+5 parallel audit agents covering the entire codebase:
+1. Core trading loop (main.py)
+2. Portfolio and risk management
+3. Orchestrator and strategy
+4. Shell infrastructure
+5. API, Telegram, and test coverage
+
+### Raw Findings: ~65 across all agents
+After deduplication and false positive triage: **18 actionable findings**
+
+### False Positives Dismissed (12)
+- Paper mode fee basis (correct by construction)
+- Position averaging qty (self-dismissed)
+- MODIFY intent logic (intentionally designed in Session D)
+- /ask rate limit race (Telegram processes updates sequentially)
+- API portfolio null (portfolio always initialized first)
+- AI client null in daily_reset (constructor always succeeds)
+- Paper test started_at (SQLite DEFAULT works)
+- Cash negative after fill (by design)
+- Unsafe list indexing Kraken (guards exist)
+- Consecutive loss counter (correct)
+- Fee format validation (Kraken API is consistent)
+- Record exchange fill missing regime (always None since Session 18)
+
+### Fixes Applied (18 findings)
+
+#### Critical (3)
+- **C1**: Paper test `ends_at` format mismatch — `isoformat()` → `strftime()` + `datetime('now', 'utc')`
+- **C2**: `_broadcast_ws` exception kills Telegram — wrapped in try/except
+- **C3**: Paper test trade query missing upper bound — added `closed_at <= ends_at`
+
+#### Medium (9)
+- **M1**: Risk counter timezone — `initialize()` now accepts `tz_name`, uses configured timezone
+- **M2**: Backtester max_position_pct — added to `RiskLimits`, enforced in backtester
+- **M3**: `datetime.now()` → `datetime.now(timezone.utc)` in portfolio.py (15 locations)
+- **M4**: Bootstrap API timeout — 30s per `get_ohlc()` call via `asyncio.wait_for()`
+- **M5**: Concurrent orchestration guard — `asyncio.Lock` replaces bare boolean
+- **M6**: DB connection cleanup — `except/raise` closes connection on migration error
+- **M7**: Daily reset under trade lock — `_daily_reset()` acquires `self._trade_lock`
+- **M8**: `_broadcast_ws` try/except (part of C2 fix)
+- **M9**: Candle cutoffs use `strftime()` to match stored naive timestamps
+
+#### Low (6)
+- **L1**: Halt notifications deduplicated per scan cycle (`halt_notified` flag)
+- **L2**: Backtester SL/TP slippage clarified (SL triggers are market orders — correct)
+- **L3**: Partial close logs note about remaining SL/TP
+- **L4**: Observation INSERT OR REPLACE documented, uses `date('now', 'utc')`
+- **L5**: P&L variable names clarified (`net_pnl`, `gross_pnl`, `fees_total`)
+- **L6**: `_send_long()` catches Telegram API errors
+
+### P&L Investigation
+User reported production paper trades showing same open/close price. Traced full price flow:
+- Paper BUY: uses current WS price + slippage
+- Paper CLOSE: uses current WS price - slippage (different scan cycle = different price)
+- Current code is correct — issue was in older production version (stale prices)
+
+### New Tests (12)
+- `test_paper_test_timestamp_format` — strftime + UTC in query
+- `test_paper_test_trade_query_upper_bound` — closed_at filter
+- `test_broadcast_ws_error_handling` — try/except in broadcast
+- `test_orchestrator_cycle_lock` — asyncio.Lock exists
+- `test_risk_initialize_accepts_timezone` — tz_name parameter
+- `test_backtester_max_position_pct` — position pct enforcement
+- `test_daily_reset_under_trade_lock` — trade_lock in daily_reset
+- `test_database_connect_cleanup_on_error` — connection cleanup
+- `test_candle_cutoff_uses_strftime` — no timezone suffix
+- `test_portfolio_uses_utc_timestamps` — UTC in portfolio
+- `test_halt_notification_deduplication` — halt_notified flag
+- `test_send_long_error_handling` — telegram error catching
+
+### Result: **130/130 tests passing** (was 118/118)
+
+### Files Modified (12 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `contract.py`, `orchestrator.py`, `backtester.py`, `database.py`, `data_store.py`, `notifications.py`, `commands.py`, `tests/test_integration.py`

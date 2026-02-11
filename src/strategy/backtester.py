@@ -257,6 +257,13 @@ class Backtester:
                     # Clamp size_pct to max_trade_pct
                     clamped_pct = min(signal.size_pct, self._risk_limits.max_trade_pct)
                     trade_value = total_value * clamped_pct
+                    # Enforce max_position_pct per symbol
+                    existing_value = sum(
+                        p["qty"] * prices.get(p["symbol"], p["avg_entry"])
+                        for p in positions.values() if p["symbol"] == signal.symbol
+                    )
+                    if total_value > 0 and (existing_value + trade_value) / total_value > self._risk_limits.max_position_pct:
+                        continue
                     if trade_value > cash:
                         continue
                     qty = trade_value / fill_price
@@ -365,7 +372,8 @@ class Backtester:
                     triggered = True
 
                 if triggered:
-                    fill_price = price * (1 - self._slippage)  # slippage: exit lower
+                    # SL/TP triggers become market orders — slippage applies
+                    fill_price = price * (1 - self._slippage)
                     qty = pos["qty"]
                     sale = qty * fill_price
                     exit_fee = sale * (self._get_taker_fee(sym) / 100)

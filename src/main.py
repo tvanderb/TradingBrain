@@ -93,7 +93,7 @@ class TradingBrain:
         self._portfolio = PortfolioTracker(self._config, self._db, self._kraken)
         self._data_store = DataStore(self._db, self._config.data)
         await self._portfolio.initialize()
-        await self._risk.initialize(self._db)
+        await self._risk.initialize(self._db, tz_name=self._config.timezone)
 
         # 3b. Reconcile unfilled orders from previous session (live mode only)
         if not self._config.is_paper():
@@ -111,6 +111,7 @@ class TradingBrain:
                 max_positions=self._config.risk.max_positions,
                 max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                 max_drawdown_pct=self._config.risk.max_drawdown_pct,
+                max_position_pct=self._config.risk.max_position_pct,
             )
             self._strategy.initialize(risk_limits, self._config.symbols)
 
@@ -318,7 +319,13 @@ class TradingBrain:
 
                 while True:
                     try:
-                        df = await self._kraken.get_ohlc(symbol, interval=interval, since=since)
+                        df = await asyncio.wait_for(
+                            self._kraken.get_ohlc(symbol, interval=interval, since=since),
+                            timeout=30,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("bootstrap.fetch_timeout", symbol=symbol, timeframe=tf_label)
+                        break
                     except Exception as e:
                         log.warning("bootstrap.fetch_failed", symbol=symbol, timeframe=tf_label, error=str(e))
                         break
@@ -572,6 +579,7 @@ class TradingBrain:
 
             # Process signals
             executed_symbols = set()
+            halt_notified = False
             for signal in signals:
                 # Risk check (refresh portfolio_value after each execution for TOCTOU safety)
                 check = self._risk.check_signal(
@@ -585,8 +593,9 @@ class TradingBrain:
                     await self._notifier.signal_rejected(
                         signal.symbol, signal.action.value, check.reason,
                     )
-                    if self._risk.is_halted:
+                    if self._risk.is_halted and not halt_notified:
                         await self._notifier.risk_halt(self._risk.halt_reason)
+                        halt_notified = True
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
@@ -971,11 +980,12 @@ class TradingBrain:
         await self._portfolio.snapshot_daily()
 
     async def _daily_reset(self) -> None:
-        self._risk.reset_daily()
-        self._portfolio.reset_daily()
-        self._ai.reset_daily_tokens()
-        # Refresh daily start value for accurate daily P&L tracking
-        self._portfolio._daily_start_value = await self._portfolio.total_value()
+        async with self._trade_lock:
+            self._risk.reset_daily()
+            self._portfolio.reset_daily()
+            self._ai.reset_daily_tokens()
+            # Refresh daily start value for accurate daily P&L tracking
+            self._portfolio._daily_start_value = await self._portfolio.total_value()
 
     async def _nightly_orchestration(self) -> None:
         """Run the nightly AI review cycle with timeout enforcement."""
@@ -1000,6 +1010,7 @@ class TradingBrain:
                     max_positions=self._config.risk.max_positions,
                     max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
                     max_drawdown_pct=self._config.risk.max_drawdown_pct,
+                    max_position_pct=self._config.risk.max_position_pct,
                 )
                 self._strategy.initialize(risk_limits, self._config.symbols)
                 # Attempt to restore strategy state after hot-reload

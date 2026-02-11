@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -36,7 +37,7 @@ class RiskManager:
         self._halted: bool = False
         self._halt_reason: str = ""
 
-    async def initialize(self, db: Database) -> None:
+    async def initialize(self, db: Database, tz_name: str = "US/Eastern") -> None:
         """Load peak portfolio value and restore risk counters from DB after restart."""
         row = await db.fetchone(
             "SELECT MAX(portfolio_value) as peak FROM daily_performance"
@@ -45,8 +46,9 @@ class RiskManager:
             self._peak_portfolio = row["peak"]
             log.info("risk.peak_loaded", peak=round(self._peak_portfolio, 2))
 
-        # Restore daily counters from trades closed today (use UTC to match DB timestamps)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Restore daily counters — use configured timezone to match daily reset boundary
+        tz = ZoneInfo(tz_name)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
         day_row = await db.fetchone(
             "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE closed_at >= ?",
             (today,),

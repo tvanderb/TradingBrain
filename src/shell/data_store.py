@@ -89,7 +89,7 @@ class DataStore:
 
     async def aggregate_5m_to_1h(self) -> int:
         """Aggregate 5-minute candles older than retention into 1-hour candles."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_5m_retention_days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_5m_retention_days)).strftime("%Y-%m-%dT%H:%M:%S")
 
         # Get distinct symbols with 5m data older than cutoff
         symbols = await self._db.fetchall(
@@ -142,7 +142,7 @@ class DataStore:
 
     async def aggregate_1h_to_daily(self) -> int:
         """Aggregate 1-hour candles older than retention into daily candles."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_1h_retention_days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._config.candle_1h_retention_days)).strftime("%Y-%m-%dT%H:%M:%S")
 
         symbols = await self._db.fetchall(
             "SELECT DISTINCT symbol FROM candles WHERE timeframe = '1h' AND timestamp < ?",
@@ -194,7 +194,7 @@ class DataStore:
     async def prune_old_data(self) -> None:
         """Delete daily candles older than retention limit."""
         years = self._config.candle_1d_retention_years
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=years * 365)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=years * 365)).strftime("%Y-%m-%dT%H:%M:%S")
 
         result = await self._db.execute(
             "DELETE FROM candles WHERE timeframe = '1d' AND timestamp < ?",

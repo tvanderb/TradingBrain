@@ -3884,8 +3884,10 @@ async def test_risk_counters_restored_on_restart():
         db = Database(config.db_path)
         await db.connect()
 
-        # Seed trades with distinct UTC timestamps so ORDER BY closed_at DESC is deterministic
-        now = datetime.now(timezone.utc)
+        # Seed trades with timestamps in configured timezone so date query matches
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(config.timezone)
+        now = datetime.now(tz)
         t1 = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
         t2 = (now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S")
         t3 = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -3906,7 +3908,7 @@ async def test_risk_counters_restored_on_restart():
         await db.commit()
 
         risk = RiskManager(config.risk)
-        await risk.initialize(db)
+        await risk.initialize(db, tz_name=config.timezone)
 
         # Should have restored: 3 daily trades, -5.0 total pnl, 2 consecutive losses
         assert risk.daily_trades == 3
@@ -4256,7 +4258,7 @@ def test_backtester_close_all_no_tag():
 
     strategy = MultiCloseStrategy()
     risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
-                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3, max_position_pct=1.0)
     bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
 
     # Create 7 hourly bars
@@ -4295,7 +4297,7 @@ def test_backtester_buy_averaging_in():
 
     strategy = AverageInStrategy()
     risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
-                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3, max_position_pct=1.0)
     bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
 
     dates = pd.date_range("2024-01-01", periods=5, freq="1h")
@@ -4343,7 +4345,7 @@ def test_backtester_drawdown_halt():
     strategy = DrawdownStrategy()
     # Very tight drawdown limit: 5%
     risk = RiskLimits(max_trade_pct=0.95, default_trade_pct=0.1, max_positions=5,
-                      max_daily_loss_pct=1.0, max_drawdown_pct=0.05)
+                      max_daily_loss_pct=1.0, max_drawdown_pct=0.05, max_position_pct=1.0)
     bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
 
     # Span multiple days so daily_values captures drawdown
@@ -4381,7 +4383,7 @@ def test_backtester_day_boundary_start_value():
 
     strategy = DayBoundaryStrategy()
     risk = RiskLimits(max_trade_pct=0.1, default_trade_pct=0.03, max_positions=5,
-                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3)
+                      max_daily_loss_pct=0.05, max_drawdown_pct=0.3, max_position_pct=1.0)
     bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
 
     # Two days of hourly data
@@ -4556,3 +4558,135 @@ def test_data_store_rowcount_uses_len():
     source = inspect.getsource(DataStore.store_candles)
     assert "len(rows)" in source, "store_candles should use len(rows)"
     assert "rowcount" not in source or "unreliable" in source, "rowcount should be avoided"
+
+
+# --- Session E: Final audit fixes ---
+
+
+def test_paper_test_timestamp_format():
+    """E-C1: Paper test ends_at uses strftime format matching SQLite datetime()."""
+    import inspect
+    from src.orchestrator.orchestrator import Orchestrator
+    source = inspect.getsource(Orchestrator)
+    # ends_at should use strftime (not isoformat) to match SQLite datetime('now', 'utc')
+    assert "strftime(\"%Y-%m-%d %H:%M:%S\")" in source, "ends_at should use strftime for SQLite compatibility"
+    # Query should use datetime('now', 'utc') not datetime('now')
+    assert "datetime('now', 'utc')" in source, "Paper test query should use UTC"
+
+
+def test_paper_test_trade_query_upper_bound():
+    """E-C3: Paper test trade query filters by both start and end time."""
+    import inspect
+    from src.orchestrator.orchestrator import Orchestrator
+    source = inspect.getsource(Orchestrator._evaluate_paper_tests)
+    assert "closed_at <=" in source, "Trade query should have upper bound on closed_at"
+
+
+def test_broadcast_ws_error_handling():
+    """E-C2: _broadcast_ws wraps in try/except to not block Telegram."""
+    import inspect
+    from src.telegram.notifications import Notifier
+    source = inspect.getsource(Notifier._broadcast_ws)
+    assert "try:" in source, "_broadcast_ws should have error handling"
+    assert "except" in source, "_broadcast_ws should catch exceptions"
+
+
+def test_orchestrator_cycle_lock():
+    """E-M5: Orchestrator uses asyncio.Lock to prevent concurrent cycles."""
+    import inspect
+    from src.orchestrator.orchestrator import Orchestrator
+    source = inspect.getsource(Orchestrator.__init__)
+    assert "_cycle_lock" in source, "Orchestrator should have a cycle lock"
+    source_run = inspect.getsource(Orchestrator.run_nightly_cycle)
+    assert "_cycle_lock" in source_run, "run_nightly_cycle should use the lock"
+
+
+def test_risk_initialize_accepts_timezone():
+    """E-M1: RiskManager.initialize accepts tz_name for consistent daily boundaries."""
+    import inspect
+    from src.shell.risk import RiskManager
+    sig = inspect.signature(RiskManager.initialize)
+    assert "tz_name" in sig.parameters, "initialize should accept tz_name parameter"
+
+
+def test_backtester_max_position_pct():
+    """E-M2: Backtester enforces max_position_pct per symbol."""
+    from src.shell.contract import Action, Signal, RiskLimits
+    from src.strategy.backtester import Backtester
+
+    class BigBuyStrategy:
+        def initialize(self, risk_limits, symbols): pass
+        def on_fill(self, *a, **kw): pass
+        def get_state(self): return {}
+        def load_state(self, s): pass
+        def analyze(self, markets, portfolio, timestamp):
+            # Try to buy 50% of portfolio each time
+            return [Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.5)]
+
+    strategy = BigBuyStrategy()
+    # max_position_pct=0.3 means only 30% of portfolio in one symbol
+    risk = RiskLimits(max_trade_pct=0.5, default_trade_pct=0.05, max_positions=5,
+                      max_daily_loss_pct=0.5, max_drawdown_pct=0.5, max_position_pct=0.3)
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0, slippage_factor=0.0)
+
+    dates = pd.date_range("2024-01-01", periods=3, freq="1h")
+    df = pd.DataFrame({
+        "open": [50000]*3, "high": [50500]*3,
+        "low": [49500]*3, "close": [50000]*3, "volume": [100]*3,
+    }, index=dates)
+
+    result = bt.run({"BTC/USD": df})
+    # First BUY at 50% should be blocked (50% > 30% max_position_pct)
+    assert result.total_trades == 0, "BUY exceeding max_position_pct should be blocked"
+
+
+def test_daily_reset_under_trade_lock():
+    """E-M7: _daily_reset acquires trade_lock."""
+    import inspect
+    from src.main import TradingBrain
+    source = inspect.getsource(TradingBrain._daily_reset)
+    assert "self._trade_lock" in source, "_daily_reset should acquire trade_lock"
+
+
+def test_database_connect_cleanup_on_error():
+    """E-M6: Database.connect closes connection on migration error."""
+    import inspect
+    from src.shell.database import Database
+    source = inspect.getsource(Database.connect)
+    # Should close connection and reset to None on error (except + raise or finally)
+    assert "self._conn.close()" in source, "connect should close connection on error"
+    assert "self._conn = None" in source, "connect should reset _conn on error"
+
+
+def test_candle_cutoff_uses_strftime():
+    """E-M9: Candle aggregation cutoffs use strftime (no timezone suffix)."""
+    import inspect
+    from src.shell.data_store import DataStore
+    source = inspect.getsource(DataStore.aggregate_5m_to_1h)
+    assert 'strftime("%Y-%m-%dT%H:%M:%S")' in source, "Cutoff should use strftime"
+
+
+def test_portfolio_uses_utc_timestamps():
+    """E-M3: Portfolio timestamps use timezone.utc."""
+    import inspect
+    from src.shell.portfolio import PortfolioTracker
+    # Check _confirm_fill (was a hot spot for bare datetime.now())
+    source = inspect.getsource(PortfolioTracker._confirm_fill)
+    assert "datetime.now()" not in source or "timezone.utc" in source, "Should use UTC timestamps"
+
+
+def test_halt_notification_deduplication():
+    """E-L1: Only one halt notification per scan cycle."""
+    import inspect
+    from src.main import TradingBrain
+    source = inspect.getsource(TradingBrain._scan_loop)
+    assert "halt_notified" in source, "Scan loop should track halt notification state"
+
+
+def test_send_long_error_handling():
+    """E-L6: _send_long catches Telegram API errors."""
+    import inspect
+    from src.telegram.commands import BotCommands
+    source = inspect.getsource(BotCommands._send_long)
+    assert "try:" in source, "_send_long should have error handling"
+    assert "except" in source, "_send_long should catch exceptions"

@@ -61,11 +61,14 @@ class Notifier:
 
     async def _broadcast_ws(self, event: str, data: dict) -> None:
         if self._ws_manager:
-            await self._ws_manager.broadcast({
-                "event": event,
-                "data": data,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            try:
+                await self._ws_manager.broadcast({
+                    "event": event,
+                    "data": data,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception as e:
+                log.error("notifier.ws_broadcast_failed", event=event, error=str(e))
 
     async def _dispatch(self, event_name: str, data: dict, telegram_text: str | None = None) -> None:
         """Send to WebSocket (always) and Telegram (if configured, non-blocking)."""

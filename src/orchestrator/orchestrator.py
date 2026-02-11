@@ -305,6 +305,7 @@ class Orchestrator:
         self._notifier = notifier
         self._cycle_id: str | None = None
         self._running = False
+        self._cycle_lock = asyncio.Lock()
 
     def _extract_json(self, response: str) -> dict | None:
         """Extract JSON object from AI response text.
@@ -385,9 +386,13 @@ class Orchestrator:
 
     async def run_nightly_cycle(self) -> str:
         """Execute the full nightly orchestration cycle. Returns report summary."""
-        if self._running:
+        if self._cycle_lock.locked():
             log.warning("orchestrator.already_running")
             return "Orchestrator: Skipped — cycle already in progress."
+        async with self._cycle_lock:
+            return await self._run_nightly_cycle_locked()
+
+    async def _run_nightly_cycle_locked(self) -> str:
         self._running = True
         self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
@@ -959,7 +964,7 @@ Is this classification correct?
                 # Create paper test entry
                 from datetime import timedelta
 
-                ends_at = (datetime.now(timezone.utc) + timedelta(days=paper_days)).isoformat()
+                ends_at = (datetime.now(timezone.utc) + timedelta(days=paper_days)).strftime("%Y-%m-%d %H:%M:%S")
                 await self._db.execute(
                     """INSERT INTO paper_tests
                        (strategy_version, risk_tier, required_days, ends_at)
@@ -1014,15 +1019,15 @@ Is this classification correct?
         completed = await self._db.fetchall(
             """SELECT id, strategy_version, risk_tier, started_at, ends_at
                FROM paper_tests
-               WHERE status = 'running' AND ends_at <= datetime('now')"""
+               WHERE status = 'running' AND ends_at <= datetime('now', 'utc')"""
         )
         results = []
         for test in completed:
             version = test["strategy_version"]
             # Get trades made during the paper test period (filter by time window)
             trades = await self._db.fetchall(
-                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND opened_at >= ? AND closed_at IS NOT NULL",
-                (version, test["started_at"]),
+                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND opened_at >= ? AND closed_at IS NOT NULL AND closed_at <= ?",
+                (version, test["started_at"], test["ends_at"]),
             )
             total_pnl = sum(t["pnl"] for t in trades) if trades else 0.0
             trade_count = len(trades)
@@ -1315,10 +1320,11 @@ The orchestrator wants to change this module because: {changes[:500]}"""
         Strategy document updates are separate and rare (meaningful discoveries only).
         """
         try:
+            # REPLACE: if cycle re-runs for same date, latest observation wins
             await self._db.execute(
                 """INSERT OR REPLACE INTO orchestrator_observations
                    (date, cycle_id, market_summary, strategy_assessment, notable_findings)
-                   VALUES (date('now'), ?, ?, ?, ?)""",
+                   VALUES (date('now', 'utc'), ?, ?, ?, ?)""",
                 (
                     self._cycle_id or "unknown",
                     decision.get("market_observations", "")[:5000],

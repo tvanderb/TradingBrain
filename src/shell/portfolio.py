@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -186,7 +186,7 @@ class PortfolioTracker:
                 intent=_safe_intent(p.get("intent", "DAY")),
                 stop_loss=p.get("stop_loss"),
                 take_profit=p.get("take_profit"),
-                opened_at=datetime.fromisoformat(p["opened_at"]) if p.get("opened_at") else datetime.now(),
+                opened_at=datetime.fromisoformat(p["opened_at"]) if p.get("opened_at") else datetime.now(timezone.utc),
                 tag=tag,
             ))
 
@@ -206,8 +206,8 @@ class PortfolioTracker:
                 pnl_pct=t["pnl_pct"] or 0.0,
                 fees=t["fees"] or 0.0,
                 intent=_safe_intent(t.get("intent", "DAY")),
-                opened_at=datetime.fromisoformat(t["opened_at"]) if t.get("opened_at") else datetime.now(),
-                closed_at=datetime.fromisoformat(t["closed_at"]) if t.get("closed_at") else datetime.now(),
+                opened_at=datetime.fromisoformat(t["opened_at"]) if t.get("opened_at") else datetime.now(timezone.utc),
+                closed_at=datetime.fromisoformat(t["closed_at"]) if t.get("closed_at") else datetime.now(timezone.utc),
             ))
 
         tv = await self.total_value()
@@ -241,7 +241,7 @@ class PortfolioTracker:
         Raises TimeoutError if order doesn't fill in time.
         Raises RuntimeError if order is canceled/expired.
         """
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO orders
                (txid, tag, symbol, side, order_type, volume, status, purpose, placed_at)
@@ -266,7 +266,7 @@ class PortfolioTracker:
                 filled_volume = float(order_info.get("vol_exec", 0))
                 fee = float(order_info.get("fee", 0))
                 cost = float(order_info.get("cost", 0))
-                filled_at = datetime.now().isoformat()
+                filled_at = datetime.now(timezone.utc).isoformat()
 
                 await self._db.execute(
                     """UPDATE orders SET status = 'filled', filled_volume = ?,
@@ -304,7 +304,7 @@ class PortfolioTracker:
                 filled_volume = float(final_info.get("vol_exec", 0))
                 fee = float(final_info.get("fee", 0))
                 cost = float(final_info.get("cost", 0))
-                filled_at = datetime.now().isoformat()
+                filled_at = datetime.now(timezone.utc).isoformat()
                 await self._db.execute(
                     """UPDATE orders SET status = 'filled', filled_volume = ?,
                        avg_fill_price = ?, fee = ?, cost = ?, filled_at = ?,
@@ -325,7 +325,7 @@ class PortfolioTracker:
                 fill_price = float(final_info.get("price", 0))
                 fee = float(final_info.get("fee", 0))
                 cost = float(final_info.get("cost", 0))
-                filled_at = datetime.now().isoformat()
+                filled_at = datetime.now(timezone.utc).isoformat()
                 await self._db.execute(
                     """UPDATE orders SET status = 'partial_fill', filled_volume = ?,
                        avg_fill_price = ?, fee = ?, cost = ?, filled_at = ?,
@@ -480,7 +480,7 @@ class PortfolioTracker:
             pos["qty"] = total_qty
             pos["avg_entry"] = avg
             pos["entry_fee"] = pos.get("entry_fee", 0.0) + fee
-            pos["updated_at"] = datetime.now().isoformat()
+            pos["updated_at"] = datetime.now(timezone.utc).isoformat()
             # Preserve existing SL/TP if new signal doesn't specify them
             if signal.stop_loss is not None:
                 pos["stop_loss"] = signal.stop_loss
@@ -502,7 +502,7 @@ class PortfolioTracker:
             if not tag:
                 tag = self._generate_tag(signal.symbol)
 
-            now = datetime.now().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             pos = {
                 "symbol": signal.symbol,
                 "tag": tag,
@@ -667,7 +667,7 @@ class PortfolioTracker:
         pnl_pct = pnl / (entry * qty) if entry * qty > 0 else 0.0
 
         # Record trade
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO trades
                (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
@@ -689,6 +689,11 @@ class PortfolioTracker:
                 "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
                 (remaining_qty, pos["entry_fee"], now, tag),
             )
+            # SL/TP still apply to remaining quantity (exchange orders cover original qty)
+            if pos.get("stop_loss") or pos.get("take_profit"):
+                log.info("portfolio.partial_close_sl_tp_note", tag=tag,
+                         remaining=round(remaining_qty, 8),
+                         note="Exchange SL/TP may need manual adjustment for remaining qty")
 
         await self._db.commit()
 
@@ -730,7 +735,7 @@ class PortfolioTracker:
             log.info("portfolio.modify_no_changes", tag=signal.tag)
             return None
 
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         pos["updated_at"] = now
 
         # Build dynamic UPDATE
@@ -775,7 +780,7 @@ class PortfolioTracker:
 
         sl_txid = None
         tp_txid = None
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         # Place stop-loss
         if stop_loss:
@@ -856,7 +861,7 @@ class PortfolioTracker:
 
         await self._db.execute(
             "UPDATE conditional_orders SET status = 'canceled', updated_at = ? WHERE tag = ?",
-            (datetime.now().isoformat(), tag),
+            (datetime.now(timezone.utc).isoformat(), tag),
         )
         await self._db.commit()
         log.info("exchange_sl_tp.canceled", tag=tag)
@@ -882,7 +887,7 @@ class PortfolioTracker:
         pnl = (fill_price - entry) * filled_volume - total_fee
         pnl_pct = pnl / (entry * filled_volume) if entry * filled_volume > 0 else 0.0
 
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO trades
                (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees,
@@ -957,7 +962,7 @@ class PortfolioTracker:
         for tag, pos in self._positions.items():
             await self._db.execute(
                 "UPDATE positions SET current_price = ?, updated_at = ? WHERE tag = ?",
-                (pos.get("current_price", pos["avg_entry"]), datetime.now().isoformat(), tag),
+                (pos.get("current_price", pos["avg_entry"]), datetime.now(timezone.utc).isoformat(), tag),
             )
 
         tv = await self.total_value()
@@ -968,22 +973,19 @@ class PortfolioTracker:
         wins = sum(1 for t in trades if t["pnl"] > 0)
         losses = sum(1 for t in trades if t["pnl"] < 0)
         total = len(trades)
-        gross = sum(t["pnl"] for t in trades)
 
-        # gross_pnl = price movement without fees; net_pnl = after fees (already in trade.pnl)
-        # trade.pnl includes both entry + exit fees, so gross = sum(pnl) IS the net figure
-        # Reconstruct true gross by adding fees back: gross_before_fees = net + total_fees
-        net = gross  # trade.pnl already has fees subtracted
-        fees_from_trades = sum(t["fees"] for t in trades if t.get("fees"))
-        gross_before_fees = net + fees_from_trades
+        # trade.pnl already has fees subtracted (net P&L per trade)
+        net_pnl = sum(t["pnl"] for t in trades)
+        fees_total = sum(t["fees"] for t in trades if t.get("fees"))
+        gross_pnl = net_pnl + fees_total  # Price movement without fees
 
         await self._db.execute(
             """INSERT OR REPLACE INTO daily_performance
                (date, portfolio_value, cash, total_trades, wins, losses, gross_pnl, net_pnl, fees_total, win_rate)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (today, tv, self._cash, total, wins, losses, gross_before_fees, net,
-             fees_from_trades, wins / total if total > 0 else 0.0),
+            (today, tv, self._cash, total, wins, losses, gross_pnl, net_pnl,
+             fees_total, wins / total if total > 0 else 0.0),
         )
         await self._db.commit()
         self._daily_start_value = tv
-        log.info("portfolio.daily_snapshot", value=round(tv, 2), trades=total, pnl=round(gross, 4))
+        log.info("portfolio.daily_snapshot", value=round(tv, 2), trades=total, net_pnl=round(net_pnl, 4))
