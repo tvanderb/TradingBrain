@@ -319,41 +319,6 @@ Risk limits (from config) and current utilization.
 
 ---
 
-### GET /v1/market
-
-Latest scan data for each tracked symbol. Updates every scan cycle (~5 minutes).
-
-**Response:**
-```json
-[
-  {
-    "symbol": "BTCUSD",
-    "price": 44800.00,
-    "regime": "ranging",
-    "rsi": 52.3,
-    "ema_fast": 44750.00,
-    "ema_slow": 44600.00,
-    "volume_ratio": 1.15,
-    "spread": 0.0012,
-    "signal": null
-  }
-]
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `symbol` | string | Trading pair |
-| `price` | float or null | Latest price |
-| `regime` | string or null | Market regime classification |
-| `rsi` | float or null | Relative Strength Index |
-| `ema_fast` | float or null | Fast EMA value |
-| `ema_slow` | float or null | Slow EMA value |
-| `volume_ratio` | float or null | Current vs average volume ratio |
-| `spread` | float or null | Bid-ask spread |
-| `signal` | string or null | Signal generated this scan (e.g. `"BUY"`) |
-
----
-
 ### GET /v1/signals
 
 Signal history from the strategy module.

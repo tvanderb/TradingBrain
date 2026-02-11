@@ -42,13 +42,12 @@
 - This provides headroom, not encouragement to spend more
 - $300 credit covers 7-14 months at this rate
 
-## Risk Limits: Hard-Set, User-Only
-- Max 5% of portfolio on a single trade
-- Default 1-2% per trade
-- Max positions: configurable
-- Max daily loss: configurable %
-- Max drawdown: configurable %
+## Risk Limits: Emergency Backstops, User-Only
+- Widened to emergency-only levels (Session B/D5): max_trade 10%, max_position 25%, max_drawdown 40%, rollback 15%
+- Default 3% per trade
+- Max positions: 5
 - Agent CANNOT modify these. Shell enforces as safety net on all signals.
+- Philosophy: trust the aligned agent to self-regulate; hard limits are seatbelts, not driving instructions.
 
 ## Autonomy: Fully Autonomous + Observability
 - No human approval gate for strategy changes
@@ -93,11 +92,10 @@
 - All metrics tracked by truth benchmarks: expectancy, win rate, P&L, profit factor, drawdown, fees
 - Orchestrator decides relative importance based on context, not hardcoded priority order
 
-## Skills Library
-- Agent builds reusable indicator functions in `strategy/skills/`
-- Pure functions only (data in, result out, no side effects)
-- Strategy Module imports and composes them
-- Independently testable
+## Skills Library — REMOVED (Session K)
+- ~~Agent builds reusable indicator functions in `strategy/skills/`~~
+- **Removed**: Every function was a trivial wrapper around pandas/ta. First live orchestrator cycle failed 3/3 importing from `src.strategy.skills.indicators`.
+- **Replacement**: Strategy imports `pandas`, `numpy`, `ta`, `scipy`, and stdlib modules directly. No intermediary wrappers needed.
 
 ## Pip Install: Dropped
 - Pre-install comprehensive analysis libraries (ta, pandas, numpy, etc.)
@@ -255,3 +253,28 @@
 #### D7: Order Fill Confirmation (Live Mode)
 - **What**: Poll Kraken for actual fill prices instead of assuming market price.
 - **Why**: The existing TODO ("actual fill may differ") becomes critical with exchange-native orders. We need real fill data for accurate P&L and to confirm SL/TP order execution.
+
+### Decision: Remove Skills Library (Session K)
+- **What**: Delete `strategy/skills/` directory entirely. Strategy imports pandas/numpy/ta/scipy directly.
+- **Why**: First live orchestrator cycle (3:30 AM) failed — all 3 code generation attempts imported `from src.strategy.skills.indicators` which fails at runtime. Every function in skills was a trivial wrapper (e.g., `compute_rsi(series)` just called `ta.momentum.RSIIndicator(series).rsi()`). Wrappers add indirection without value.
+- **Alternative considered**: Fix import paths so sandbox allows skills. Rejected because removing abstraction layer is simpler and more honest — the orchestrator should know the real tools it's using.
+- **Added**: `scipy>=1.12` as dependency. Expanded LAYER_2_SYSTEM and CODE_GEN_SYSTEM prompts with full toolkit documentation (ta.trend, ta.momentum, ta.volatility, ta.volume, scipy.stats/signal/optimize examples).
+
+### Decision: Restart Safety — Persistent Starting Capital (Session L, L1)
+- **What**: Store `paper_starting_capital` in `system_meta` table on first boot. Always reconcile paper cash from first principles.
+- **Why**: First live deployment showed $103.01 portfolio when it should be ~$99.91. The `daily_performance` table was empty (no snapshot yet), so `portfolio.initialize()` used `config.paper_balance_usd` as baseline — but positions already existed, making position costs appear as phantom profit.
+- **Design**: `system_meta` key-value table (key TEXT PRIMARY KEY, value TEXT). Cash formula: `starting_capital + deposits + total_pnl - position_costs`. Runs unconditionally in paper mode — no snapshot-dependent path.
+- **Config change safety**: If `paper_balance_usd` changes in config, system logs a warning but uses the DB value. Use `/deposit` or `/withdraw` (capital_events) to adjust capital.
+
+### Decision: Restart Safety — Halt Evaluation on Startup (Session L, L2)
+- **What**: `evaluate_halt_state()` checks all halt conditions (drawdown, consecutive losses, daily loss, rollback) after startup, before any trading begins.
+- **Why**: Previously, halt state was only computed during trading. A crash during a drawdown would restart into active trading.
+
+### Decision: Strategy Fallback Chain (Session L, L4)
+- **What**: `load_strategy_with_fallback(db)` tries: filesystem → DB (`strategy_versions.code`) → return None (paused mode).
+- **Why**: Filesystem-only loading means a corrupted or missing strategy file bricks the system. DB fallback recovers from the last deployed version. Paused mode keeps nightly orchestration running so the AI can fix the problem.
+- **Design**: Orchestrator stores strategy source in `strategy_versions.code` on deploy. Paused mode disables scan loop + position monitor but keeps scheduler + orchestrator active.
+
+### Decision: Extended Config Validation (Session L, L6)
+- **What**: Validate timezone (`ZoneInfo`), symbol format (`/` + `USD`), trade size consistency (`default <= max_trade <= max_position`).
+- **Why**: Invalid config values previously caused silent runtime failures. Fail-fast on startup is cheaper than debugging a running system.

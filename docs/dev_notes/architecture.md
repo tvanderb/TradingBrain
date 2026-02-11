@@ -1,6 +1,6 @@
 # Architecture: IO-Container Orchestration System
 
-> **NOTE**: This replaces the old three-brain architecture (v1). That code remains on main branch for reference.
+> v1 (three-brain) was removed in Session 14. This is the only architecture.
 
 ## System Diagram
 
@@ -25,7 +25,6 @@
 │  ┌────────────────▼──────────────────────┐             │
 │  │         STRATEGY MODULE (flexible)     │             │
 │  │     strategy/active/strategy.py        │             │
-│  │     + strategy/skills/*.py             │             │
 │  │     (Agent CAN modify this)            │             │
 │  └────────────────┬──────────────────────┘             │
 │                   │                                     │
@@ -38,7 +37,7 @@
 
          ┌──────────────────────────────────┐
          │     ORCHESTRATOR (AI Brain)       │
-         │     Runs daily 12-3am EST         │
+         │     Runs daily 3:30-6am EST       │
          │                                   │
          │  1. Read strategy document         │
          │  2. Review performance data        │
@@ -70,7 +69,7 @@
 
 | Type | Contents | Purpose |
 |------|----------|---------|
-| `Signal` | symbol, action (BUY/SELL/CLOSE), size_pct, order_type, limit_price, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning | One trading decision |
+| `Signal` | symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct, order_type, limit_price, stop_loss, take_profit, intent (DAY/SWING/POSITION), tag, confidence, reasoning, slippage_tolerance | One trading decision |
 
 ### Strategy Class Interface
 
@@ -97,31 +96,42 @@ trading-brain/
 │   └── risk_limits.toml           # HARD risk limits (user-only, never agent-modified)
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                    # Entry point, scheduler, lifecycle
+│   ├── main.py                    # Entry point, scheduler, lifecycle, restart safety
 │   ├── shell/                     # RIGID infrastructure
 │   │   ├── __init__.py
 │   │   ├── contract.py            # IO contract types (Signal, SymbolData, etc.)
 │   │   ├── kraken.py              # Kraken REST + WebSocket client
-│   │   ├── risk.py                # Risk limit enforcement
-│   │   ├── portfolio.py           # Position tracking, paper/live trading
+│   │   ├── risk.py                # Risk limit enforcement + halt evaluation
+│   │   ├── portfolio.py           # Position tracking, paper/live trading, cash reconciliation
+│   │   ├── truth.py               # 28 truth benchmark metrics
 │   │   ├── data_store.py          # Historical data, tiered aggregation
-│   │   ├── database.py            # SQLite connection + schema
-│   │   └── config.py              # Config loading
+│   │   ├── database.py            # SQLite connection + schema + system_meta
+│   │   └── config.py              # Config loading + validation
 │   ├── strategy/                  # Strategy loading + testing
 │   │   ├── __init__.py
-│   │   ├── loader.py              # Dynamic import of strategy.py
-│   │   ├── sandbox.py             # Isolated strategy testing
-│   │   └── backtester.py          # Historical backtesting
+│   │   ├── loader.py              # Dynamic import with DB fallback chain
+│   │   ├── sandbox.py             # AST-based code validation
+│   │   └── backtester.py          # Historical backtesting (LIMIT simulation)
 │   ├── orchestrator/              # AI brain
 │   │   ├── __init__.py
 │   │   ├── orchestrator.py        # Nightly review + modification cycle
 │   │   ├── ai_client.py           # Anthropic / Vertex abstraction
 │   │   └── reporter.py            # Report generation
+│   ├── statistics/                # Analysis module infrastructure
+│   │   ├── __init__.py
+│   │   ├── loader.py              # Module loading and deployment
+│   │   ├── sandbox.py             # Analysis module validation
+│   │   └── readonly_db.py         # Read-only DB wrapper
 │   ├── telegram/                  # User interface
 │   │   ├── __init__.py
 │   │   ├── bot.py                 # Bot setup + lifecycle
-│   │   ├── commands.py            # Command handlers
-│   │   └── notifications.py       # Outbound alerts
+│   │   ├── commands.py            # 16 command handlers
+│   │   └── notifications.py       # Dual dispatch (Telegram + WebSocket)
+│   ├── api/                       # Data API
+│   │   ├── __init__.py
+│   │   ├── server.py              # aiohttp app with auth + error middleware
+│   │   ├── routes.py              # 10 REST endpoints
+│   │   └── websocket.py           # WebSocket event stream
 │   └── utils/
 │       ├── __init__.py
 │       └── logging.py             # Structured logging
@@ -129,15 +139,25 @@ trading-brain/
 │   ├── active/
 │   │   └── strategy.py            # Currently running strategy
 │   ├── archive/                   # Previous versions (strategy_v001.py, etc.)
-│   ├── skills/                    # Reusable indicator functions
 │   └── strategy_document.md       # Long-term strategy (agent-maintained)
+├── statistics/                    # AGENT WORKSPACE (analysis modules)
+│   ├── active/
+│   │   ├── market_analysis.py     # Market/exchange data analysis
+│   │   └── trade_performance.py   # Trade performance analysis
+│   └── archive/                   # Previous module versions
 ├── data/
 │   └── brain.db                   # SQLite database
-├── reports/                       # Orchestrator-generated reports
+├── deploy/                        # Deployment automation
+│   ├── setup.yml                  # VPS hardening (Ansible)
+│   ├── playbook.yml               # App deployment (Ansible)
+│   ├── inventory.yml              # VPS connection + secrets
+│   ├── monitor.sh                 # Cron-based health monitor
+│   └── restart.sh                 # Container restart helper
 ├── tests/
 ├── docs/
 │   ├── DEPLOY.md                  # Admin deployment guide
-│   └── dev_notes/                 # Engineering notes (this directory)
+│   ├── API.md                     # REST + WebSocket API reference
+│   └── dev_notes/                 # Engineering notes
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -163,41 +183,51 @@ trading-brain/
 ### Shutdown Sequence
 1. Stop scheduler (no new scans)
 2. Save strategy state → DB (`strategy.get_state()`)
-3. Cancel unfilled limit orders on Kraken
-4. Do NOT close positions (preserved across restarts)
-5. Stop WebSocket, Telegram, flush DB, close DB, exit
+3. Cancel all conditional orders on Kraken (SL/TP)
+4. Cancel unfilled limit orders on Kraken
+5. Do NOT close positions (preserved across restarts)
+6. Stop WebSocket, Telegram, API server, flush DB, close DB, exit
 
-### Startup Sequence
-1. Load config, connect DB
-2. Load active strategy module, restore state (`load_state()`)
-3. Connect Kraken REST
-4. **Reconcile positions** (DB vs Kraken in live mode)
-5. Fetch prices, update unrealized P&L
-6. Check for pending paper tests → resume
-7. Start WebSocket, Telegram, scheduler
-8. Send Telegram: "System online, X positions, $Y portfolio"
+### Startup Sequence (with L1-L9 Restart Safety)
+1. Load config + validate (L6: timezone, symbol format, trade size consistency)
+2. Connect DB, run migrations (`system_meta` table, `strategy_versions.code` column)
+3. Load positions from DB
+4. **Reconcile paper cash** from first principles (L1): `starting_capital + deposits + pnl - position_costs`
+   - Starting capital persisted in `system_meta` table (survives config changes)
+   - Live mode: fetch Kraken balance (L7: fail-fast on auth failure)
+5. Initialize risk manager, restore state from DB
+6. **Evaluate halt conditions** (L2): drawdown, consecutive losses, daily loss, rollback triggers
+7. **Detect orphaned positions** (L3): warn if positions exist for unconfigured symbols
+8. **Load strategy with fallback** (L4): filesystem → DB (`strategy_versions.code`) → paused mode
+9. **Check analysis modules** (L5): warn if files missing
+10. Bootstrap candle data (fetch missing 5m/1h/1d)
+11. Reconcile orders (L7: stale orders, orphaned conditionals, re-place expired SL/TP)
+12. Start Telegram, API server, scheduler
+13. Send alerts: system online + any halt/orphan/paused warnings
 
 ### Position Reconciliation (Live Mode)
 - DB says positions X,Y,Z — Kraken says A,B,C
 - Match: continue. Mismatch: update DB to match Kraken, log warning, notify
+- Stale orders and orphaned conditionals cleaned up on startup
 
 ## Scheduled Jobs
 
 | Job | Frequency | Purpose |
 |-----|-----------|---------|
 | Strategy scan | Every N min (strategy-defined, default 5) | Call `strategy.analyze()`, execute signals |
-| Position monitor | Every 30 sec | Check stop-loss/take-profit triggers |
-| Fee check | Every 24h | Update fee schedule from Kraken |
+| Position monitor | Every 30 sec | Check SL/TP (paper: price check, live: exchange orders) |
+| Fee check | Every 24h | Update fee schedule from Kraken API |
 | Daily P&L snapshot | 23:55 local | Record daily performance |
-| Orchestration cycle | 12:00-3:00 AM EST | AI review + strategy modification |
+| Orchestration cycle | 3:30-6:00 AM EST | AI review + strategy modification |
 | Data aggregation | During orchestration | Tier old candles (5m→1h→daily) |
-| Quarterly distillation | Every 4 quarters | Prune strategy document |
+| Data pruning | During orchestration | Delete candles beyond retention period |
+| Conditional order monitor | Every 30 sec (live only) | Check exchange SL/TP fills |
 
 ## AI Model Roles
 
 | Role | Model | Purpose | Cost Estimate |
 |------|-------|---------|--------------|
-| Strategy code generation | Sonnet | Write/modify strategy.py and skills | ~$0.10-0.20/cycle |
+| Strategy code generation | Sonnet | Write/modify strategy.py | ~$0.10-0.20/cycle |
 | Code review + analysis | Opus | Review correctness, IO compliance, risk classification | ~$0.30-0.50/cycle |
 | Total per orchestration night | — | When making changes | $0.75-2.25 |
 | Total per month | — | ~$22-45 (budgeted at 150% of base estimate) | |
@@ -259,24 +289,31 @@ Both are backed by **Truth Benchmarks** — rigid shell-computed ground truth th
 ```
 
 ### Truth Benchmarks (src/shell/truth.py)
-Rigid shell component. Simple metrics computed directly from raw data. Cannot be modified by orchestrator. These are the "weighing scale" — if either analysis module contradicts truth, the orchestrator knows its analysis is wrong.
+Rigid shell component. 28 metrics computed directly from raw data. Cannot be modified by orchestrator. These are the "weighing scale" — if either analysis module contradicts truth, the orchestrator knows its analysis is wrong.
 
 | Metric | Computation | Purpose |
 |--------|-------------|---------|
-| net_pnl | SUM(trades.pnl) | Ground truth P&L |
 | trade_count | COUNT(trades) | Activity level |
-| win_count / loss_count | COUNT WHERE pnl > 0 / <= 0 | Win/loss split |
+| win_count / loss_count | COUNT WHERE pnl > 0 / < 0 | Win/loss split |
 | win_rate | wins / total | Success rate |
+| net_pnl | SUM(trades.pnl) | Ground truth P&L |
 | total_fees | SUM(trades.fees) | Fee drag |
-| portfolio_value | cash + SUM(positions * price) | Current state |
-| max_drawdown | Peak-to-trough from snapshots | Risk realized |
-| consecutive_losses | Current streak from recent trades | Danger indicator |
-| system_uptime | Now - first scan timestamp | Operational context |
+| avg_win / avg_loss | AVG of positive/negative pnl | Payoff profile |
+| expectancy | (win_rate * avg_win) + (loss_rate * avg_loss) | Expected value per trade |
+| consecutive_losses | Current losing streak from recent trades | Danger indicator |
+| portfolio_value / portfolio_cash | From daily snapshots | Current state |
+| max_drawdown_pct | Peak-to-trough from snapshots | Risk realized |
+| total_signals / acted_signals | COUNT(signals), SUM(acted_on) | Signal activity |
+| signal_act_rate | acted / total | Execution rate |
 | total_scans | COUNT(scan_results) | Activity level |
-| total_signals | COUNT(signals) | Signal rate |
-| signal_act_rate | Acted / Total signals | Execution rate |
-
-**Note on regime**: Regime classification is NOT truth — it's a heuristic interpretation. Raw indicator values (price, EMA, RSI, volume) are truth. Regime labels are analysis. The scan_results table stores raw values; the strategy's regime classification is tagged on trades as "what the strategy thought" (a fact about the decision, not about the market).
+| first_scan_at / last_scan_at | MIN/MAX(scan_results.created_at) | Uptime + freshness |
+| current_strategy_version | Latest deployed version | Strategy state |
+| strategy_version_count | COUNT(strategy_versions) | Evolution pace |
+| profit_factor | gross_wins / gross_losses | Win/loss ratio quality |
+| close_reason_breakdown | GROUP BY close_reason | How trades close |
+| avg_trade_duration_hours | AVG(closed_at - opened_at) | Holding behavior |
+| best_trade_pnl_pct / worst_trade_pnl_pct | MAX/MIN(pnl_pct) | Outlier trades |
+| sharpe_ratio / sortino_ratio | From daily return series | Risk-adjusted returns |
 
 ### Analysis Module IO Contract
 
@@ -317,7 +354,7 @@ Analyzes: trades, signals, portfolio snapshots
 - Drawdown analysis (duration, recovery time, depth)
 - Regime-tagged performance (using strategy's regime classification from scan_results)
 
-### Sandbox Rules (Same for Both Modules)
+### Sandbox Rules
 | Rule | Strategy Module | Analysis Modules |
 |------|----------------|-------------------|
 | Read DB | Forbidden | Allowed (read-only) |
@@ -326,8 +363,12 @@ Analyzes: trades, signals, portfolio snapshots
 | File I/O | Forbidden | Forbidden |
 | subprocess/os/eval | Forbidden | Forbidden |
 | pandas/numpy | Allowed | Allowed |
-| scipy/statistics | Not needed | Allowed |
-| ta (indicators) | Allowed | Allowed |
+| ta (100+ indicators) | Allowed | Allowed |
+| scipy | Allowed | Allowed |
+| stdlib (math, statistics, collections, etc.) | Allowed | Allowed |
+| src.shell.contract | Allowed | N/A |
+
+**Strategy available imports**: pandas, numpy, ta, scipy, math, statistics, collections, dataclasses, datetime, functools, itertools, random, copy, src.shell.contract
 
 ### Orchestrator Mandate (embedded in system prompt)
 **Fund mandate**: Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund.
@@ -357,34 +398,68 @@ Analyzes: trades, signals, portfolio snapshots
 11. Send report via Telegram
 ```
 
-### Database Schema Additions
+### Database Schema (Key Tables)
 
 ```sql
--- Scan results: raw indicator values (truth) + strategy's regime classification (interpretation)
+-- Scan results: price + spread per symbol per scan
 CREATE TABLE scan_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
     symbol TEXT NOT NULL,
     price REAL NOT NULL,
-    ema_fast REAL,
-    ema_slow REAL,
-    rsi REAL,
-    volume_ratio REAL,
     spread REAL,
-    strategy_regime TEXT,          -- what the strategy classified (fact about decision, not truth)
     signal_generated INTEGER DEFAULT 0,
     signal_action TEXT,
     signal_confidence REAL,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_scan_results_ts ON scan_results(timestamp);
-CREATE INDEX idx_scan_results_symbol ON scan_results(symbol, timestamp);
+-- System metadata: key-value store for persistent settings
+CREATE TABLE system_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Orders: exchange order tracking with fill data
+CREATE TABLE orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT,
+    symbol TEXT NOT NULL, tag TEXT,
+    side TEXT NOT NULL, order_type TEXT NOT NULL,
+    qty REAL NOT NULL, price REAL,
+    fill_price REAL, fill_qty REAL, fill_fee REAL,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now')),
+    filled_at TEXT, cancelled_at TEXT
+);
+
+-- Conditional orders: exchange-native SL/TP pairs per position
+CREATE TABLE conditional_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_tag TEXT NOT NULL,
+    order_type TEXT NOT NULL,  -- 'stop_loss' or 'take_profit'
+    order_id TEXT,
+    trigger_price REAL NOT NULL,
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    filled_at TEXT, cancelled_at TEXT
+);
+
+-- Capital events: deposit/withdrawal tracking
+CREATE TABLE capital_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,  -- 'deposit' or 'withdrawal'
+    amount REAL NOT NULL,
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 ```
 
-Additional columns on existing tables:
-- `trades`: add `strategy_regime TEXT` — what the strategy thought the regime was at trade time
-- `signals`: add `strategy_regime TEXT` — what the strategy thought at signal time
+Key columns on existing tables:
+- `positions`: `tag TEXT NOT NULL` (globally unique identifier), `intent TEXT`, `strategy_version TEXT`
+- `trades`: `close_reason TEXT`, `tag TEXT`
+- `strategy_versions`: `code TEXT` (source code for DB fallback)
 
 ### File Structure
 ```
@@ -393,12 +468,12 @@ statistics/
 │   ├── market_analysis.py      # Market/exchange data analysis (orchestrator rewrites)
 │   └── trade_performance.py    # Trade performance analysis (orchestrator rewrites)
 ├── archive/                    # Previous versions of both modules
-│
+
 src/statistics/
 ├── __init__.py
 ├── loader.py                   # Shared loader for both modules
 ├── sandbox.py                  # Shared sandbox validation
-└── readonly_db.py              # ReadOnlyDB wrapper (SELECT only)
+└── readonly_db.py              # ReadOnlyDB wrapper (SELECT only, null-byte blocked)
 ```
 
 ## API Provider Abstraction

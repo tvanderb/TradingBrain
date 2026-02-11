@@ -110,9 +110,9 @@ ssh -i deploy/keys/trading-brain trading@<VPS_IP> \
 ssh -i deploy/keys/trading-brain trading@<VPS_IP> \
   "sqlite3 /srv/trading-brain/data/brain.db 'SELECT * FROM trades ORDER BY closed_at DESC LIMIT 10'"
 
-# Restart container
+# Restart container (re-reads .env)
 ssh -i deploy/keys/trading-brain trading@<VPS_IP> \
-  "docker compose -f /srv/trading-brain/docker-compose.yml restart"
+  "cd /srv/trading-brain && docker compose up -d --force-recreate"
 ```
 
 ### Caddy Reverse Proxy
@@ -154,8 +154,9 @@ Copy from `config/settings.example.toml` and customize. Key settings:
 | `general.timezone` | `"America/New_York"` | System timezone |
 | `markets.symbols` | 9 pairs | Trading pairs (BTC, ETH, SOL, XRP, DOGE, ADA, LINK, AVAX, DOT) |
 | `ai.provider` | `"anthropic"` | `"anthropic"` or `"vertex"` |
-| `orchestrator.start_hour` | `0` | Nightly review start (EST) |
-| `orchestrator.end_hour` | `3` | Nightly review end (EST) |
+| `orchestrator.start_hour` | `3` | Nightly review start hour (EST) |
+| `orchestrator.start_minute` | `30` | Nightly review start minute |
+| `orchestrator.end_hour` | `6` | Nightly review end (EST) |
 | `telegram.enabled` | `true` | Enable Telegram bot |
 | `telegram.allowed_user_ids` | `[]` | Authorized Telegram user IDs (empty = deny all) |
 | `api.enabled` | `false` | Enable REST + WebSocket API |
@@ -166,11 +167,13 @@ Controls hard limits enforced by the shell. Key settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `position.max_position_pct` | `0.15` | Max 15% portfolio per position |
+| `position.max_position_pct` | `0.25` | Max 25% portfolio per position |
 | `position.max_positions` | `5` | Max concurrent positions |
-| `daily.max_daily_loss_pct` | `0.06` | Stop trading after 6% daily loss |
+| `daily.max_daily_loss_pct` | `0.10` | Stop trading after 10% daily loss |
+| `per_trade.max_trade_pct` | `0.10` | Max 10% per trade |
 | `per_trade.default_trade_pct` | `0.03` | Default 3% per trade |
-| `emergency.max_drawdown_pct` | `0.12` | 12% max drawdown halt |
+| `emergency.max_drawdown_pct` | `0.40` | 40% max drawdown halt |
+| `rollback.max_daily_loss_pct` | `0.15` | 15% daily drop → strategy rollback |
 
 ## Running (Local Docker)
 
@@ -192,32 +195,36 @@ docker compose up -d --build
 
 | Command | Description |
 |---------|-------------|
-| `/status` | System mode, portfolio value, daily P&L |
-| `/positions` | Open positions with entry price, P&L, stops |
+| `/help` | System intro and command list |
+| `/status` | System health: mode, active/paused/halted, last scan, uptime |
+| `/health` | Fund metrics: portfolio value, daily P&L, drawdown, risk state |
+| `/outlook` | Latest orchestrator observations (market summary, assessment) |
+| `/positions` | Open positions with entry price, P&L, stops, tags |
 | `/trades` | Last 10 completed trades |
-| `/report` | Latest market scan (prices, regime, indicators, signals) |
 | `/risk` | Risk limits and current utilization |
 | `/performance` | Daily performance summary |
 | `/strategy` | Active strategy version and description |
 | `/tokens` | AI token usage and cost breakdown |
 | `/thoughts` | Browse orchestrator reasoning spool |
 | `/thought <id> <step>` | Full AI response for a specific cycle step |
-| `/ask <question>` | On-demand question to Claude |
+| `/ask <question>` | Context-aware question to Haiku (portfolio + risk injected) |
 | `/pause` | Pause trading (scans continue) |
 | `/resume` | Resume trading, clear risk halt |
-| `/kill` | Emergency stop — shutdown and close all positions |
+| `/kill` | Emergency stop — cancel all orders, close positions, shutdown |
 
 ## Operations
 
 ### Paper to Live
 
 1. Edit `config/settings.toml`: change `mode = "live"`
-2. Restart: `docker compose restart` (or re-run Ansible playbook)
+2. Restart: `deploy/restart.sh` (or re-run Ansible playbook)
 3. Verify via `/status` in Telegram
+
+**Important**: `docker compose restart` does NOT re-read `.env` changes. Always use `deploy/restart.sh` or `docker compose up -d --force-recreate`.
 
 ### Adding Funds
 
-Deposit to Kraken normally. The system detects balance changes automatically.
+Deposit to Kraken normally. The system detects balance changes via the `capital_events` table.
 
 ### Emergency Stop
 
@@ -244,4 +251,6 @@ docker compose up -d
 | Telegram commands don't work | Add your Telegram user ID to `allowed_user_ids` in settings.toml (empty list = deny all) |
 | Stale PID lockfile | Delete `data/brain.pid` and restart |
 | DB locked | Stop container, delete `data/brain.db-shm` and `data/brain.db-wal`, restart |
-| Orchestrator not running | Runs nightly 12-3am EST. Check `/tokens` for recent activity |
+| Orchestrator not running | Runs nightly 3:30-6am EST. Check `/tokens` for recent activity |
+| `.env` changes not applied | `docker compose restart` doesn't re-read `.env`. Use `deploy/restart.sh` |
+| Strategy won't load | Check `strategy/active/strategy.py` exists. System falls back to DB, then paused mode |

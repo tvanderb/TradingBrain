@@ -1,6 +1,6 @@
 # Trading Brain: System Goal, Audit, Roadmap & Risk Analysis
 
-> Created: 2026-02-08 | Status: Paper trading, v2 IO-Container complete
+> Created: 2026-02-08 | Updated: 2026-02-11 | Status: Deployed, 72-hour paper test in progress
 
 ---
 
@@ -14,7 +14,7 @@
 | Metric | Paper Phase Benchmark | Live Phase Benchmark |
 |--------|-------------------|-------------------|
 | Expectancy | > 0 (any positive) | > 0.5% per trade |
-| Max Drawdown | < 12% (shell-enforced) | < 10% |
+| Max Drawdown | < 40% (shell-enforced) | < 25% |
 | Monthly P&L | Positive 2 of 3 months | Consistently positive |
 | Strategy Evolution | At least 3 iterations | Stabilizing, fewer changes |
 
@@ -32,43 +32,45 @@
 
 ---
 
-## System Audit Summary (2026-02-08)
+## System Audit Summary (2026-02-11)
 
 ### Fully Implemented & Verified
 
-| Component | Lines of Code | Tests | Status |
-|-----------|:---:|:---:|:---:|
-| IO Contract (types, interfaces) | ~150 | 2 | Working |
-| Config system (TOML + .env) | ~120 | 1 | Working |
-| Database (12 tables, async SQLite) | ~220 | 2 | Working |
-| Kraken REST client (orders, OHLC, fees) | ~190 | 1 | Working |
-| Kraken WebSocket v2 (ticker, OHLC) | ~85 | - | Working (reconnects on drop) |
-| Risk manager (9 checks, rollback) | ~140 | 4 | Working |
-| Portfolio tracker (paper + live) | ~325 | 2 | Working |
-| Data store (tiered OHLCV, aggregation) | ~230 | - | Working |
-| Strategy loader (import, archive, deploy) | ~80 | 1 | Working |
-| Strategy sandbox (AST validation) | ~130 | 3 | Working |
-| Backtester (historical simulation) | ~180 | 1 | Working |
-| AI client (Anthropic + Vertex) | ~130 | - | Working |
-| Orchestrator (nightly AI cycle) | ~400 | - | Working (untested live) |
-| Reporter (daily/weekly summaries) | ~200 | - | Working |
-| Telegram bot (13 commands) | ~330 | - | Working |
-| Notifier (7 alert types) | ~120 | - | Working |
-| Main (lifecycle, scheduler, scan loop) | ~600 | - | Working |
-| Strategy v001 (EMA + RSI + Volume) | ~160 | - | Running |
-| Skills library (indicators) | ~120 | 1 | Working |
-| Integration tests | ~500+ | 35/35 | All passing |
-| **Total** | **~4,500+** | **35** | **All green** |
+| Component | Tests | Status |
+|-----------|:---:|:---:|
+| IO Contract (types, interfaces, Action.MODIFY) | 6 | Working |
+| Config system (TOML + .env + validation) | 5 | Working |
+| Database (17+ tables, async SQLite, system_meta) | 8 | Working |
+| Kraken REST client (orders, OHLC, fees, fill confirmation) | 3 | Working |
+| Kraken WebSocket v2 (ticker, OHLC, reconnect) | 2 | Working |
+| Risk manager (9 checks, rollback, halt evaluation) | 12 | Working |
+| Portfolio tracker (paper + live, cash reconciliation, tags) | 15 | Working |
+| Data store (tiered OHLCV, aggregation, pruning) | 4 | Working |
+| Strategy loader (import, archive, deploy, DB fallback) | 5 | Working |
+| Strategy sandbox (AST validation, transitive import blocking) | 8 | Working |
+| Backtester (LIMIT simulation, per-symbol spread) | 7 | Working |
+| AI client (Anthropic + Vertex, token tracking) | 3 | Working |
+| Orchestrator (nightly AI cycle, code storage) | 6 | Working |
+| Reporter (daily/weekly summaries) | 2 | Working |
+| Telegram bot (16 commands, health, outlook, ask/Haiku) | 12 | Working |
+| Notifier (18 event types, dual dispatch) | 6 | Working |
+| Data API (10 REST endpoints, WebSocket) | 14 | Working |
+| Statistics modules (market + trade performance) | 8 | Working |
+| Truth benchmarks (28 metrics) | 4 | Working |
+| Main (lifecycle, scheduler, restart safety L1-L9) | 10 | Working |
+| Integration tests | **161/161** | **All green** |
 
-### Known Issues (Non-Critical for Paper)
+### All Previously Known Issues — Resolved
 
-1. **Paper test duration not enforced** — orchestrator records `paper_days` in DB but doesn't gate deployment on completion. Impact: low (whole system is paper mode anyway). Orchestrator is now *aware* of active paper tests (Session 8).
-
-2. **Live order fill tracking missing** — places Kraken orders but doesn't confirm fills. Impact: none in paper mode. Must fix before live.
-
-3. ~~**WebSocket max-retry silent failure**~~ — **FIXED** (Session 9): `set_on_failure()` callback on KrakenWebSocket, Telegram alert via `websocket_failed()`.
-
-4. ~~**Import path fragility**~~ — **FIXED** (Session 9): Moved to top-level import in `src/main.py`.
+1. ~~Paper test duration not enforced~~ — **FIXED** (Session J): `min_paper_test_trades` config, inconclusive status
+2. ~~Live order fill tracking missing~~ — **FIXED** (Session B/D7): `query_order()` polling with fill confirmation
+3. ~~WebSocket max-retry silent failure~~ — **FIXED** (Session 9): `set_on_failure()` callback + Telegram alert
+4. ~~Import path fragility~~ — **FIXED** (Session 9): Top-level imports
+5. ~~Client-side SL/TP only~~ — **FIXED** (Session B/D4): Exchange-native orders on Kraken
+6. ~~Skills library import failure~~ — **FIXED** (Session K): Skills library removed, direct imports
+7. ~~Paper cash phantom profit~~ — **FIXED** (Session L/L1): `system_meta` table + first-principles reconciliation
+8. ~~No halt evaluation on restart~~ — **FIXED** (Session L/L2): `evaluate_halt_state()` on startup
+9. ~~Strategy single point of failure~~ — **FIXED** (Session L/L4): DB fallback + paused mode
 
 ---
 
@@ -97,12 +99,12 @@
 **4. Laptop Uptime**
 - **Risk**: HIGH (for data continuity)
 - **Why**: macOS laptop sleeps when lid closes, disconnects WiFi on sleep, restarts for updates. Already observed: 9 hours of runtime, only 5 scans completed (rest missed during sleep).
-- **Impact**: Missed scans = missed trading opportunities. Nightly orchestration (12-3am) requires laptop to be awake and open. Data aggregation won't run during sleep.
+- **Impact**: Missed scans = missed trading opportunities. Nightly orchestration (3:30-6am) requires laptop to be awake and open. Data aggregation won't run during sleep.
 - **Mitigation**: Keep laptop plugged in + awake during paper testing. Move to VPS for unattended 24/7 operation.
 
 **5. Nightly Orchestration Timing**
 - **Risk**: MEDIUM
-- **Why**: Orchestration window is 12-3am EST. If laptop is asleep, orchestrator never runs. Strategy never evolves.
+- **Why**: Orchestration window is 3:30-6am EST. If laptop is asleep, orchestrator never runs. Strategy never evolves.
 - **Impact**: System runs the same strategy forever. No learning.
 - **Mitigation**: Either keep laptop awake overnight, or shift orchestration window to a time when laptop is awake (e.g., 8pm). VPS solves this permanently.
 
@@ -164,19 +166,20 @@
 - [x] **Orchestrator thought spool** — `orchestrator_thoughts` DB table stores every AI response per cycle. Browsable via `/thoughts` (cycle list) and `/thought <cycle> <step>` (full response). Instrumented at all 5 AI call sites in orchestrator.
 
 ### Before Going Live (Month 2-3)
-- [ ] **Order fill tracking** — poll Kraken for fill status after placing orders
-- [ ] **Server-side stop-losses** — use Kraken's conditional orders, not scan-based SL
-- [ ] **Position reconciliation on startup** — compare DB vs Kraken actual positions
-- [ ] **Paper test enforcement** — gate deployment on elapsed paper test duration
+- [x] **Order fill tracking** — DONE (Session B/D7): `query_order()` polling with fill confirmation
+- [x] **Server-side stop-losses** — DONE (Session B/D4): Exchange-native SL/TP on Kraken
+- [x] **Position reconciliation on startup** — DONE (Session B): `_reconcile_orders()` on startup
+- [x] **Paper test enforcement** — DONE (Session J): `min_paper_test_trades` with inconclusive status
 - [x] **WebSocket failure alerting** — DONE (Session 9): `set_on_failure()` callback + Telegram alert
-- [ ] **VPS deployment** — systemd service with auto-restart, monitoring
-- [ ] **Live mode testing on testnet** — verify Kraken API key permissions, order placement
+- [x] **VPS deployment** — DONE (Sessions 16-17): Docker + Ansible + Caddy + monitoring
+- [x] **Restart safety** — DONE (Session L): 9 landmines fixed (L1-L9)
+- [ ] **Live mode testing** — verify Kraken API key permissions with small real order
 
 ### Before Scaling Capital (Month 4+)
 - [ ] **Order book depth analysis** — check liquidity before sizing trades
-- [ ] **Multi-leg order support** — OCO (one-cancels-other) for SL + TP
+- [x] **SL/TP order management** — DONE (Session B/D4): System manages cancel-other logic for SL+TP pairs
 - [ ] **Tax reporting** — export trades in format for Canadian tax filing
-- [ ] **Backup strategy** — automated DB backups, strategy archive verification
+- [ ] **Automated DB backups** — scheduled brain.db snapshots
 
 ---
 
@@ -185,7 +188,7 @@
 ### Phase 0: Statistics Shell & Orchestrator Upgrade — COMPLETE
 **Goal**: Give the orchestrator situational awareness, hard-computed statistics, and clear mandate before it runs its first cycle.
 
-> All 9 implementation steps complete (Sessions 5-9). Truth benchmarks, both analysis modules, scan results collection, orchestrator integration, thought spool, observations table, historical data bootstrap, strategy evolution improvements, and rough fixes all done. 35/35 tests passing.
+> All 9 implementation steps complete (Sessions 5-9). Then 11 audit sessions (Sessions 10-L) hardened the system: 200+ fixes, position system redesign, exchange-native orders, restart safety, skills library removal. 161/161 tests passing. Deployed to VPS.
 
 **Architecture**: Two flexible analysis modules + one rigid truth benchmarks layer:
 - **Truth Benchmarks** (rigid shell) — simple verifiable metrics, orchestrator cannot modify
@@ -317,15 +320,18 @@ After all steps:
 - [ ] Orchestrator can decide to change either analysis module independently
 - [ ] System doesn't slow down perceptibly (scan loop adds ~1ms for DB write)
 
-### Phase 1: Paper Validation (Weeks 1-4)
+### Phase 1: Paper Validation (Weeks 1-4) — IN PROGRESS
 **Goal**: Prove the system works end-to-end. First trades. First orchestration cycles.
 
-- Run paper trading 24/7 (VPS or laptop-awake)
-- Monitor first signals and trades via Telegram
-- Watch first nightly orchestration cycle
-- Observe strategy evolution (v001 → v002 → ...)
-- Gather baseline performance data
-- Tune rollback thresholds if they're too aggressive for learning phase
+- [x] Run paper trading 24/7 on VPS
+- [x] First orchestration cycle ran (Session K — failed due to skills import, then fixed)
+- [x] Deployed with restart safety (Session L)
+- [ ] 72-hour paper test in progress (started 2026-02-11)
+- [ ] First successful orchestration cycle with strategy changes
+- [ ] 10+ paper trades completed
+- [ ] 5+ orchestration cycles completed
+- [ ] Observe strategy evolution (v001 → v002 → ...)
+- [ ] Gather baseline performance data
 
 **Exit criteria**: System has completed 10+ paper trades and 5+ orchestration cycles
 
@@ -336,7 +342,7 @@ After all steps:
 - Analyze win/loss patterns across market conditions
 - Consider adding: VWAP, Bollinger squeeze, ATR-based dynamic stops
 - First quarterly document distillation
-- Expanded indicator skills library
+- Expanded analysis capabilities
 
 **Exit criteria**: Positive expectancy over 30+ trades, strategy stabilizing
 
@@ -425,6 +431,8 @@ Checklist before deploying real money:
 3. Strategy has survived at least one market regime change
 4. VPS deployed and running 24/7 for 1+ week without issues
 5. User has tested all Telegram commands and trusts the system
-6. Live-mode changes implemented (order fill tracking, server-side stops)
+6. ~~Live-mode changes implemented (order fill tracking, server-side stops)~~ — DONE
+7. Live mode tested with small real order to verify Kraken API key permissions
 
 > **Note**: Removed specific win rate target (45%) — per fund mandate, the orchestrator determines what success looks like.
+> Items 1-5 are exit criteria for Phase 1. Item 6 is done. Item 7 is the final verification before switching `mode = "live"`.

@@ -72,3 +72,59 @@ while running:
 ## Shell Escaping in Inline Python
 **Problem**: Running Python one-liners with `$` in f-strings gets eaten by bash substitution
 **Fix**: Use standalone `.py` test files instead of inline scripts
+
+## Kraken WebSocket Pair Names
+**Problem**: WebSocket v2 uses different pair names than config format
+**Mapping**: `BTC/USD` → `XBT/USD`, `DOGE/USD` → `XDG/USD`. All others use standard format.
+**REST quirk**: REST accepts `BTCUSD` but returns `XXBTZUSD` in responses.
+
+## Kraken txid Extraction
+**Problem**: `result["txid"]` may be an empty list, not None
+**Fix**: `(result.get("txid") or [None])[0]` — handles both None and empty list
+
+## SQLite `datetime('now')` Is Local Time
+**Problem**: `datetime('now')` uses server timezone, not UTC
+**Fix**: Always use `datetime('now', 'utc')` for consistent timestamps
+
+## SQLite Paper Test `ends_at` Format
+**Problem**: `datetime.isoformat()` includes timezone offset, which SQLite datetime functions don't handle
+**Fix**: Use `strftime('%Y-%m-%d %H:%M:%S')` format for all SQLite datetime comparisons
+
+## SQLite LIMIT -1
+**Gotcha**: `LIMIT -1` returns ALL rows in SQLite (documented behavior). Useful but surprising.
+
+## SQLite Can't DROP CONSTRAINT
+**Gotcha**: No `ALTER TABLE DROP CONSTRAINT` in SQLite. Must recreate table to remove constraints.
+**Impact**: Position table migration (adding `tag` column) requires DROP + CREATE + backfill, wrapped in transaction.
+
+## Sandbox: BaseException Not Exception
+**Problem**: Strategy code catching `Exception` still lets `SystemExit`/`KeyboardInterrupt` through
+**Fix**: Sandbox AST walk checks for `BaseException` catches. Also blocks `operator` module and name-mangled attributes (`_ClassName__attr`).
+
+## asyncio.Lock Serializes All Trade Paths
+**Gotcha**: The trade lock (`self._trade_lock`) serializes ALL trade execution — scan loop signals, SL/TP triggers, conditional orders, emergency stop, reconciliation. Any deadlock blocks everything.
+**`_analyzing` flag**: Guards strategy callbacks from position monitor during executor thread. Must be set/cleared atomically.
+
+## Docker `compose restart` Doesn't Re-Read `.env`
+**Problem**: `docker compose restart` restarts the container with the OLD environment. `.env` changes are NOT applied.
+**Fix**: Must use `docker compose up -d --force-recreate` or the `deploy/restart.sh` helper script.
+
+## PID Lockfile on macOS
+**Problem**: Python has no `ProcessNotFoundError` exception
+**Fix**: Use `ProcessLookupError` for `os.kill(pid, 0)` checks. Also catch `PermissionError` (process exists but owned by another user).
+
+## ReadOnlyDB Null-Byte Injection
+**Problem**: Null bytes in SQL queries can bypass text-based blocking
+**Fix**: `ReadOnlyDB` strips null bytes from all queries before validation. Also blocks `LOAD_EXTENSION`.
+
+## Telegram Bot Session Conflict
+**Problem**: If Telegram was polling from a previous instance, starting a new one causes ~10s of `Conflict: terminated by other getUpdates request`
+**Fix**: `telegram.waiting_for_session_release` with 10s delay on startup. `drop_pending_updates=True` in `start_polling()`.
+
+## Paper Cash Phantom Profit (L1)
+**Problem**: If `daily_performance` is empty, portfolio fell back to `config.paper_balance_usd` as starting value. Changing config or having positions at startup caused phantom profit/loss.
+**Fix**: Store starting capital in `system_meta` table, always reconcile from first principles: `starting_capital + deposits + total_pnl - position_costs`.
+
+## Special Migration Crash Risk (L8)
+**Problem**: Positions table recreation (DROP → CREATE → INSERT) without explicit transaction. Crash between DROP and INSERT loses all position data.
+**Fix**: Wrap in `BEGIN IMMEDIATE` / `COMMIT` with rollback on error.
