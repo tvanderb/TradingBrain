@@ -266,7 +266,7 @@ async def strategy_handler(request: web.Request) -> web.Response:
 
     # Recent versions
     versions = await db.fetchall(
-        "SELECT * FROM strategy_versions ORDER BY deployed_at DESC LIMIT 10"
+        "SELECT * FROM strategy_versions ORDER BY COALESCE(deployed_at, '0') DESC LIMIT 10"
     )
 
     data = {

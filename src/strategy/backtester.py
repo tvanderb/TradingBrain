@@ -254,9 +254,10 @@ class Backtester:
                     if len(positions) >= self._risk_limits.max_positions:
                         continue
                     fill_price = price * (1 + self._slippage)  # slippage: buy higher
-                    # Clamp size_pct to max_trade_pct
-                    clamped_pct = min(signal.size_pct, self._risk_limits.max_trade_pct)
-                    trade_value = total_value * clamped_pct
+                    # Reject oversized signals (matches live risk manager behavior)
+                    if signal.size_pct > self._risk_limits.max_trade_pct:
+                        continue
+                    trade_value = total_value * signal.size_pct
                     # Enforce max_position_pct per symbol
                     existing_value = sum(
                         p["qty"] * prices.get(p["symbol"], p["avg_entry"])
@@ -270,13 +271,26 @@ class Backtester:
                     fee = trade_value * fee_pct
                     cash -= (trade_value + fee)
                     tag = signal.tag or self._bt_tag(signal.symbol)
-                    positions[tag] = {
-                        "symbol": signal.symbol,
-                        "qty": qty, "avg_entry": fill_price,
-                        "entry_fee": fee,
-                        "stop_loss": signal.stop_loss, "take_profit": signal.take_profit,
-                        "opened_at": ts,
-                    }
+                    if tag in positions:
+                        # Average into existing position (matches live behavior)
+                        existing = positions[tag]
+                        total_qty = existing["qty"] + qty
+                        avg = (existing["avg_entry"] * existing["qty"] + fill_price * qty) / total_qty
+                        existing["qty"] = total_qty
+                        existing["avg_entry"] = avg
+                        existing["entry_fee"] = existing.get("entry_fee", 0.0) + fee
+                        if signal.stop_loss is not None:
+                            existing["stop_loss"] = signal.stop_loss
+                        if signal.take_profit is not None:
+                            existing["take_profit"] = signal.take_profit
+                    else:
+                        positions[tag] = {
+                            "symbol": signal.symbol,
+                            "qty": qty, "avg_entry": fill_price,
+                            "entry_fee": fee,
+                            "stop_loss": signal.stop_loss, "take_profit": signal.take_profit,
+                            "opened_at": ts,
+                        }
                     try:
                         self._strategy.on_fill(signal.symbol, Action.BUY, qty, fill_price, signal.intent, tag=tag)
                     except TypeError:

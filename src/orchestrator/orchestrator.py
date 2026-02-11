@@ -1026,7 +1026,7 @@ Is this classification correct?
             version = test["strategy_version"]
             # Get trades made during the paper test period (filter by time window)
             trades = await self._db.fetchall(
-                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND opened_at >= ? AND closed_at IS NOT NULL AND closed_at <= ?",
+                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND datetime(opened_at) >= datetime(?) AND closed_at IS NOT NULL AND datetime(closed_at) <= datetime(?)",
                 (version, test["started_at"], test["ends_at"]),
             )
             total_pnl = sum(t["pnl"] for t in trades) if trades else 0.0

@@ -4161,23 +4161,46 @@ async def test_performance_endpoint_limit():
         os.unlink(config.db_path)
 
 
-def test_ask_rate_limiting():
-    """Fix 3.22: /ask has a 30-second rate limit."""
+@pytest.mark.asyncio
+async def test_ask_rate_limiting():
+    """Fix 3.22: /ask has a 30-second rate limit — verify second call is actually blocked."""
     import time as time_mod
     from src.telegram.commands import BotCommands
     from src.shell.config import load_config
 
     config = load_config()
-    commands = BotCommands(config=config, db=MagicMock(), scan_state={})
+    mock_db = MagicMock()
+    mock_ai = MagicMock()
+    mock_ai.ask_haiku = AsyncMock(return_value="Test answer")
+    commands = BotCommands(config=config, db=mock_db, scan_state={}, ai_client=mock_ai)
 
     # Initially 0, so first ask is allowed
     assert commands._last_ask_time == 0
 
-    # Simulate setting last_ask_time to now
+    # Simulate a successful ask by setting the rate limit timestamp
     commands._last_ask_time = time_mod.time()
 
-    # Next ask should be within 30s window
-    assert time_mod.time() - commands._last_ask_time < 30
+    # Create mock update for second /ask call (should be rate-limited)
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = config.telegram.allowed_user_ids[0] if config.telegram.allowed_user_ids else 12345
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.args = ["test", "question"]
+
+    # Ensure user is authorized
+    if not config.telegram.allowed_user_ids:
+        config.telegram.allowed_user_ids = [update.effective_user.id]
+
+    await commands.cmd_ask(update, context)
+
+    # Verify the rate limit message was sent (not the AI response)
+    reply_calls = update.message.reply_text.call_args_list
+    assert any("wait" in str(call).lower() for call in reply_calls), \
+        f"Expected rate limit message, got: {reply_calls}"
+    # AI should NOT have been called
+    mock_ai.ask_haiku.assert_not_called()
 
 
 def test_config_validates_daily_trades():
@@ -4579,7 +4602,7 @@ def test_paper_test_trade_query_upper_bound():
     import inspect
     from src.orchestrator.orchestrator import Orchestrator
     source = inspect.getsource(Orchestrator._evaluate_paper_tests)
-    assert "closed_at <=" in source, "Trade query should have upper bound on closed_at"
+    assert "datetime(closed_at) <= datetime(?)" in source, "Trade query should normalize timestamps with datetime()"
 
 
 def test_broadcast_ws_error_handling():

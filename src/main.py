@@ -67,6 +67,7 @@ class TradingBrain:
         self._api_runner: web.AppRunner | None = None
         self._ws_task: asyncio.Task | None = None
         self._trade_lock = asyncio.Lock()  # Serializes trade execution across scan/monitor/emergency
+        self._analyzing = False  # Flag to prevent strategy callbacks during analyze() executor
         self._running = False
 
     async def start(self) -> None:
@@ -565,6 +566,7 @@ class TradingBrain:
 
             # Run strategy (with timeout to catch infinite loops in AI-rewritten code)
             try:
+                self._analyzing = True
                 signals = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
                         None, self._strategy.analyze, dict(markets), portfolio, datetime.now()
@@ -576,6 +578,8 @@ class TradingBrain:
                 if self._notifier:
                     await self._notifier.system_error("Strategy analyze() timed out (>30s) — possible infinite loop")
                 return
+            finally:
+                self._analyzing = False
 
             # Process signals
             executed_symbols = set()
@@ -828,27 +832,33 @@ class TradingBrain:
                 await self._notifier.stop_triggered(symbol, reason, price, tag=tag)
                 await self._notifier.trade_executed(r)
 
-                # Strategy callbacks (match scan loop behavior)
-                if r.get("pnl") is not None and self._strategy:
-                    try:
-                        self._strategy.on_position_closed(
-                            r["symbol"], r["pnl"], r.get("pnl_pct", 0),
-                            tag=r.get("tag", ""),
-                        )
-                    except TypeError:
-                        self._strategy.on_position_closed(
-                            r["symbol"], r["pnl"], r.get("pnl_pct", 0),
-                        )
-                if self._strategy:
+                # Strategy callbacks (skip if analyze() is running in executor to avoid thread-safety issues)
+                if not self._analyzing and self._strategy:
+                    if r.get("pnl") is not None:
+                        try:
+                            self._strategy.on_position_closed(
+                                r["symbol"], r["pnl"], r.get("pnl_pct", 0),
+                                tag=r.get("tag", ""),
+                            )
+                        except (TypeError, RuntimeError):
+                            try:
+                                self._strategy.on_position_closed(
+                                    r["symbol"], r["pnl"], r.get("pnl_pct", 0),
+                                )
+                            except (TypeError, RuntimeError):
+                                pass
                     try:
                         self._strategy.on_fill(
                             symbol, Action.CLOSE, r["qty"], r["price"], pos_intent,
                             tag=r.get("tag", ""),
                         )
-                    except TypeError:
-                        self._strategy.on_fill(
-                            symbol, Action.CLOSE, r["qty"], r["price"], pos_intent,
-                        )
+                    except (TypeError, RuntimeError):
+                        try:
+                            self._strategy.on_fill(
+                                symbol, Action.CLOSE, r["qty"], r["price"], pos_intent,
+                            )
+                        except (TypeError, RuntimeError):
+                            pass
 
             # Rollback triggers + peak update (once after all results)
             new_value = await self._portfolio.total_value()
@@ -930,26 +940,32 @@ class TradingBrain:
                     await self._notifier.stop_triggered(symbol, reason, fill_price, tag=tag)
                     await self._notifier.trade_executed(result)
 
-                    # Strategy callbacks
-                    if self._strategy:
+                    # Strategy callbacks (skip if analyze() in executor — thread-safety)
+                    if not self._analyzing and self._strategy:
                         try:
                             self._strategy.on_position_closed(
                                 result["symbol"], result["pnl"], result["pnl_pct"], tag=tag,
                             )
-                        except TypeError:
-                            self._strategy.on_position_closed(
-                                result["symbol"], result["pnl"], result["pnl_pct"],
-                            )
+                        except (TypeError, RuntimeError):
+                            try:
+                                self._strategy.on_position_closed(
+                                    result["symbol"], result["pnl"], result["pnl_pct"],
+                                )
+                            except (TypeError, RuntimeError):
+                                pass
                         try:
                             self._strategy.on_fill(
                                 symbol, Action.CLOSE, result["qty"], result["price"],
                                 Intent.DAY, tag=tag,
                             )
-                        except TypeError:
-                            self._strategy.on_fill(
-                                symbol, Action.CLOSE, result["qty"], result["price"],
-                                Intent.DAY,
-                            )
+                        except (TypeError, RuntimeError):
+                            try:
+                                self._strategy.on_fill(
+                                    symbol, Action.CLOSE, result["qty"], result["price"],
+                                    Intent.DAY,
+                                )
+                            except (TypeError, RuntimeError):
+                                pass
 
                     # Rollback triggers + peak update
                     new_value = await self._portfolio.total_value()

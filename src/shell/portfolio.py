@@ -334,6 +334,12 @@ class PortfolioTracker:
                      json.dumps(final_info), txid),
                 )
                 await self._db.commit()
+                # Cancel the remaining unfilled portion to prevent unexpected later fills
+                try:
+                    await self._kraken.cancel_order(txid)
+                    log.info("confirm_fill.partial_remainder_canceled", txid=txid)
+                except Exception as cancel_err:
+                    log.warning("confirm_fill.partial_cancel_failed", txid=txid, error=str(cancel_err))
                 log.warning("confirm_fill.partial_at_timeout", txid=txid,
                             vol_exec=vol_exec, volume=volume, fill_price=fill_price)
                 return {
@@ -540,14 +546,19 @@ class PortfolioTracker:
         if signal.stop_loss or signal.take_profit:
             entry_txid = None
             if not self._config.is_paper():
+                # Cancel old SL/TP before placing new ones (critical for average-in)
+                if existing:
+                    await self._cancel_exchange_sl_tp(tag)
                 # Retrieve the entry txid from the orders table
                 order_row = await self._db.fetchone(
                     "SELECT txid FROM orders WHERE tag = ? AND purpose = 'entry' ORDER BY id DESC LIMIT 1",
                     (tag,),
                 )
                 entry_txid = order_row["txid"] if order_row else None
+            # Use total position qty (not just new fill qty) for SL/TP sizing
+            sl_tp_qty = pos["qty"] if existing else qty
             await self._place_exchange_sl_tp(
-                tag, signal.symbol, qty, signal.stop_loss, signal.take_profit,
+                tag, signal.symbol, sl_tp_qty, signal.stop_loss, signal.take_profit,
                 entry_txid=entry_txid,
             )
 
@@ -689,11 +700,13 @@ class PortfolioTracker:
                 "UPDATE positions SET qty = ?, entry_fee = ?, updated_at = ? WHERE tag = ?",
                 (remaining_qty, pos["entry_fee"], now, tag),
             )
-            # SL/TP still apply to remaining quantity (exchange orders cover original qty)
-            if pos.get("stop_loss") or pos.get("take_profit"):
-                log.info("portfolio.partial_close_sl_tp_note", tag=tag,
-                         remaining=round(remaining_qty, 8),
-                         note="Exchange SL/TP may need manual adjustment for remaining qty")
+            # Re-place SL/TP for remaining quantity if they were canceled before the close
+            if sl_tp_canceled and (pos.get("stop_loss") or pos.get("take_profit")):
+                log.warning("portfolio.partial_fill_sl_tp_replace", tag=tag,
+                            remaining=round(remaining_qty, 8))
+                await self._place_exchange_sl_tp(
+                    tag, symbol, remaining_qty, pos.get("stop_loss"), pos.get("take_profit"),
+                )
 
         await self._db.commit()
 

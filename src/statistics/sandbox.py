@@ -47,13 +47,14 @@ FORBIDDEN_IMPORTS.update({
     "code", "codeop", "runpy", "pkgutil",
     "threading", "multiprocessing", "pickle", "shelve", "marshal",
     "io", "tempfile", "gc", "inspect", "atexit", "signal",
+    "operator",  # attrgetter/itemgetter bypass AST dunder checks
 })
 
 FORBIDDEN_CALLS = {"eval", "exec", "__import__", "open", "compile", "print", "getattr", "setattr", "delattr", "globals", "vars", "dir"}
 
 FORBIDDEN_ATTRS = {"os.system", "os.popen", "os.exec", "os.environ", "os.path"}
 
-FORBIDDEN_DUNDERS = {"__builtins__", "__import__", "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__", "__code__"}
+FORBIDDEN_DUNDERS = {"__builtins__", "__import__", "__class__", "__subclasses__", "__bases__", "__mro__", "__globals__", "__code__", "__getattribute__", "__dict__"}
 
 
 @dataclass

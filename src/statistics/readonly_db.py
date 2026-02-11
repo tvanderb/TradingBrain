@@ -15,7 +15,7 @@ log = structlog.get_logger()
 
 # Patterns that indicate a write operation
 _WRITE_PATTERNS = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*=|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|LOAD_EXTENSION)",
+    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|REINDEX|VACUUM|PRAGMA\s+\w+\s*[=(]|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|LOAD_EXTENSION)",
     re.IGNORECASE,
 )
 
@@ -36,8 +36,14 @@ class ReadOnlyDB:
         self.__conn = conn  # name-mangled to prevent direct access from modules
 
     def __getattr__(self, name: str):
-        """Block access to internal connection attributes."""
-        if name in ("_conn", "__conn", "_ReadOnlyDB__conn"):
+        """Block access to internal connection attributes.
+
+        Note: __getattr__ is only called for attributes NOT found via normal lookup.
+        The name-mangled __conn IS found normally, so __getattr__ cannot block it.
+        Primary defense against name-mangled access is the sandbox (blocks __dict__,
+        __getattribute__, operator, and getattr).
+        """
+        if name in ("_conn", "__conn"):
             raise AttributeError("Direct connection access not allowed")
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 

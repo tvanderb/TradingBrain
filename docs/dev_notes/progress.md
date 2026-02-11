@@ -1799,3 +1799,49 @@ User reported production paper trades showing same open/close price. Traced full
 
 ### Files Modified (12 source + 1 test)
 `main.py`, `portfolio.py`, `risk.py`, `contract.py`, `orchestrator.py`, `backtester.py`, `database.py`, `data_store.py`, `notifications.py`, `commands.py`, `tests/test_integration.py`
+
+### Post-Fix Audit Round 1 (6 findings, all fixed)
+- **F1**: Fee schedule `INSERT` → `DELETE+INSERT` (prevent duplicate rows)
+- **F2**: `/positions` Telegram now uses in-memory positions + `scan_state` live prices
+- **F3**: `/ask` rate limit moved to after successful AI call
+- **F4**: Multi-close signal audit trail joins all tags with comma
+- **F5**: SL/TP display shows "N/A" when unset instead of "$0.00"
+- **F6**: Unauthorized Telegram log rate-limited to 1 per 60s
+
+## Session F (2026-02-10) — Final Audit Round 2
+
+### Audit Scope
+5 parallel audit agents — 8th audit round, looking for extremely subtle issues.
+
+### Raw Findings: ~18 across all agents
+After triage: **13 actionable, 2 not actionable**
+
+### Fixes Applied (13 findings)
+
+#### Critical (1)
+- **F1**: Paper test `closed_at` (isoformat 'T') vs `ends_at` (strftime ' ') — string comparison drops final-day trades. Fixed: `datetime(closed_at) <= datetime(?)` normalizes both formats.
+
+#### Medium (8)
+- **F2**: Live partial fill on exit: SL/TP canceled but not re-placed for remaining qty. Fixed: re-place SL/TP after partial fill.
+- **F3**: BUY average-in: cancel old exchange SL/TP before placing new ones, use total position qty.
+- **F4**: Partial fill at timeout: cancel remaining unfilled order on Kraken after processing partial.
+- **F5**: Backtester BUY-with-tag overwrites position. Fixed: average in (matches live behavior).
+- **F6**: Backtester clamps oversized signals. Fixed: reject instead (matches live risk manager).
+- **F7**: Thread-safety: `analyze()` in executor thread while callbacks run on event loop. Fixed: `_analyzing` flag skips callbacks during executor run.
+- **F8**: Sandbox: `operator.attrgetter` bypasses AST dunder checks. Fixed: `operator` added to FORBIDDEN_IMPORTS in both sandboxes.
+- **F9**: ReadOnlyDB: PRAGMA function-call syntax `PRAGMA foo(value)` bypasses regex. Fixed: `[=(]` in pattern.
+
+#### Low (4)
+- **F10**: ReadOnlyDB `__getattr__` can't block name-mangled access — defense shifted to sandbox (blocks `__dict__`, `__getattribute__`, `operator`, `getattr`).
+- **F11**: FORBIDDEN_DUNDERS now includes `__getattribute__` and `__dict__` in both sandboxes.
+- **F12**: Strategy versions API query: `ORDER BY COALESCE(deployed_at, '0') DESC` puts NULLs last.
+- **F13**: `test_ask_rate_limiting` rewritten to actually verify second call is blocked.
+
+### Not Actionable (2)
+- Daily snapshot without trade lock (self-correcting, tiny window)
+- Test gaps (WS auth, chunking, API positions) — nice to have, no crash risk
+
+### Result: **130/130 tests passing**
+
+### Files Modified (10 source + 1 test)
+`main.py`, `portfolio.py`, `orchestrator.py`, `backtester.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `commands.py`, `tests/test_integration.py`
