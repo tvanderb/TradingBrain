@@ -48,14 +48,20 @@ class BacktestResult:
     profit_factor: float = 0.0
     trades: list[BacktestTrade] = field(default_factory=list)
     daily_returns: list[float] = field(default_factory=list)
+    limit_orders_attempted: int = 0
+    limit_orders_filled: int = 0
 
     def summary(self) -> str:
-        return (
+        s = (
             f"Trades: {self.total_trades} | Win Rate: {self.win_rate:.1%} | "
             f"Net P&L: ${self.net_pnl:.2f} | Expectancy: ${self.expectancy:.4f} | "
             f"Sharpe: {self.sharpe:.2f} | Max DD: {self.max_drawdown_pct:.1%} | "
             f"Fees: ${self.total_fees:.2f}"
         )
+        if self.limit_orders_attempted > 0:
+            fill_rate = self.limit_orders_filled / self.limit_orders_attempted
+            s += f" | Limit Fill: {fill_rate:.0%} ({self.limit_orders_filled}/{self.limit_orders_attempted})"
+        return s
 
 
 class Backtester:
@@ -87,6 +93,12 @@ class Backtester:
         clean = symbol.replace("/", "")
         self._tag_counter[clean] = self._tag_counter.get(clean, 0) + 1
         return f"bt_{clean}_{self._tag_counter[clean]:03d}"
+
+    def _get_maker_fee(self, symbol: str) -> float:
+        """Get maker fee for symbol (per-pair if available, else global)."""
+        if symbol in self._per_pair_fees:
+            return self._per_pair_fees[symbol][0]
+        return self._maker_fee
 
     def _get_taker_fee(self, symbol: str) -> float:
         """Get taker fee for symbol (per-pair if available, else global)."""
@@ -129,6 +141,9 @@ class Backtester:
         daily_values: list[float] = []
         peak_value = cash
         self._tag_counter = {}
+
+        limit_attempted = 0
+        limit_filled = 0
 
         self._strategy.initialize(self._risk_limits, self._symbols)
 
@@ -188,13 +203,21 @@ class Backtester:
                 hist_1d = historical.resample("1D").agg(
                     {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
                 ).dropna()
+                # Calculate per-symbol spread from recent candle data
+                spread_sample = historical.tail(100)
+                if len(spread_sample) >= 10:
+                    mid = spread_sample["close"]
+                    intrabar_spread = (spread_sample["high"] - spread_sample["low"]) / mid
+                    spread = float(np.median(intrabar_spread))
+                else:
+                    spread = 0.001
                 markets[symbol] = SymbolData(
                     symbol=symbol,
                     current_price=current_price,
                     candles_5m=hist_5m,
                     candles_1h=hist_1h,
                     candles_1d=hist_1d,
-                    spread=0.001,
+                    spread=spread,
                     volume_24h=float(historical.tail(24)["volume"].sum()) if len(historical) >= 24 else 0,
                     maker_fee_pct=pair_fees[0] if pair_fees else self._maker_fee,
                     taker_fee_pct=pair_fees[1] if pair_fees else self._taker_fee,
@@ -247,8 +270,6 @@ class Backtester:
                 if price is None:
                     continue
 
-                fee_pct = self._get_taker_fee(signal.symbol) / 100
-
                 # Risk halt simulation: skip new entries if halted
                 if signal.action == Action.BUY and (halted_today or drawdown_halted or consecutive_loss_halted):
                     continue
@@ -263,7 +284,24 @@ class Backtester:
                     # Enforce max_positions only for genuinely new positions (not average-in)
                     if is_new and len(positions) >= self._risk_limits.max_positions:
                         continue
-                    fill_price = price * (1 + self._slippage)  # slippage: buy higher
+                    # LIMIT vs MARKET fill simulation
+                    if signal.order_type == OrderType.LIMIT:
+                        limit_attempted += 1
+                        limit_p = signal.limit_price if signal.limit_price else price
+                        # Check if candle low reached the limit price (buy fills when price drops to limit)
+                        df = candle_data.get(signal.symbol)
+                        if df is not None and ts in df.index:
+                            bar_low = float(df.loc[ts]["low"])
+                        else:
+                            bar_low = price
+                        if bar_low > limit_p:
+                            continue  # Limit not reached — order doesn't fill
+                        limit_filled += 1
+                        fill_price = limit_p
+                        fee_pct = self._get_maker_fee(signal.symbol) / 100
+                    else:
+                        fill_price = price * (1 + self._slippage)  # slippage: buy higher
+                        fee_pct = self._get_taker_fee(signal.symbol) / 100
                     # Reject oversized signals (matches live risk manager behavior)
                     if signal.size_pct > self._risk_limits.max_trade_pct:
                         continue
@@ -316,6 +354,19 @@ class Backtester:
                         halted_today = True
 
                 elif signal.action in (Action.SELL, Action.CLOSE):
+                    # LIMIT sell simulation: check if candle high reaches limit price
+                    if signal.order_type == OrderType.LIMIT:
+                        limit_attempted += 1
+                        limit_p = signal.limit_price if signal.limit_price else price
+                        df = candle_data.get(signal.symbol)
+                        if df is not None and ts in df.index:
+                            bar_high = float(df.loc[ts]["high"])
+                        else:
+                            bar_high = price
+                        if bar_high < limit_p:
+                            continue  # Limit not reached — order doesn't fill
+                        limit_filled += 1
+
                     # CLOSE without tag: close ALL positions for this symbol (matches live behavior)
                     if signal.action == Action.CLOSE and not signal.tag:
                         to_close = [
@@ -328,7 +379,13 @@ class Backtester:
                         to_close = [resolved] if resolved else []
 
                     for tag, pos in to_close:
-                        fill_price = price * (1 - self._slippage)  # slippage: sell lower
+                        # LIMIT vs MARKET fill price and fees
+                        if signal.order_type == OrderType.LIMIT:
+                            fill_price = signal.limit_price if signal.limit_price else price
+                            exit_fee_pct = self._get_maker_fee(signal.symbol) / 100
+                        else:
+                            fill_price = price * (1 - self._slippage)  # slippage: sell lower
+                            exit_fee_pct = self._get_taker_fee(signal.symbol) / 100
                         # SELL respects size_pct for partial sells (matches live _execute_sell)
                         if signal.action == Action.SELL and signal.size_pct > 0 and signal.size_pct < 1.0:
                             sell_value = total_value * signal.size_pct
@@ -336,7 +393,7 @@ class Backtester:
                         else:
                             qty = pos["qty"]
                         sale = qty * fill_price
-                        exit_fee = sale * fee_pct
+                        exit_fee = sale * exit_fee_pct
                         close_fraction = min(qty / pos["qty"], 1.0) if pos["qty"] > 0 else 1.0
                         entry_fee = pos.get("entry_fee", 0.0) * close_fraction
                         fee = entry_fee + exit_fee
@@ -471,6 +528,8 @@ class Backtester:
 
         # Compute metrics
         result = BacktestResult(trades=all_trades)
+        result.limit_orders_attempted = limit_attempted
+        result.limit_orders_filled = limit_filled
         result.total_trades = len(all_trades)
         result.wins = sum(1 for t in all_trades if t.pnl > 0)
         result.losses = sum(1 for t in all_trades if t.pnl < 0)

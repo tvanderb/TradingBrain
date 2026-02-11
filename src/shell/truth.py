@@ -9,6 +9,8 @@ the raw data. No complex statistics, no heuristics, no interpretations.
 
 from __future__ import annotations
 
+import math
+
 from src.shell.database import Database
 
 
@@ -134,5 +136,75 @@ async def compute_truth_benchmarks(db: Database) -> dict:
     # Number of strategy versions deployed
     version_count = await db.fetchone("SELECT COUNT(*) as count FROM strategy_versions")
     benchmarks["strategy_version_count"] = version_count["count"]
+
+    # --- Profit Factor ---
+    pf_row = await db.fetchone("""
+        SELECT
+            COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as gross_wins,
+            COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as gross_losses
+        FROM trades WHERE closed_at IS NOT NULL
+    """)
+    gross_wins = pf_row["gross_wins"]
+    gross_losses = pf_row["gross_losses"]
+    benchmarks["profit_factor"] = gross_wins / gross_losses if gross_losses > 0 else (float("inf") if gross_wins > 0 else 0.0)
+
+    # --- Close Reason Breakdown ---
+    reason_rows = await db.fetchall("""
+        SELECT close_reason, COUNT(*) as cnt
+        FROM trades WHERE closed_at IS NOT NULL
+        GROUP BY close_reason
+    """)
+    benchmarks["close_reason_breakdown"] = {
+        (r["close_reason"] or "unknown"): r["cnt"] for r in reason_rows
+    }
+
+    # --- Average Trade Duration (hours) ---
+    duration_row = await db.fetchone("""
+        SELECT AVG(
+            (julianday(closed_at) - julianday(opened_at)) * 24
+        ) as avg_hours
+        FROM trades WHERE closed_at IS NOT NULL AND opened_at IS NOT NULL
+    """)
+    benchmarks["avg_trade_duration_hours"] = duration_row["avg_hours"] if duration_row["avg_hours"] else 0.0
+
+    # --- Best / Worst Trade ---
+    extremes = await db.fetchone("""
+        SELECT
+            MAX(pnl_pct) as best_pnl_pct,
+            MIN(pnl_pct) as worst_pnl_pct
+        FROM trades WHERE closed_at IS NOT NULL
+    """)
+    benchmarks["best_trade_pnl_pct"] = extremes["best_pnl_pct"] if extremes["best_pnl_pct"] is not None else 0.0
+    benchmarks["worst_trade_pnl_pct"] = extremes["worst_pnl_pct"] if extremes["worst_pnl_pct"] is not None else 0.0
+
+    # --- Sharpe & Sortino Ratios (from daily_performance snapshots) ---
+    daily_rows = await db.fetchall(
+        "SELECT portfolio_value FROM daily_performance ORDER BY date ASC"
+    )
+    if len(daily_rows) >= 3:
+        values = [r["portfolio_value"] for r in daily_rows if r["portfolio_value"] is not None]
+        daily_returns = []
+        for i in range(1, len(values)):
+            if values[i - 1] > 0:
+                daily_returns.append((values[i] - values[i - 1]) / values[i - 1])
+        if len(daily_returns) >= 2:
+            mean_r = sum(daily_returns) / len(daily_returns)
+            variance = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+            std_r = math.sqrt(variance) if variance > 0 else 0
+            benchmarks["sharpe_ratio"] = (mean_r / std_r * math.sqrt(365)) if std_r > 0 else 0.0
+
+            downside = [r for r in daily_returns if r < 0]
+            if len(downside) >= 2:
+                down_var = sum(r ** 2 for r in downside) / (len(downside) - 1)
+                down_std = math.sqrt(down_var) if down_var > 0 else 0
+                benchmarks["sortino_ratio"] = (mean_r / down_std * math.sqrt(365)) if down_std > 0 else 0.0
+            else:
+                benchmarks["sortino_ratio"] = 0.0
+        else:
+            benchmarks["sharpe_ratio"] = 0.0
+            benchmarks["sortino_ratio"] = 0.0
+    else:
+        benchmarks["sharpe_ratio"] = 0.0
+        benchmarks["sortino_ratio"] = 0.0
 
     return benchmarks

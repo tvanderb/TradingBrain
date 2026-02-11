@@ -385,6 +385,7 @@ class TradingBrain:
                     if purpose == "exit" and order_tag:
                         result = await self._portfolio.record_exchange_fill(
                             order_tag, fill_price, filled_volume, fee,
+                            close_reason="reconciliation",
                         )
                         if result:
                             if result.get("pnl") is not None:
@@ -853,6 +854,7 @@ class TradingBrain:
             sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
             sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
             strategy_regime=None,
+            close_reason=reason,
         )
         if result:
             results = result if isinstance(result, list) else [result]
@@ -964,6 +966,7 @@ class TradingBrain:
                 # Record trade via PortfolioTracker (handles full + partial fills)
                 result = await self._portfolio.record_exchange_fill(
                     tag, fill_price, filled_volume, fee,
+                    close_reason=reason,
                 )
                 if result:
                     self._risk.record_trade_result(result["pnl"])
@@ -1171,6 +1174,7 @@ class TradingBrain:
                             signal, price,
                             sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                             sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+                            close_reason="emergency",
                         )
                     # Update risk counters so daily loss limit reflects emergency closes
                     if result:
@@ -1207,6 +1211,7 @@ class TradingBrain:
                             fee_val = float(info.get("fee", 0))
                             result = await self._portfolio.record_exchange_fill(
                                 tag, fill_price, filled_volume, fee_val,
+                                close_reason="emergency",
                             )
                             if result:
                                 log.info("emergency.conditional_filled_during_stop",

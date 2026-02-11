@@ -82,6 +82,7 @@ class OrchestratorConfig:
     start_hour: int = 0
     end_hour: int = 3
     max_revisions: int = 3
+    min_paper_test_trades: int = 5
 
 
 @dataclass
@@ -182,6 +183,7 @@ def load_config() -> Config:
         config.orchestrator.start_hour = orch.get("start_hour", config.orchestrator.start_hour)
         config.orchestrator.end_hour = orch.get("end_hour", config.orchestrator.end_hour)
         config.orchestrator.max_revisions = orch.get("max_revisions", config.orchestrator.max_revisions)
+        config.orchestrator.min_paper_test_trades = max(1, orch.get("min_paper_test_trades", config.orchestrator.min_paper_test_trades))
 
         tg = settings.get("telegram", {})
         config.telegram.enabled = tg.get("enabled", config.telegram.enabled)

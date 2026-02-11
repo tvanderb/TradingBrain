@@ -2087,3 +2087,73 @@ After triage: **1 critical, 11 medium, 13 low, 3 test gaps** = 25 production fix
 **1 test updated:** `test_execute_sell_live_fill_confirmation` — expects `total_fee` (entry+exit) instead of exit-only fee
 
 **Tests: 137/137 passing** (was 134/134)
+
+## Session J (2026-02-11) — Alignment + Orchestrator Awareness Fixes
+
+**Context**: Two audits (alignment + orchestrator awareness) identified systemic issues limiting fund performance and orchestrator decision quality. This session addresses the highest-impact items across 6 phases.
+
+### Phase 1: Close-Reason Tracking (Foundation)
+Every trade close now records WHY it was closed:
+- **DB migration**: `trades.close_reason` TEXT column
+- **Values**: `signal`, `stop_loss`, `take_profit`, `emergency`, `reconciliation`
+- **Threaded through**: `_close_qty()`, `record_exchange_fill()`, `execute_signal()`, `_execute_sell()`, `_execute_close()`
+- **6 caller sites updated** in `main.py`: scan loop (default), SL/TP trigger, conditional orders, emergency stop (×2), reconciliation
+- 3 new tests: `test_close_reason_signal_default`, `test_close_reason_emergency`, `test_close_reason_stop_loss`
+
+### Phase 2: Backtester LIMIT Order Simulation
+Previously LIMIT orders filled regardless of whether price would reach them:
+- **BUY LIMIT**: Only fills when candle `low ≤ limit_price`, uses maker fee
+- **SELL LIMIT**: Only fills when candle `high ≥ limit_price`, uses maker fee
+- **BacktestResult**: New `limit_orders_attempted` / `limit_orders_filled` fields
+- **summary()** includes limit fill rate when > 0
+- Added `_get_maker_fee()` helper
+- 2 new tests: `test_backtester_limit_buy_fills_when_low_reaches`, `test_backtester_limit_buy_skips_when_low_above`
+
+### Phase 3: Backtester Per-Symbol Spread
+Previously hardcoded `spread=0.001` for all symbols:
+- Now calculates median intrabar spread `(high - low) / close` from last 100 candles
+- Falls back to 0.001 if < 10 candles available
+- 1 new test: `test_backtester_per_symbol_spread`
+
+### Phase 4: Truth Benchmark Expansion
+7 new fund-quality metrics in `truth.py`:
+- `profit_factor` — gross wins / gross losses
+- `close_reason_breakdown` — `{reason: count}` dict
+- `avg_trade_duration_hours` — from opened_at/closed_at
+- `best_trade_pnl_pct` / `worst_trade_pnl_pct`
+- `sharpe_ratio` / `sortino_ratio` — from daily_performance snapshots
+- 1 new test: `test_truth_benchmarks_expanded`
+
+### Phase 5: Paper Test Minimum Trade Count
+Previously a paper test could pass with just 1 trade:
+- **Config**: `OrchestratorConfig.min_paper_test_trades` (default=5), loaded from TOML
+- **Evaluation**: `trade_count < min_trades` → status=`inconclusive` (not deployed)
+- **Result JSON**: Includes `min_required` for transparency
+- Updated existing `test_paper_test_full_pipeline` to insert enough trades
+- 1 new test: `test_paper_test_inconclusive_below_minimum`
+
+### Phase 6: Orchestrator Prompt Update
+LAYER_2_SYSTEM significantly expanded:
+- **Close-reason tracking**: Full description of values and operational significance
+- **Paper vs Live execution**: Explicit differences (slippage, SL/TP mechanism, fill timeout, reconciliation)
+- **Backtester capabilities & limitations**: LIMIT simulation, per-symbol spread, what it CAN'T do
+- **Strategy regime caveat**: Strategy's opinion, not ground truth
+- **Sandbox restrictions**: Complete blocked modules/attributes list
+- **Available skills library**: All 7 indicator functions with signatures
+- **Risk counter persistence**: Consecutive loss counter persists across days
+- **Truth benchmarks**: Updated to full metric list including new ones
+- **Additional independent processes**: Conditional order monitor (live only)
+
+CODE_GEN_SYSTEM additions:
+- Per-pair `maker_fee_pct`/`taker_fee_pct` on SymbolData
+- LIMIT orders → maker fees
+- Skills library import pattern
+- `limit_price` in Signal fields
+
+`_analyze()` system constraints now include:
+- `rollback_consecutive_losses` threshold
+- `min_paper_test_trades` threshold
+
+1 new test: `test_prompt_content_accuracy`
+
+**Tests: 146/146 passing** (was 137/137, +9 new)

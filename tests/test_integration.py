@@ -1622,13 +1622,14 @@ async def test_paper_test_full_pipeline():
                (strategy_version, risk_tier, required_days, started_at, ends_at, status)
                VALUES ('v_test', 1, 1, datetime('now', '-3 hours'), datetime('now', '-1 hour'), 'running')"""
         )
-        # Insert some winning trades for that version (within the paper test time window)
-        await db.execute(
-            """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
-               fees, intent, strategy_version, opened_at, closed_at)
-               VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_test',
-                       datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
-        )
+        # Insert enough winning trades for that version (within the paper test time window)
+        for i in range(config.orchestrator.min_paper_test_trades):
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+                   fees, intent, strategy_version, opened_at, closed_at)
+                   VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_test',
+                           datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
+            )
         await db.commit()
 
         # Evaluate paper tests
@@ -5057,6 +5058,415 @@ def test_backtester_daily_trade_count_and_consecutive_loss_halt():
     # But we also need SELLs... since strategy only BUYs, let's just check
     # that the strategy didn't generate unbounded trades
     assert result.total_trades <= 10  # Bounded by the daily limit mechanism
+
+
+# --- Phase 1: Close-Reason Tracking ---
+
+@pytest.mark.asyncio
+async def test_close_reason_signal_default():
+    """Close-reason defaults to 'signal' for normal BUY→CLOSE cycle."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        portfolio = PortfolioTracker(config, db, KrakenREST(config.kraken))
+        await portfolio.initialize()
+
+        # BUY
+        buy = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        await portfolio.execute_signal(buy, 50000, 0.25, 0.40)
+        # CLOSE (default close_reason="signal")
+        close = Signal(symbol="BTC/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+        result = await portfolio.execute_signal(close, 51000, 0.25, 0.40)
+        assert result is not None
+        assert result["close_reason"] == "signal"
+
+        trade = await db.fetchone("SELECT close_reason FROM trades WHERE closed_at IS NOT NULL")
+        assert trade["close_reason"] == "signal"
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_close_reason_emergency():
+    """Close-reason='emergency' when passed explicitly."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        portfolio = PortfolioTracker(config, db, KrakenREST(config.kraken))
+        await portfolio.initialize()
+
+        buy = Signal(symbol="ETH/USD", action=Action.BUY, size_pct=0.05, intent=Intent.DAY)
+        await portfolio.execute_signal(buy, 3000, 0.25, 0.40)
+        close = Signal(symbol="ETH/USD", action=Action.CLOSE, size_pct=1.0, intent=Intent.DAY)
+        result = await portfolio.execute_signal(close, 2900, 0.25, 0.40, close_reason="emergency")
+        assert result is not None
+        assert result["close_reason"] == "emergency"
+
+        trade = await db.fetchone("SELECT close_reason FROM trades WHERE closed_at IS NOT NULL")
+        assert trade["close_reason"] == "emergency"
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_close_reason_stop_loss():
+    """Close-reason='stop_loss' propagated via update_prices → execute_signal."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.portfolio import PortfolioTracker
+    from src.shell.kraken import KrakenREST
+    from src.shell.contract import Signal, Action, Intent
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        portfolio = PortfolioTracker(config, db, KrakenREST(config.kraken))
+        await portfolio.initialize()
+
+        buy = Signal(symbol="SOL/USD", action=Action.BUY, size_pct=0.05,
+                     stop_loss=90.0, take_profit=150.0, intent=Intent.DAY)
+        await portfolio.execute_signal(buy, 100, 0.25, 0.40)
+
+        # Trigger stop-loss via update_prices
+        triggered = await portfolio.update_prices({"SOL/USD": 89.0})
+        assert len(triggered) == 1
+        assert triggered[0]["reason"] == "stop_loss"
+
+        # Simulate what main.py does: pass reason as close_reason
+        t = triggered[0]
+        sig = Signal(symbol=t["symbol"], action=Action.CLOSE, size_pct=1.0,
+                     intent=Intent.DAY, confidence=1.0, tag=t["tag"])
+        result = await portfolio.execute_signal(sig, t["price"], 0.25, 0.40,
+                                                close_reason=t["reason"])
+        assert result is not None
+        assert result["close_reason"] == "stop_loss"
+
+        trade = await db.fetchone("SELECT close_reason FROM trades WHERE closed_at IS NOT NULL")
+        assert trade["close_reason"] == "stop_loss"
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- Phase 2: Backtester LIMIT Order Simulation ---
+
+def test_backtester_limit_buy_fills_when_low_reaches():
+    """LIMIT BUY fills at limit_price when candle low reaches it, uses maker fee."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, Portfolio, RiskLimits, Signal,
+        StrategyBase, SymbolData,
+    )
+
+    class LimitBuyStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            self._bought = False
+        def analyze(self, markets, portfolio, timestamp):
+            if not self._bought:
+                self._bought = True
+                return [Signal(
+                    symbol="SYM/USD", action=Action.BUY, size_pct=0.05,
+                    intent=Intent.DAY, order_type=OrderType.LIMIT, limit_price=99.0,
+                )]
+            return []
+
+    dates = pd.date_range("2024-01-01", periods=5, freq="1h")
+    # Candle with low=98 reaches the limit_price=99
+    df = pd.DataFrame({
+        "open": [100, 100, 100, 100, 100],
+        "high": [102, 102, 102, 102, 102],
+        "low": [98, 98, 98, 98, 98],
+        "close": [100, 100, 100, 100, 100],
+        "volume": [1000] * 5,
+    }, index=dates)
+
+    risk = RiskLimits(max_trade_pct=0.10, default_trade_pct=0.05,
+                      max_positions=5, max_daily_loss_pct=0.10, max_drawdown_pct=0.40)
+    bt = Backtester(LimitBuyStrategy(), risk, ["SYM/USD"],
+                    maker_fee_pct=0.25, taker_fee_pct=0.40, starting_cash=1000.0)
+    result = bt.run({"SYM/USD": df}, "1h")
+
+    assert result.limit_orders_attempted == 1
+    assert result.limit_orders_filled == 1
+    # No closing trades, but BUY was tracked via limit counters
+    assert "Limit Fill" in result.summary()
+
+
+def test_backtester_limit_buy_skips_when_low_above():
+    """LIMIT BUY does NOT fill when candle low is above limit_price."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, Portfolio, RiskLimits, Signal,
+        StrategyBase, SymbolData,
+    )
+
+    class LimitBuyStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            self._bought = False
+        def analyze(self, markets, portfolio, timestamp):
+            if not self._bought:
+                self._bought = True
+                return [Signal(
+                    symbol="SYM/USD", action=Action.BUY, size_pct=0.05,
+                    intent=Intent.DAY, order_type=OrderType.LIMIT, limit_price=95.0,
+                )]
+            return []
+
+    dates = pd.date_range("2024-01-01", periods=5, freq="1h")
+    # Candle low=98 never reaches limit_price=95
+    df = pd.DataFrame({
+        "open": [100, 100, 100, 100, 100],
+        "high": [102, 102, 102, 102, 102],
+        "low": [98, 98, 98, 98, 98],
+        "close": [100, 100, 100, 100, 100],
+        "volume": [1000] * 5,
+    }, index=dates)
+
+    risk = RiskLimits(max_trade_pct=0.10, default_trade_pct=0.05,
+                      max_positions=5, max_daily_loss_pct=0.10, max_drawdown_pct=0.40)
+    bt = Backtester(LimitBuyStrategy(), risk, ["SYM/USD"],
+                    maker_fee_pct=0.25, taker_fee_pct=0.40, starting_cash=1000.0)
+    result = bt.run({"SYM/USD": df}, "1h")
+
+    assert result.limit_orders_attempted == 1
+    assert result.limit_orders_filled == 0
+    assert result.total_trades == 0  # No position opened
+
+
+# --- Phase 3: Backtester Per-Symbol Spread ---
+
+def test_backtester_per_symbol_spread():
+    """Backtester calculates spread from candle H/L/C instead of hardcoding 0.001."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, OrderType, Portfolio, RiskLimits, Signal,
+        StrategyBase, SymbolData,
+    )
+
+    class SpreadCheckStrategy(StrategyBase):
+        """Captures spread values from SymbolData."""
+        def initialize(self, risk_limits, symbols):
+            self.spreads = []
+        def analyze(self, markets, portfolio, timestamp):
+            for sym, data in markets.items():
+                self.spreads.append(data.spread)
+            return []
+
+    # Create candles with known H=110, L=90, C=100 → intrabar spread = (110-90)/100 = 0.20
+    dates = pd.date_range("2024-01-01", periods=50, freq="1h")
+    df = pd.DataFrame({
+        "open": [100] * 50,
+        "high": [110] * 50,
+        "low": [90] * 50,
+        "close": [100] * 50,
+        "volume": [1000] * 50,
+    }, index=dates)
+
+    risk = RiskLimits(max_trade_pct=0.10, default_trade_pct=0.05,
+                      max_positions=5, max_daily_loss_pct=0.10, max_drawdown_pct=0.40)
+    strategy = SpreadCheckStrategy()
+    bt = Backtester(strategy, risk, ["SYM/USD"], starting_cash=1000.0)
+    bt.run({"SYM/USD": df}, "1h")
+
+    # Should have computed spreads (not the hardcoded 0.001)
+    assert len(strategy.spreads) > 0
+    # Early bars use fallback (< 10 candles), later bars should be ~0.20
+    computed_spreads = [s for s in strategy.spreads if abs(s - 0.001) > 0.0001]
+    assert len(computed_spreads) > 0, "No computed spreads found — all were fallback"
+    for s in computed_spreads:
+        assert abs(s - 0.20) < 0.01, f"Expected ~0.20, got {s}"
+
+
+# --- Phase 4: Truth Benchmark Expansion ---
+
+@pytest.mark.asyncio
+async def test_truth_benchmarks_expanded():
+    """Truth benchmarks include 7 new fund-quality metrics."""
+    from src.shell.database import Database
+    from src.shell.truth import compute_truth_benchmarks
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed trades with close_reason
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            pnl = 10.0 if i < 3 else -5.0
+            pnl_pct = 0.05 if i < 3 else -0.025
+            opened = (now - timedelta(hours=10 - i)).isoformat()
+            closed = (now - timedelta(hours=9 - i)).isoformat()
+            reason = "signal" if i < 4 else "stop_loss"
+            await db.execute(
+                """INSERT INTO trades
+                   (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees,
+                    intent, opened_at, closed_at, close_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("BTC/USD", "long", 0.001, 50000, 51000, pnl, pnl_pct, 0.5,
+                 "DAY", opened, closed, reason),
+            )
+
+        # Seed daily_performance for Sharpe/Sortino
+        for i in range(5):
+            d = (now - timedelta(days=4 - i)).strftime("%Y-%m-%d")
+            val = 200 + i * 2  # Steadily increasing
+            await db.execute(
+                "INSERT INTO daily_performance (date, portfolio_value, cash) VALUES (?, ?, ?)",
+                (d, val, val),
+            )
+        await db.commit()
+
+        benchmarks = await compute_truth_benchmarks(db)
+
+        # Verify new metrics exist and are reasonable
+        assert benchmarks["profit_factor"] > 0
+        assert "signal" in benchmarks["close_reason_breakdown"]
+        assert "stop_loss" in benchmarks["close_reason_breakdown"]
+        assert benchmarks["close_reason_breakdown"]["signal"] == 4
+        assert benchmarks["close_reason_breakdown"]["stop_loss"] == 1
+        assert benchmarks["avg_trade_duration_hours"] > 0
+        assert benchmarks["best_trade_pnl_pct"] == 0.05
+        assert benchmarks["worst_trade_pnl_pct"] == -0.025
+        assert isinstance(benchmarks["sharpe_ratio"], float)
+        assert isinstance(benchmarks["sortino_ratio"], float)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Phase 5: Paper Test Minimum Trade Count ---
+
+@pytest.mark.asyncio
+async def test_paper_test_inconclusive_below_minimum():
+    """Paper test with fewer trades than min_paper_test_trades → inconclusive."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.orchestrator.orchestrator import Orchestrator
+
+    config = load_config()
+    config.orchestrator.min_paper_test_trades = 5  # Require 5 trades
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 0
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+
+        # Create a paper test that has already ended
+        await db.execute(
+            """INSERT INTO paper_tests
+               (strategy_version, risk_tier, required_days, started_at, ends_at, status)
+               VALUES ('v_min', 1, 1, datetime('now', '-3 hours'), datetime('now', '-1 hour'), 'running')"""
+        )
+        # Insert only 3 trades (below minimum of 5)
+        for i in range(3):
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+                   fees, intent, strategy_version, opened_at, closed_at)
+                   VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_min',
+                           datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
+            )
+        await db.commit()
+
+        results = await orch._evaluate_paper_tests()
+        assert len(results) == 1
+        assert results[0]["status"] == "inconclusive"
+        assert results[0]["trades"] == 3
+        assert results[0]["min_required"] == 5
+
+        # Verify DB updated
+        test = await db.fetchone("SELECT * FROM paper_tests WHERE strategy_version = 'v_min'")
+        assert test["status"] == "inconclusive"
+        result_data = json.loads(test["result"])
+        assert result_data["min_required"] == 5
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- Phase 6: Orchestrator Prompt Accuracy ---
+
+def test_prompt_content_accuracy():
+    """LAYER_2_SYSTEM and CODE_GEN_SYSTEM contain key awareness phrases."""
+    from src.orchestrator.orchestrator import LAYER_2_SYSTEM, CODE_GEN_SYSTEM
+
+    # Close-reason tracking
+    assert "close_reason_breakdown" in LAYER_2_SYSTEM
+    assert "stop_loss" in LAYER_2_SYSTEM and "take_profit" in LAYER_2_SYSTEM
+    assert "emergency" in LAYER_2_SYSTEM and "reconciliation" in LAYER_2_SYSTEM
+
+    # Paper vs Live differences
+    assert "Paper mode" in LAYER_2_SYSTEM
+    assert "Live mode" in LAYER_2_SYSTEM
+    assert "inconclusive" in LAYER_2_SYSTEM
+
+    # Backtester capabilities
+    assert "LIMIT" in LAYER_2_SYSTEM
+    assert "candle low" in LAYER_2_SYSTEM or "candle high" in LAYER_2_SYSTEM
+    assert "per-symbol spread" in LAYER_2_SYSTEM
+
+    # Strategy regime caveat
+    assert "strategy's opinion" in LAYER_2_SYSTEM
+
+    # Sandbox restrictions
+    assert "operator" in LAYER_2_SYSTEM
+    assert "Name-mangled" in LAYER_2_SYSTEM or "__getattribute__" in LAYER_2_SYSTEM
+
+    # Skills library in LAYER_2
+    assert "ema" in LAYER_2_SYSTEM
+    assert "bollinger_bands" in LAYER_2_SYSTEM
+
+    # Risk counter persistence
+    assert "consecutive loss" in LAYER_2_SYSTEM.lower()
+    assert "persists across days" in LAYER_2_SYSTEM
+
+    # CODE_GEN_SYSTEM updates
+    assert "maker_fee_pct" in CODE_GEN_SYSTEM
+    assert "LIMIT" in CODE_GEN_SYSTEM
+    assert "skills.indicators" in CODE_GEN_SYSTEM
+
+    # Sharpe/Sortino in truth benchmarks description
+    assert "Sharpe" in LAYER_2_SYSTEM
+    assert "Sortino" in LAYER_2_SYSTEM
 
 
 def test_websocket_nan_price_ignored():

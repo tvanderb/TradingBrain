@@ -284,6 +284,8 @@ MIGRATIONS = [
     # Tag columns for multi-position support
     ("trades", "tag", "ALTER TABLE trades ADD COLUMN tag TEXT"),
     ("signals", "tag", "ALTER TABLE signals ADD COLUMN tag TEXT"),
+    # Close reason tracking (signal, stop_loss, take_profit, emergency, reconciliation)
+    ("trades", "close_reason", "ALTER TABLE trades ADD COLUMN close_reason TEXT"),
 ]
 
 

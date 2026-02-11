@@ -385,6 +385,7 @@ class PortfolioTracker:
     async def execute_signal(
         self, signal: Signal, current_price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
+        close_reason: str = "signal",
     ) -> dict | list[dict] | None:
         """Execute a signal. Returns trade info dict, list (multi-close), or None if failed.
 
@@ -393,7 +394,7 @@ class PortfolioTracker:
         if signal.action == Action.BUY:
             return await self._execute_buy(signal, current_price, maker_fee, taker_fee, strategy_version)
         elif signal.action == Action.SELL:
-            return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
+            return await self._execute_sell(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version, close_reason)
         elif signal.action == Action.CLOSE:
             # No-tag CLOSE = close ALL positions for this symbol
             if not signal.tag:
@@ -404,16 +405,16 @@ class PortfolioTracker:
                 if len(symbol_positions) == 1:
                     # Single position — return dict (not list) for backwards compat
                     tag, pos = symbol_positions[0]
-                    return await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+                    return await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version, close_reason)
                 # Multiple positions — close all, return list
                 results = []
                 for tag, pos in symbol_positions:
-                    r = await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+                    r = await self._close_qty(tag, pos["qty"], current_price, maker_fee, taker_fee, signal, strategy_regime, strategy_version, close_reason)
                     if r:
                         results.append(r)
                 return results if results else None
             else:
-                return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version)
+                return await self._execute_close(signal, current_price, maker_fee, taker_fee, strategy_regime, strategy_version, close_reason)
         elif signal.action == Action.MODIFY:
             return await self._execute_modify(signal)
         return None
@@ -601,6 +602,7 @@ class PortfolioTracker:
     async def _execute_sell(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
+        close_reason: str = "signal",
     ) -> dict | None:
         """Partial sell of a position. No tag = sell oldest for symbol."""
         resolved = self._resolve_position(signal)
@@ -613,11 +615,12 @@ class PortfolioTracker:
         sell_value = portfolio_value * signal.size_pct
         qty_to_sell = min(sell_value / price, pos["qty"])
 
-        return await self._close_qty(tag, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+        return await self._close_qty(tag, qty_to_sell, price, maker_fee, taker_fee, signal, strategy_regime, strategy_version, close_reason)
 
     async def _execute_close(
         self, signal: Signal, price: float, maker_fee: float, taker_fee: float,
         strategy_regime: str | None = None, strategy_version: str | None = None,
+        close_reason: str = "signal",
     ) -> dict | None:
         """Close entire position by tag."""
         resolved = self._resolve_position(signal)
@@ -626,12 +629,13 @@ class PortfolioTracker:
             return None
 
         tag, pos = resolved
-        return await self._close_qty(tag, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime, strategy_version)
+        return await self._close_qty(tag, pos["qty"], price, maker_fee, taker_fee, signal, strategy_regime, strategy_version, close_reason)
 
     async def _close_qty(
         self, tag: str, qty: float, price: float,
         maker_fee: float, taker_fee: float, signal: Signal,
         strategy_regime: str | None = None, strategy_version: str | None = None,
+        close_reason: str = "signal",
     ) -> dict | None:
         pos = self._positions[tag]
         symbol = pos["symbol"]
@@ -711,10 +715,10 @@ class PortfolioTracker:
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO trades
-               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, tag, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
-             total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now),
+             total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now, close_reason),
         )
 
         # Update or remove position
@@ -751,6 +755,7 @@ class PortfolioTracker:
             "symbol": symbol, "action": signal.action.value, "qty": qty,
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct, "fee": total_fee,
             "intent": pos.get("intent", "DAY"), "tag": tag,
+            "close_reason": close_reason,
         }
 
     async def _execute_modify(self, signal: Signal) -> dict | None:
@@ -918,6 +923,7 @@ class PortfolioTracker:
 
     async def record_exchange_fill(
         self, tag: str, fill_price: float, filled_volume: float, fee: float,
+        close_reason: str = "signal",
     ) -> dict | None:
         """Record a trade filled by the exchange (SL/TP). No new exchange calls.
 
@@ -941,11 +947,11 @@ class PortfolioTracker:
         await self._db.execute(
             """INSERT INTO trades
                (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees,
-                intent, strategy_version, strategy_regime, opened_at, closed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, tag, pos.get("side", "long"), filled_volume, entry,
              fill_price, pnl, pnl_pct, total_fee, pos.get("intent", "DAY"),
-             pos.get("strategy_version"), None, pos.get("opened_at", now), now),
+             pos.get("strategy_version"), None, pos.get("opened_at", now), now, close_reason),
         )
 
         # Update cash
@@ -982,6 +988,7 @@ class PortfolioTracker:
             "symbol": symbol, "action": "CLOSE", "qty": filled_volume,
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct,
             "fee": total_fee, "intent": pos.get("intent", "DAY"), "tag": tag,
+            "close_reason": close_reason,
         }
 
     async def update_prices(self, prices: dict[str, float]) -> list[dict]:

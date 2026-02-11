@@ -109,7 +109,8 @@ These hard constraints cannot be bypassed, modified, or overridden:
 - **Risk manager**: Silently clamps oversized trade requests to configured maximums.
 - **Daily loss halt**: Trading stops for the day when cumulative losses hit the limit.
 - **Drawdown halt**: System halts entirely when portfolio drops below the threshold from peak.
-- **Truth benchmarks**: 21 metrics computed from raw database data. You cannot modify these. They exist so you can verify your analysis modules against reality.
+- **Consecutive loss halt**: System halts when consecutive losing trades reach the configured limit. This persists across days — only a winning trade resets the counter.
+- **Truth benchmarks**: Metrics computed from raw database data. You cannot modify these. They exist so you can verify your analysis modules against reality. Includes: trade counts, win rate, net P&L, fees, expectancy, consecutive losses, portfolio state, max drawdown, signal activity, scan activity, strategy versions, profit factor, close reason breakdown, avg trade duration, best/worst trade P&L %, Sharpe ratio, and Sortino ratio.
 - **Long-only**: Only long positions. Short selling is unavailable — Kraken margin trading is not accessible from Canada. No leverage.
 - **Code pipeline**: All generated code must pass sandbox validation, Opus code review, and backtesting before deployment.
 
@@ -121,12 +122,53 @@ Positions are identified by **tags** (globally unique identifiers). Multiple pos
 - **SELL without tag**: Sells from the oldest position for that symbol (FIFO).
 - **BUY with existing tag**: Averages into that position. BUY without tag creates a new position.
 
+### Close-Reason Tracking
+Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_loss` (SL triggered), `take_profit` (TP triggered), `emergency` (emergency stop), or `reconciliation` (filled while system was down). The close_reason_breakdown in ground truth shows the distribution. High emergency or reconciliation counts indicate operational instability.
+
+### Paper vs Live Execution
+- **Paper mode**: Instant simulated fills with configurable slippage (default 0.05%). SL/TP checked client-side every 30 seconds. No exchange API calls.
+- **Live mode**: Orders placed on Kraken with 30-second fill timeout. Partial fills are supported. Exchange-native SL/TP orders placed on Kraken after each BUY fill (3 retry attempts each). Startup reconciliation checks for orders that filled while the system was down.
+- **Paper test evaluation**: A paper test must generate at least the configured minimum number of trades to pass. Below that threshold, the result is "inconclusive" — the strategy is not deployed. This prevents deploying untested strategies.
+
+### Backtester Capabilities and Limitations
+The backtester simulates strategy execution against historical candle data. What it does:
+- Simulates MARKET orders with configurable slippage and taker fees.
+- Simulates LIMIT orders: BUY fills only when candle low ≤ limit_price; SELL fills only when candle high ≥ limit_price. Uses maker fees for limit orders.
+- Tracks limit order fill rates (attempted vs filled).
+- Calculates per-symbol spread from median intrabar range of recent candles (not a fixed value).
+- Simulates daily loss halt, max drawdown halt, consecutive loss halt, max positions, max trade size, and max position size per symbol.
+- Supports partial sells, multi-position averaging, and SL/TP triggers.
+
+What it cannot do:
+- Simulate order book depth, queue priority, or realistic fill latency.
+- Model market impact — a large order fills at the same slippage as a small one.
+- Capture overnight gaps or exchange outages.
+
+### Strategy Regime
+If your strategy outputs a `regime` classification (e.g., "trending", "ranging"), this is the **strategy's opinion**, not ground truth. It is logged for correlation analysis but should not be treated as fact.
+
+### Sandbox Restrictions
+Strategy code runs in a sandboxed environment. Blocked modules: subprocess, os, shutil, socket, http, urllib, requests, httpx, websockets, aiohttp, sqlite3, aiosqlite, pathlib, sys, builtins, ctypes, importlib, types, threading, multiprocessing, pickle, io, tempfile, gc, inspect, operator. Blocked attribute access: __builtins__, __import__, __class__, __subclasses__, __bases__, __mro__, __globals__, __code__, __getattribute__, __dict__. Name-mangled private attributes are also blocked. Available imports: pandas, numpy, ta, src.shell.contract, src.strategy.skills.*.
+
+### Available Skills Library
+Pre-built indicator functions in `src.strategy.skills.indicators` (import via `from src.strategy.skills.indicators import ...`):
+- `ema(series, period) → pd.Series` — Exponential moving average
+- `rsi(series, period=14) → float` — Relative Strength Index
+- `bollinger_bands(series, period=20, std_dev=2.0) → tuple[float, float, float]` — Upper, middle, lower bands
+- `macd(series, fast=12, slow=26, signal=9) → tuple[float, float, float]` — MACD line, signal line, histogram
+- `atr(df, period=14) → float` — Average True Range (requires OHLC DataFrame)
+- `volume_ratio(volume, period=20) → float` — Current volume relative to moving average
+- `classify_regime(df) → str` — Simple regime classification from OHLC data
+
+### Risk Counter Persistence
+Risk counters (daily trade count, daily P&L, consecutive losses) are restored from the database on system restart. The daily reset uses the configured timezone. The consecutive loss counter persists across days — only a winning trade resets it.
+
 ### Independent Processes
 Running continuously without your involvement:
 - **Scan loop** (every 5 min): Collects market data from Kraken, runs the active strategy, stores scan results, acts on signals that pass risk checks.
-- **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions by tag.
+- **Position monitor** (every 30 sec): Checks open positions against stop-loss and take-profit. Closes triggered positions by tag (client-side in paper, exchange-native in live).
+- **Conditional order monitor** (every 30 sec, live only): Polls Kraken for exchange-native SL/TP fills.
 - **Data maintenance** (nightly, after your cycle): Aggregates and prunes candles beyond retention windows.
-- **Paper trading**: All trades execute with configurable slippage and real fee calculations.
 - **Failure alerting**: If your nightly cycle fails, a system error alert is sent automatically via Telegram.
 
 ### Your Inputs
@@ -145,7 +187,7 @@ All timeframes are bootstrapped from Kraken on cold start — the strategy has r
 - 1-hour candles: last 1 year per symbol
 - Daily candles: up to 7 years per symbol
 - Scan results: raw indicator values stored every scan
-- Trades and signals: tagged with strategy version, strategy regime, and position tag
+- Trades and signals: tagged with strategy version, strategy regime, position tag, and close reason
 
 ### Response Format
 Respond in JSON:
@@ -177,13 +219,19 @@ You MUST NOT:
 Available imports:
 - pandas, numpy, ta
 - src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData)
+- src.strategy.skills.indicators (ema, rsi, bollinger_bands, macd, atr, volume_ratio, classify_regime)
 
 The strategy receives:
 - markets: dict[str, SymbolData] with candles_5m (30d), candles_1h (1yr), candles_1d (7yr), current_price, spread, volume_24h, maker_fee_pct, taker_fee_pct
+  - maker_fee_pct and taker_fee_pct are per-pair (may differ across symbols)
 - portfolio: Portfolio with cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today
 - timestamp: datetime
 
-Return list[Signal] with: symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct, order_type, stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override), tag (optional str — position identifier)
+Return list[Signal] with: symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct, order_type (MARKET/LIMIT), limit_price (for LIMIT orders), stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override), tag (optional str — position identifier)
+
+Fee awareness:
+- MARKET orders use taker fees. LIMIT orders use maker fees (lower).
+- Access per-pair fees via SymbolData.maker_fee_pct / SymbolData.taker_fee_pct.
 
 Position tags:
 - Each position has a unique tag. Access via OpenPosition.tag in portfolio.positions.
@@ -726,6 +774,8 @@ class Orchestrator:
 - Max positions: {self._config.risk.max_positions}
 - Max daily loss: {self._config.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts)
 - Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts)
+- Consecutive loss halt: {self._config.risk.rollback_consecutive_losses} consecutive losses (persists across days)
+- Min paper test trades: {self._config.orchestrator.min_paper_test_trades} (below this → inconclusive, no deploy)
 - Token budget: {context["token_usage"].get("used", 0)} / {context["token_usage"].get("daily_limit", 0)} tokens used today (${context["token_usage"].get("total_cost", 0):.4f})
 
 ---
@@ -1040,10 +1090,11 @@ Is this classification correct?
             trade_count = len(trades)
             wins = sum(1 for t in trades if t["pnl"] > 0)
 
-            # Pass/fail: must have trades and not lose money
-            if trade_count == 0:
+            # Pass/fail: must have enough trades and not lose money
+            min_trades = self._config.orchestrator.min_paper_test_trades
+            if trade_count < min_trades:
                 passed = False
-                status = "inconclusive"  # No trades — don't deploy untested strategy
+                status = "inconclusive"  # Not enough trades — don't deploy untested strategy
             elif total_pnl >= 0:
                 passed = True
                 status = "passed"
@@ -1051,9 +1102,10 @@ Is this classification correct?
                 passed = False
                 status = "failed"
 
+            result_data = {"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins, "min_required": min_trades}
             await self._db.execute(
                 "UPDATE paper_tests SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?",
-                (status, json.dumps({"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins}), test["id"]),
+                (status, json.dumps(result_data), test["id"]),
             )
 
             results.append({
@@ -1061,6 +1113,7 @@ Is this classification correct?
                 "status": status,
                 "trades": trade_count,
                 "pnl": total_pnl,
+                "min_required": min_trades,
             })
 
             if self._notifier:
