@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1356,7 +1357,6 @@ The orchestrator wants to change this module because: {changes}"""
             )
 
             # Run backtest with timeout (60s) to catch infinite loops in AI-generated code
-            import asyncio
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
@@ -1382,8 +1382,6 @@ The orchestrator wants to change this module because: {changes}"""
             log.warning("orchestrator.backtest_error", error=str(e))
             return False, f"Strategy crashed during backtest: {e}"
         finally:
-            import os
-
             # Clean up temp file
             if tmp_path:
                 try:
