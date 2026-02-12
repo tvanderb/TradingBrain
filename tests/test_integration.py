@@ -6890,3 +6890,103 @@ async def test_cmd_orchestrate_already_running():
     reply = update.message.reply_text.call_args[0][0]
     assert "already in progress" in reply.lower()
     assert scan_state.get("orchestrate_requested") is not True
+
+
+# --- Backtest Overhaul: Multi-Timeframe + Date Metadata ---
+
+def test_backtester_multi_timeframe_runs():
+    """Multi-TF backtester runs with tuple-format candle data (5m, 1h, 1d)."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import (
+        Action, Intent, Portfolio, RiskLimits, Signal, StrategyBase, SymbolData,
+    )
+
+    class SimpleBuyStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            self._bought = set()
+        def analyze(self, markets, portfolio, timestamp):
+            signals = []
+            for sym, data in markets.items():
+                if sym not in self._bought and portfolio.cash > 10:
+                    signals.append(Signal(
+                        symbol=sym, action=Action.BUY, size_pct=0.05,
+                        intent=Intent.DAY, confidence=0.5, reasoning="test",
+                        stop_loss=data.current_price * 0.95,
+                        take_profit=data.current_price * 1.05,
+                    ))
+                    self._bought.add(sym)
+            return signals
+
+    risk = RiskLimits(max_trade_pct=0.10, default_trade_pct=0.05,
+                      max_positions=5, max_daily_loss_pct=0.10, max_drawdown_pct=0.40)
+    strategy = SimpleBuyStrategy()
+    bt = Backtester(strategy, risk, ["BTC/USD"], starting_cash=1000.0)
+
+    # Build separate DataFrames for each timeframe with different date ranges
+    dates_5m = pd.date_range("2024-06-01", periods=200, freq="5min")
+    prices_5m = 70000 + np.cumsum(np.random.randn(200) * 10)
+    df_5m = pd.DataFrame({
+        "open": prices_5m, "high": prices_5m + 20, "low": prices_5m - 20,
+        "close": prices_5m, "volume": np.random.uniform(10, 100, 200),
+    }, index=dates_5m)
+
+    dates_1h = pd.date_range("2024-01-01", periods=500, freq="1h")
+    prices_1h = 70000 + np.cumsum(np.random.randn(500) * 50)
+    df_1h = pd.DataFrame({
+        "open": prices_1h, "high": prices_1h + 100, "low": prices_1h - 100,
+        "close": prices_1h, "volume": np.random.uniform(100, 1000, 500),
+    }, index=dates_1h)
+
+    dates_1d = pd.date_range("2022-01-01", periods=365, freq="1D")
+    prices_1d = 40000 + np.cumsum(np.random.randn(365) * 200)
+    df_1d = pd.DataFrame({
+        "open": prices_1d, "high": prices_1d + 500, "low": prices_1d - 500,
+        "close": prices_1d, "volume": np.random.uniform(1000, 10000, 365),
+    }, index=dates_1d)
+
+    # Pass as tuple format — triggers _run_multi
+    candle_data = {"BTC/USD": (df_5m, df_1h, df_1d)}
+    result = bt.run(candle_data)
+
+    assert result.timeframe_mode == "multi"
+    assert result.total_days > 0
+    assert result.start_date is not None
+    assert result.end_date is not None
+    assert isinstance(result.net_pnl, float)
+    assert isinstance(result.detailed_summary(), str)
+    assert "Multi-timeframe" in result.detailed_summary()
+
+
+def test_backtester_result_date_metadata():
+    """Single-TF backtester populates date metadata correctly."""
+    from src.strategy.backtester import Backtester
+    from src.shell.contract import RiskLimits, StrategyBase
+
+    class NoOpStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            pass
+        def analyze(self, markets, portfolio, timestamp):
+            return []
+
+    risk = RiskLimits(max_trade_pct=0.10, default_trade_pct=0.05,
+                      max_positions=5, max_daily_loss_pct=0.10, max_drawdown_pct=0.40)
+    strategy = NoOpStrategy()
+    bt = Backtester(strategy, risk, ["ETH/USD"], starting_cash=500.0)
+
+    dates = pd.date_range("2024-03-01", periods=100, freq="1h")
+    prices = 3000 + np.cumsum(np.random.randn(100) * 10)
+    df = pd.DataFrame({
+        "open": prices, "high": prices + 20, "low": prices - 20,
+        "close": prices, "volume": np.random.uniform(50, 500, 100),
+    }, index=dates)
+
+    result = bt.run({"ETH/USD": df})
+
+    assert result.timeframe_mode == "single"
+    assert result.start_date is not None
+    assert result.end_date is not None
+    assert result.start_date == dates[0].to_pydatetime()
+    assert result.end_date == dates[-1].to_pydatetime()
+    assert result.total_days >= 4  # 100 hours ≈ 4 days
+    # summary() should include period info
+    assert "Period:" in result.summary()

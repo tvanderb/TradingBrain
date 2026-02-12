@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import importlib.util
 import json
 import os
 import re
-from datetime import datetime, timezone
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import structlog
@@ -41,7 +44,7 @@ from src.statistics.loader import get_code_hash as get_analysis_hash
 from src.statistics.loader import get_module_path, load_analysis_module
 from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
 from src.statistics.sandbox import validate_analysis_module
-from src.strategy.backtester import Backtester
+from src.strategy.backtester import Backtester, BacktestResult
 from src.strategy.loader import (
     deploy_strategy,
     get_code_hash,
@@ -93,7 +96,7 @@ You operate within a rigid shell (Kraken exchange client, risk manager, portfoli
 
 ### Your Decisions and Their Consequences
 
-**Strategy changes** trigger a pipeline: Sonnet generates code → Opus reviews → sandbox validates → backtest → paper test → deploy.
+**Strategy changes** trigger a pipeline: Sonnet generates code → Opus reviews → sandbox validates → backtest → you review backtest results → paper test → deploy.
 - **NO_CHANGE** (tier 0): Data keeps accumulating. Active paper tests continue.
 - **STRATEGY_TWEAK** (tier 1): Targeted changes, 1-day paper test. Any active paper test on the previous version terminates and its data becomes incomplete.
 - **STRATEGY_RESTRUCTURE** (tier 2): Logic changes, 2-day paper test. Same consequences.
@@ -132,7 +135,11 @@ Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_
 - **Paper test evaluation**: A paper test must generate at least the configured minimum number of trades to pass. Below that threshold, the result is "inconclusive" — the strategy is not deployed. This prevents deploying untested strategies.
 
 ### Backtester Capabilities and Limitations
-The backtester simulates strategy execution against historical candle data. What it does:
+The backtester runs against all available historical data: 5m (30 days), 1h (up to 1 year), 1d (up to 7 years). It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5m resolution where available for intra-hour precision.
+
+After backtesting, you will see the full results and decide whether to deploy to paper testing.
+
+What the backtester does:
 - Simulates MARKET orders with configurable slippage and taker fees.
 - Simulates LIMIT orders: BUY fills only when candle low ≤ limit_price; SELL fills only when candle high ≥ limit_price. Uses maker fees for limit orders.
 - Tracks limit order fill rates (attempted vs filled).
@@ -268,6 +275,35 @@ Respond in JSON:
     "risk_tier_correct": true | false,
     "suggested_tier": 1 | 2 | 3,
     "feedback": "..."
+}"""
+
+BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trading strategy before it enters paper testing.
+
+These are simulation results — deterministic computation on a simplified market model.
+
+**Known backtester limitations (do NOT penalize the strategy for these):**
+- No order book depth, queue priority, or realistic fill latency
+- No market impact modeling — large orders fill at the same slippage as small ones
+- No overnight gaps or exchange outage simulation
+- Historical data may not capture future market conditions
+
+**Deployment context:**
+- Approving means the strategy enters paper testing (simulated trading with live prices)
+- Paper testing is NOT live trading — no real money at risk
+- Rejecting sends the strategy back for revision
+
+**Consider:**
+- Trade count vs statistical significance (few trades = unreliable metrics)
+- Drawdown severity and recovery patterns
+- Win rate combined with risk/reward ratio
+- Fee drag relative to gross P&L
+- Whether the results suggest a real edge or noise
+
+Respond in JSON:
+{
+    "deploy": true | false,
+    "reasoning": "Your analysis of the backtest results and why you chose to deploy or reject",
+    "concerns": ["Any concerns worth noting even if deploying"]
 }"""
 
 ANALYSIS_CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading analysis module.
@@ -994,14 +1030,30 @@ Is this classification correct?
                     actual_tier = tier
                 paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
 
-                # Backtest against historical data before deploying
-                backtest_passed, backtest_summary = await self._run_backtest(code)
+                # Backtest against historical data
+                backtest_passed, backtest_summary, backtest_result = await self._run_backtest(code)
                 if not backtest_passed:
                     log.warning(
                         "orchestrator.backtest_failed", summary=backtest_summary
                     )
                     changes += (
                         f"\n\nBacktest failed: {backtest_summary}. Adjust the strategy."
+                    )
+                    continue
+
+                # Opus reviews backtest results — decides deploy or reject
+                bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff)
+                if not bt_review.get("deploy", False):
+                    reasoning = bt_review.get("reasoning", "No reasoning provided")
+                    concerns = bt_review.get("concerns", [])
+                    log.warning(
+                        "orchestrator.backtest_review_rejected",
+                        reasoning=reasoning,
+                        concerns=concerns,
+                    )
+                    changes += (
+                        f"\n\nBacktest review rejected: {reasoning}. "
+                        f"Concerns: {concerns}. Adjust the strategy."
                     )
                     continue
 
@@ -1037,8 +1089,6 @@ Is this classification correct?
                 )
 
                 # Create paper test entry
-                from datetime import timedelta
-
                 ends_at = (datetime.now(timezone.utc) + timedelta(days=paper_days)).strftime("%Y-%m-%d %H:%M:%S")
                 await self._db.execute(
                     """INSERT INTO paper_tests
@@ -1278,16 +1328,12 @@ The orchestrator wants to change this module because: {changes}"""
 
         return f"Analysis module '{module_name}' update aborted after {max_revisions} failed attempts."
 
-    async def _run_backtest(self, code: str) -> tuple[bool, str]:
-        """Backtest generated strategy against recent historical data.
+    async def _run_backtest(self, code: str) -> tuple[bool, str, BacktestResult | None]:
+        """Backtest generated strategy against historical data.
 
-        Returns (passed, summary). Passes if strategy doesn't crash and
-        doesn't produce catastrophic results (negative expectancy on >10 trades).
+        Returns (passed, summary, result). Passes if strategy doesn't crash.
+        Opus reviews the results separately to decide deployment.
         """
-        import importlib.util
-        import sys
-        import tempfile
-
         tmp_path = None
         try:
             # Load the new strategy from code string
@@ -1310,18 +1356,18 @@ The orchestrator wants to change this module because: {changes}"""
             except asyncio.TimeoutError:
                 return False, "Strategy module import timed out (>10s) — possible infinite loop at import time"
 
-            # Get recent 1h candle data for backtest
+            # Get multi-timeframe candle data for backtest
             candle_data = {}
             for symbol in self._config.symbols:
-                df = await self._data_store.get_candles(
-                    symbol, "5m", limit=8640
-                )  # ~30 days of 5m
-                if not df.empty:
-                    candle_data[symbol] = df
+                df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)
+                df_1h = await self._data_store.get_candles(symbol, "1h", limit=8760)
+                df_1d = await self._data_store.get_candles(symbol, "1d", limit=2555)
+                if not df_1h.empty:
+                    candle_data[symbol] = (df_5m, df_1h, df_1d)
 
             if not candle_data:
                 log.info("orchestrator.backtest_skip", reason="no historical data")
-                return True, "Skipped (no historical data yet)"
+                return True, "Skipped (no historical data yet)", None
 
             risk_limits = RiskLimits(
                 max_trade_pct=self._config.risk.max_trade_pct,
@@ -1360,27 +1406,20 @@ The orchestrator wants to change this module because: {changes}"""
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
-                        None, bt.run, candle_data, "5m"
+                        None, bt.run, candle_data
                     ),
                     timeout=60,
                 )
             except asyncio.TimeoutError:
-                return False, "Strategy backtest timed out (>60s) — possible infinite loop"
-            summary = result.summary()
-            log.info("orchestrator.backtest_complete", summary=summary)
+                return False, "Strategy backtest timed out (>60s) — possible infinite loop", None
+            summary = result.detailed_summary()
+            log.info("orchestrator.backtest_complete", summary=result.summary())
 
-            # Fail only on catastrophic results (crash or very negative)
-            if result.total_trades >= 10 and result.max_drawdown_pct > 0.15:
-                return (
-                    False,
-                    f"Excessive drawdown: {result.max_drawdown_pct:.1%}. {summary}",
-                )
-
-            return True, summary
+            return True, summary, result
 
         except Exception as e:
             log.warning("orchestrator.backtest_error", error=str(e))
-            return False, f"Strategy crashed during backtest: {e}"
+            return False, f"Strategy crashed during backtest: {e}", None
         finally:
             # Clean up temp file
             if tmp_path:
@@ -1390,6 +1429,46 @@ The orchestrator wants to change this module because: {changes}"""
                     pass
             # Clean up leaked module from sys.modules
             sys.modules.pop("backtest_strategy", None)
+
+    async def _review_backtest(
+        self, result: BacktestResult | None, summary: str, decision: dict, diff: str
+    ) -> dict:
+        """Opus reviews backtest results and decides whether to deploy to paper test.
+
+        Returns parsed JSON with 'deploy' bool, 'reasoning', and 'concerns'.
+        """
+        if result is None:
+            return {
+                "deploy": True,
+                "reasoning": "No historical data available — deploying to paper test for live evaluation.",
+                "concerns": ["No backtest data to evaluate"],
+            }
+
+        review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to paper testing.
+
+## Backtest Results
+{summary}
+
+## Strategy Change Context
+{json.dumps({k: decision.get(k) for k in ("decision", "reasoning", "specific_changes")}, indent=2, default=str)}
+
+## Code Diff
+```diff
+{diff if diff else "(no textual diff)"}
+```"""
+
+        response = await self._ai.ask_opus(
+            review_prompt,
+            system=BACKTEST_REVIEW_SYSTEM,
+            purpose="backtest_review",
+        )
+
+        parsed = self._extract_json(response)
+        if parsed is None:
+            parsed = {"deploy": False, "reasoning": "Failed to parse backtest review response", "concerns": []}
+
+        await self._store_thought("backtest_review", "opus", review_prompt, response, parsed)
+        return parsed
 
     async def _store_observation(self, decision: dict) -> None:
         """Store daily observations in DB table (replaces strategy doc appends).

@@ -2474,3 +2474,36 @@ Trades stored in DB and exposed via REST, but Grafana dashboard only showed aggr
 - `test_metrics_trades_by_symbol`: Inserts trades for BTC/ETH, verifies gauge output
 
 **Tests: 183/183 passing** (+2 new tests)
+
+## Session R — Backtest Overhaul: Multi-Timeframe, No Gate, Opus Reviews
+
+### Context
+First live orchestration cycle (2026-02-12) revealed three problems:
+1. Backtester used only 5m candles (30d) and resampled — production gives native 1h (1yr) + 1d (7yr)
+2. Hard >15% drawdown gate auto-rejected without Opus seeing results
+3. No feedback loop — backtest results never went back to Opus for reasoning
+
+### Changes
+
+**`src/strategy/backtester.py`:**
+- `BacktestResult` enriched: `start_date`, `end_date`, `total_days`, `timeframe_mode` fields
+- New `detailed_summary()` method — full metrics with period for AI review
+- `summary()` now includes period when date metadata available
+- `run()` refactored: format detection routes `dict[str, DataFrame]` → `_run_single()`, `dict[str, tuple]` → `_run_multi()`
+- New `_run_multi()`: Iterates at 1h resolution using native 5m/1h/1d DataFrames. SL/TP uses 5m sub-bars within each hour for precision. No resampling. Spread from 1h candles.
+- All existing tests route through `_run_single()` unchanged (zero behavior change)
+
+**`src/orchestrator/orchestrator.py`:**
+- `_run_backtest()` return type: `tuple[bool, str]` → `tuple[bool, str, BacktestResult | None]`
+- Multi-TF fetch: 5m (8640 bars) + 1h (8760) + 1d (2555) per symbol
+- Hard drawdown gate REMOVED — no more auto-rejection
+- New `BACKTEST_REVIEW_SYSTEM` prompt — labels limitations, asks Opus to decide deploy/reject
+- New `_review_backtest()` method — calls Opus with backtest results, returns deploy decision
+- Wired into `_execute_change()`: after crash-free backtest, Opus reviews → deploy or revision loop
+- `LAYER_2_SYSTEM` updated: pipeline description + backtester capabilities reflect multi-TF + review step
+
+**`tests/test_integration.py`:**
+- `test_backtester_multi_timeframe_runs`: Verifies tuple format triggers `_run_multi()`, date metadata populated
+- `test_backtester_result_date_metadata`: Verifies single-TF mode populates start/end dates correctly
+
+**Tests: 185/185 passing** (+2 new tests)

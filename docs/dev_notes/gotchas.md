@@ -1,5 +1,10 @@
 # Technical Gotchas & Fixes
 
+## Python 3.14 Local Import Scoping Bug
+**Problem**: `cannot access local variable 'asyncio' where it is not associated with a value` when a function has both local `import` statements (e.g., `import sys`) and references a module-level import (`asyncio`) inside `except` clauses.
+**Fix**: Move all imports to module level. Do NOT use local imports in functions that reference module-level imports in `except` blocks.
+**Hit in**: `orchestrator._run_backtest()` — had `import importlib.util / import sys / import tempfile` locally alongside `except asyncio.TimeoutError`.
+
 ## macOS Python 3.14 SSL Certificates
 **Problem**: `websockets` library fails with `[SSL: CERTIFICATE_VERIFY_FAILED]` on macOS
 **Fix**: Use certifi's CA bundle explicitly:

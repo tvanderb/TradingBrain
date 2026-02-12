@@ -744,7 +744,7 @@
       "type": "logs",
       "targets": [
         {
-          "expr": "{compose_service=\"trading-brain\"} |= \"portfolio.\" | json | event=~\"portfolio\\\\.(sell|buy|exchange_fill)\" | line_format \"{{.event | replace \"portfolio.\" \"\"}} {{.symbol}} [{{.tag}}] qty={{.qty}} @ ${{.price}} {{if .pnl}}P&L={{.pnl}}{{end}} fee={{.fee}} {{if .close_reason}}reason={{.close_reason}}{{end}}\"",
+          "expr": "{compose_service=\"trading-brain\"} |= \"portfolio.\" | json | event=~\"portfolio.(sell|buy|exchange_fill)\" | line_format \"{{.event}} {{.symbol}} [{{.tag}}] qty={{.qty}} @ ${{.price}} {{if .pnl}}P&L={{.pnl}}{{end}} fee={{.fee}} {{if .close_reason}}reason={{.close_reason}}{{end}}\"",
           "refId": "A"
         }
       ]
