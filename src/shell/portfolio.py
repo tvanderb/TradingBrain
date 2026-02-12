@@ -167,6 +167,23 @@ class PortfolioTracker:
             except Exception as e:
                 raise RuntimeError(f"Live mode: failed to fetch Kraken balance: {e}")
 
+        # Restore fees_today from trades DB (survives restarts like risk counters)
+        tz = ZoneInfo(self._config.timezone)
+        local_today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_utc = local_today.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        fee_row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(fees), 0) as total FROM trades WHERE datetime(closed_at) >= datetime(?)",
+            (today_utc,),
+        )
+        # Also count entry fees from today's BUY trades (not yet closed)
+        entry_fee_row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(entry_fee), 0) as total FROM positions WHERE datetime(opened_at) >= datetime(?)",
+            (today_utc,),
+        )
+        self._fees_today = (fee_row["total"] if fee_row else 0) + (entry_fee_row["total"] if entry_fee_row else 0)
+        if self._fees_today > 0:
+            log.info("portfolio.fees_restored", fees_today=round(self._fees_today, 6))
+
         # Use last daily snapshot to preserve daily P&L across restarts
         last_snap = await self._db.fetchone(
             "SELECT portfolio_value FROM daily_performance ORDER BY date DESC LIMIT 1"

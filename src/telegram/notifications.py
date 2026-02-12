@@ -52,7 +52,7 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         tag = data.get("tag", "")
         price = data.get("price", 0)
         tag_str = f" [{tag}]" if tag else ""
-        parts = [f"{action} {qty:.4f} {symbol}{tag_str} @ ${price:,.2f}"]
+        parts = [f"{action} {qty:.8f} {symbol}{tag_str} @ ${price:,.2f}"]
         pnl = data.get("pnl")
         if pnl is not None:
             parts.append(f"P&L ${pnl:+.2f}")
