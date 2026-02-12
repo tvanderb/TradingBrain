@@ -72,6 +72,10 @@ tb_uptime_seconds = Gauge("tb_uptime_seconds", "System uptime in seconds", regis
 tb_symbol_price_usd = Gauge("tb_symbol_price_usd", "Per-symbol price in USD", ["symbol"], registry=registry)
 tb_portfolio_allocation_pct = Gauge("tb_portfolio_allocation_pct", "Percent of portfolio invested in positions", registry=registry)
 
+# --- Trade breakdown gauges ---
+tb_trades_by_reason = Gauge("tb_trades_by_reason", "Trade count by close reason", ["reason"], registry=registry)
+tb_trades_by_symbol = Gauge("tb_trades_by_symbol", "Trade count by symbol", ["symbol"], registry=registry)
+
 # --- Truth benchmark cache ---
 _truth_cache: dict = {"data": None, "expires_at": 0.0}
 TRUTH_CACHE_TTL = 300  # 5 minutes
@@ -156,6 +160,15 @@ async def metrics_handler(request: web.Request) -> web.Response:
         tb_total_signals.set(truth.get("total_signals", 0) or 0)
         tb_total_scans.set(truth.get("total_scans", 0) or 0)
         tb_strategy_version_count.set(truth.get("strategy_version_count", 0) or 0)
+
+        # --- Trade breakdowns (labeled gauges) ---
+        tb_trades_by_reason._metrics.clear()
+        for reason, count in truth.get("close_reason_breakdown", {}).items():
+            tb_trades_by_reason.labels(reason=reason).set(count)
+
+        tb_trades_by_symbol._metrics.clear()
+        for symbol, count in truth.get("trades_by_symbol", {}).items():
+            tb_trades_by_symbol.labels(symbol=symbol).set(count)
 
         # --- AI usage ---
         try:

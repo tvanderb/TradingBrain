@@ -2439,3 +2439,38 @@ Hybrid approach: `/orchestrate` command checks lock directly for immediate feedb
 - **`tests/test_integration.py`**: 2 new tests — trigger success + already-running rejection
 
 **Tests: 181/181 passing** (+2 new tests)
+
+## Session Q (2026-02-12) — Trade Observability (Loki + Prometheus + Grafana)
+
+### Context
+Trades stored in DB and exposed via REST, but Grafana dashboard only showed aggregate metrics — no per-trade detail, no close-reason breakdown, no per-symbol breakdown. Enriched existing logging and added bounded Prometheus gauges.
+
+### Changes
+
+**Step 1 — Structlog enrichment** (`src/shell/portfolio.py`):
+- `portfolio.sell` now includes `close_reason` field
+- `portfolio.exchange_fill` now includes `close_reason` and `intent` fields
+
+**Step 2 — Emergency close logging gap** (`src/main.py`):
+- Added `notifier.trade_executed(r)` in `_emergency_stop()` loop — was the only trade path that silently skipped all notification (Telegram, WebSocket, activity log, structlog)
+
+**Step 3 — Per-symbol trade count** (`src/shell/truth.py`):
+- New `trades_by_symbol` benchmark: `{symbol: count}` dict from closed trades
+- Bounded cardinality: max 9 symbols (12-pair cap)
+
+**Step 4 — Prometheus gauges** (`src/api/metrics.py`):
+- `tb_trades_by_reason{reason=...}`: Trade count by close reason (5 labels max)
+- `tb_trades_by_symbol{symbol=...}`: Trade count by symbol (9 labels max)
+- Total: 14 new series max, populated from truth cache
+
+**Step 5 — Grafana dashboard** (`monitoring/grafana/.../trading-brain.json`):
+- New "Trade Log" row (ID 900) between Positions and Orchestrator Spool
+- Panel 901: Trade Event Log (Loki logs — shows buy/sell/exchange_fill with all fields)
+- Panel 902: Trades by Close Reason (bar gauge, Prometheus)
+- Panel 903: Trades by Symbol (bar gauge, Prometheus)
+
+**Step 6 — Tests** (`tests/test_integration.py`):
+- `test_metrics_trades_by_reason`: Inserts trades with signal/stop_loss reasons, verifies gauge output
+- `test_metrics_trades_by_symbol`: Inserts trades for BTC/ETH, verifies gauge output
+
+**Tests: 183/183 passing** (+2 new tests)

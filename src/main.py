@@ -1256,6 +1256,7 @@ class TradingBrain:
                         for r in results:
                             if r.get("pnl") is not None:
                                 self._risk.record_trade_result(r["pnl"])
+                                await self._notifier.trade_executed(r)
                     break  # Success
                 except Exception as e:
                     log.error("emergency.close_failed", symbol=pos["symbol"],

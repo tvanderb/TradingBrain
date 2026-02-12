@@ -722,13 +722,94 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "id": 900,
+      "title": "Trade Log",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 52 },
+      "id": 901,
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "title": "Trade Event Log",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{compose_service=\"trading-brain\"} |= \"portfolio.\" | json | event=~\"portfolio\\\\.(sell|buy|exchange_fill)\" | line_format \"{{.event | replace \"portfolio.\" \"\"}} {{.symbol}} [{{.tag}}] qty={{.qty}} @ ${{.price}} {{if .pnl}}P&L={{.pnl}}{{end}} fee={{.fee}} {{if .close_reason}}reason={{.close_reason}}{{end}}\"",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 62 },
+      "id": 902,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "valueMode": "text"
+      },
+      "title": "Trades by Close Reason",
+      "type": "bargauge",
+      "targets": [{ "expr": "tb_trades_by_reason", "format": "table", "instant": true, "refId": "A" }],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "reason": "Reason", "Value": "Count" } } }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 62 },
+      "id": 903,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "valueMode": "text"
+      },
+      "title": "Trades by Symbol",
+      "type": "bargauge",
+      "targets": [{ "expr": "tb_trades_by_symbol", "format": "table", "instant": true, "refId": "A" }],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "symbol": "Symbol", "Value": "Count" } } }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 70 },
       "id": 700,
       "title": "Orchestrator Spool",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 71 },
       "id": 701,
       "options": {
         "showTime": true,
@@ -752,14 +833,14 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 79 },
       "id": 800,
       "title": "Application Logs",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 61 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 80 },
       "id": 801,
       "options": {
         "showTime": true,

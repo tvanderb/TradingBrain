@@ -158,6 +158,14 @@ async def compute_truth_benchmarks(db: Database) -> dict:
         (r["close_reason"] or "unknown"): r["cnt"] for r in reason_rows
     }
 
+    # --- Per-Symbol Trade Count ---
+    symbol_rows = await db.fetchall("""
+        SELECT symbol, COUNT(*) as cnt
+        FROM trades WHERE closed_at IS NOT NULL
+        GROUP BY symbol
+    """)
+    benchmarks["trades_by_symbol"] = {r["symbol"]: r["cnt"] for r in symbol_rows}
+
     # --- Average Trade Duration (hours) ---
     duration_row = await db.fetchone("""
         SELECT AVG(

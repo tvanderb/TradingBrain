@@ -776,7 +776,8 @@ class PortfolioTracker:
         await self._db.commit()
 
         log.info("portfolio.sell", symbol=symbol, tag=tag, qty=round(qty, 8),
-                 price=round(fill_price, 2), pnl=round(pnl, 4), fee=round(fee, 4))
+                 price=round(fill_price, 2), pnl=round(pnl, 4), fee=round(fee, 4),
+                 close_reason=close_reason)
 
         return {
             "symbol": symbol, "action": signal.action.value, "qty": qty,
@@ -1009,7 +1010,8 @@ class PortfolioTracker:
 
         log.info("portfolio.exchange_fill", symbol=symbol, tag=tag,
                  qty=round(filled_volume, 8), price=round(fill_price, 2),
-                 pnl=round(pnl, 4), fee=round(fee, 4))
+                 pnl=round(pnl, 4), fee=round(fee, 4),
+                 close_reason=close_reason, intent=pos.get("intent", "DAY"))
 
         return {
             "symbol": symbol, "action": "CLOSE", "qty": filled_volume,

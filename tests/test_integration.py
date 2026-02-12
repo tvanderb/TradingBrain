@@ -6698,6 +6698,137 @@ async def test_metrics_scan_age():
 
 
 @pytest.mark.asyncio
+async def test_metrics_trades_by_reason():
+    """Prometheus: /metrics includes trade count by close reason."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert trades with different close reasons
+        for reason in ["signal", "signal", "stop_loss"]:
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, opened_at, closed_at, close_reason)
+                   VALUES ('BTC/USD', 'buy', 0.01, 50000, 51000, 10.0, 0.02, 0.50, 'DAY',
+                           datetime('now', '-1 hour'), datetime('now'), ?)""",
+                (reason,),
+            )
+        await db.commit()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "daily_limit": 1500000, "models": {}})
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert 'tb_trades_by_reason{reason="signal"}' in body
+            assert 'tb_trades_by_reason{reason="stop_loss"}' in body
+            # signal=2, stop_loss=1
+            for line in body.split("\n"):
+                if 'tb_trades_by_reason{reason="signal"}' in line:
+                    assert float(line.split(" ")[-1]) == 2.0
+                if 'tb_trades_by_reason{reason="stop_loss"}' in line:
+                    assert float(line.split(" ")[-1]) == 1.0
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_trades_by_symbol():
+    """Prometheus: /metrics includes trade count by symbol."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert trades for different symbols
+        for symbol in ["BTC/USD", "BTC/USD", "ETH/USD"]:
+            await db.execute(
+                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, opened_at, closed_at)
+                   VALUES (?, 'buy', 0.01, 50000, 51000, 10.0, 0.02, 0.50, 'DAY',
+                           datetime('now', '-1 hour'), datetime('now'))""",
+                (symbol,),
+            )
+        await db.commit()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "daily_limit": 1500000, "models": {}})
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert 'tb_trades_by_symbol{symbol="BTC/USD"}' in body
+            assert 'tb_trades_by_symbol{symbol="ETH/USD"}' in body
+            for line in body.split("\n"):
+                if 'tb_trades_by_symbol{symbol="BTC/USD"}' in line:
+                    assert float(line.split(" ")[-1]) == 2.0
+                if 'tb_trades_by_symbol{symbol="ETH/USD"}' in line:
+                    assert float(line.split(" ")[-1]) == 1.0
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
 async def test_cmd_orchestrate_triggers():
     """cmd_orchestrate sets scan_state flag when cycle lock is free."""
     from src.shell.config import load_config
