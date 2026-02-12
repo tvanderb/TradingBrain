@@ -210,6 +210,8 @@ class TradingBrain:
             notifier=self._notifier,
         )
 
+        self._commands.set_orchestrator(self._orchestrator)
+
         # 8. WebSocket
         self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
         self._ws.set_on_failure(self._on_ws_failure)
@@ -287,6 +289,11 @@ class TradingBrain:
                 if success:
                     self._scan_state["kill_requested"] = False
                 # If failed, flag stays True — retries next iteration
+
+            # Check manual orchestration trigger
+            if self._scan_state.get("orchestrate_requested"):
+                self._scan_state["orchestrate_requested"] = False
+                asyncio.create_task(self._nightly_orchestration())
 
     def _on_ws_done(self, task: asyncio.Task) -> None:
         """Handle WebSocket task completion — log any unexpected errors."""

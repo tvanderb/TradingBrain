@@ -51,10 +51,14 @@ class BotCommands:
         self._reporter = reporter
         self._notifier = notifier
         self._activity_logger = activity_logger
+        self._orchestrator = None
         self._paused = False
         self._last_ask_time: float = 0
         self._unauth_log_count: int = 0
         self._unauth_log_last: float = 0
+
+    def set_orchestrator(self, orchestrator) -> None:
+        self._orchestrator = orchestrator
 
     @property
     def is_paused(self) -> bool:
@@ -111,6 +115,7 @@ class BotCommands:
             "/ask <question> - Ask about the system\n"
             "/thoughts - Browse orchestrator AI reasoning\n"
             "/thought <cycle> <step> - Full AI response\n"
+            "/orchestrate - Trigger orchestration cycle\n"
             "/pause - Pause trading\n"
             "/resume - Resume trading\n"
             "/kill - Emergency stop"
@@ -520,7 +525,7 @@ class BotCommands:
             )
 
             answer = await self._ai.ask_haiku(
-                prompt, system=ASK_SYSTEM_PROMPT, max_tokens=1000, purpose="user_ask"
+                prompt, system=ASK_SYSTEM_PROMPT, purpose="user_ask"
             )
             self._last_ask_time = time.time()  # Only rate-limit after successful call
             await self._send_long(update, answer)
@@ -642,6 +647,21 @@ class BotCommands:
                     await update.message.reply_text(prefix + chunk)
         except Exception as e:
             log.error("telegram.thought_send_failed", error=str(e))
+
+    async def cmd_orchestrate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manually trigger an orchestration cycle."""
+        if not self._authorized(update):
+            return
+        if not self._orchestrator:
+            await update.message.reply_text("Orchestrator not available.")
+            return
+        if self._orchestrator._cycle_lock.locked():
+            await update.message.reply_text("Orchestration cycle already in progress.")
+            return
+        self._scan_state["orchestrate_requested"] = True
+        await update.message.reply_text(
+            "Orchestration cycle triggered. You'll be notified when it completes."
+        )
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

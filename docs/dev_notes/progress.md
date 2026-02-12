@@ -2423,3 +2423,19 @@ Expand the `/metrics` Prometheus endpoint from 13 gauges to 41 gauges and overha
 - **Prometheus `float("inf")`**: Gauge `.set()` can't hold infinity — profit factor mapped to 0 when infinite (wins with no losses)
 - **Truth cache cross-test contamination**: New metrics tests must clear `_truth_cache` in setup/teardown to avoid stale data from previous tests
 - **`_fees_today` not surviving restarts**: Unlike risk counters, portfolio fees had no DB restoration — showed $0.00 after container restart even when trades occurred
+
+## Session P (2026-02-12) — Manual Orchestration Trigger
+
+### Context
+Orchestration cycle only runs on nightly cron schedule. No way to manually trigger — needed after config changes or to re-run after failures (e.g., truncation-caused failure). Orchestrator already has `asyncio.Lock` concurrency safety, so manual trigger is safe.
+
+### Design
+Hybrid approach: `/orchestrate` command checks lock directly for immediate feedback, but uses `scan_state` signaling so `main.py`'s `_nightly_orchestration()` handles timeout, strategy reload, and notifications — no duplicated logic.
+
+### Changes
+- **`src/telegram/commands.py`**: Added `self._orchestrator` init + `set_orchestrator()` method, `/orchestrate` in help text, `cmd_orchestrate()` — checks auth, checks `_cycle_lock.locked()`, sets `scan_state["orchestrate_requested"]`
+- **`src/main.py`**: Calls `set_orchestrator()` after orchestrator creation; keep-alive loop checks `orchestrate_requested` flag and fires `asyncio.create_task(self._nightly_orchestration())`
+- **`src/telegram/bot.py`**: Registered `"orchestrate"` command handler
+- **`tests/test_integration.py`**: 2 new tests — trigger success + already-running rejection
+
+**Tests: 181/181 passing** (+2 new tests)

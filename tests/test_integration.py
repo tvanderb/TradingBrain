@@ -6695,3 +6695,67 @@ async def test_metrics_scan_age():
         _truth_cache["data"] = None
         _truth_cache["expires_at"] = 0.0
         os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_cmd_orchestrate_triggers():
+    """cmd_orchestrate sets scan_state flag when cycle lock is free."""
+    from src.shell.config import load_config
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    config.telegram.allowed_user_ids = [12345]
+    scan_state = {}
+
+    commands = BotCommands(config=config, db=MagicMock(), scan_state=scan_state)
+
+    # Mock orchestrator with unlocked cycle lock
+    mock_orchestrator = MagicMock()
+    mock_lock = MagicMock()
+    mock_lock.locked.return_value = False
+    mock_orchestrator._cycle_lock = mock_lock
+    commands.set_orchestrator(mock_orchestrator)
+
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = 12345
+    update.message = AsyncMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    await commands.cmd_orchestrate(update, context)
+    reply = update.message.reply_text.call_args[0][0]
+    assert "triggered" in reply.lower()
+    assert scan_state.get("orchestrate_requested") is True
+
+
+@pytest.mark.asyncio
+async def test_cmd_orchestrate_already_running():
+    """cmd_orchestrate rejects when cycle lock is held."""
+    from src.shell.config import load_config
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    config.telegram.allowed_user_ids = [12345]
+    scan_state = {}
+
+    commands = BotCommands(config=config, db=MagicMock(), scan_state=scan_state)
+
+    # Mock orchestrator with locked cycle lock
+    mock_orchestrator = MagicMock()
+    mock_lock = MagicMock()
+    mock_lock.locked.return_value = True
+    mock_orchestrator._cycle_lock = mock_lock
+    commands.set_orchestrator(mock_orchestrator)
+
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = 12345
+    update.message = AsyncMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    await commands.cmd_orchestrate(update, context)
+    reply = update.message.reply_text.call_args[0][0]
+    assert "already in progress" in reply.lower()
+    assert scan_state.get("orchestrate_requested") is not True
