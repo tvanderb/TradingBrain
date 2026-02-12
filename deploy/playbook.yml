@@ -74,6 +74,13 @@
         append: true
       tags: [setup]
 
+    - name: Install Loki Docker log driver
+      command: docker plugin install grafana/loki-docker-driver:3.4.0 --alias loki --grant-all-permissions
+      register: loki_driver
+      failed_when: loki_driver.rc != 0 and "already exists" not in loki_driver.stderr
+      changed_when: loki_driver.rc == 0
+      tags: [setup]
+
     - name: Install sqlite3 (for monitoring and debugging)
       apt:
         name: sqlite3
@@ -98,6 +105,8 @@
         - "{{ deploy_dir }}/strategy/archive"
         - "{{ deploy_dir }}/statistics/active"
         - "{{ deploy_dir }}/statistics/archive"
+        - "{{ deploy_dir }}/monitoring/grafana/provisioning/datasources"
+        - "{{ deploy_dir }}/monitoring/grafana/provisioning/dashboards/json"
       tags: [sync]
 
     # --- Sync Project Files ---
@@ -132,6 +141,14 @@
       synchronize:
         src: "{{ project_root }}/config/"
         dest: "{{ deploy_dir }}/config/"
+      tags: [sync]
+      notify: restart container
+
+    - name: Sync monitoring config
+      synchronize:
+        src: "{{ project_root }}/monitoring/"
+        dest: "{{ deploy_dir }}/monitoring/"
+        delete: true
       tags: [sync]
       notify: restart container
 
@@ -247,6 +264,13 @@
       ufw:
         rule: allow
         port: "443"
+        proto: tcp
+      tags: [caddy]
+
+    - name: Allow Grafana through firewall
+      ufw:
+        rule: allow
+        port: "3000"
         proto: tcp
       tags: [caddy]
 

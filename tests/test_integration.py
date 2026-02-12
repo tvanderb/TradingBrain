@@ -54,7 +54,7 @@ async def test_database_schema():
                      "orchestrator_observations",
                      "token_usage", "fee_schedule", "strategy_state", "paper_tests",
                      "scan_results", "capital_events", "orders", "conditional_orders",
-                     "system_meta"]
+                     "system_meta", "activity_log"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 
@@ -2254,7 +2254,7 @@ async def test_api_server_endpoints():
         commands = MagicMock()
         commands.is_paused = False
 
-        app, ws_manager = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
 
         # Set API key for auth
         from src.api import api_key_key
@@ -2343,7 +2343,7 @@ async def test_api_auth_required():
 
         risk = RiskManager(config.risk)
         from src.api import api_key_key
-        app, _ = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+        app, _, _ = create_app(config, db, MagicMock(), risk, MagicMock(), {})
         app[api_key_key] = "test-secret-key"
 
         async with TestClient(TestServer(app)) as client:
@@ -2382,7 +2382,7 @@ async def test_api_websocket_connection():
         await db.connect()
 
         risk = RiskManager(config.risk)
-        app, ws_manager = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+        app, ws_manager, _ = create_app(config, db, MagicMock(), risk, MagicMock(), {})
 
         # Set API key for auth
         from src.api import api_key_key
@@ -4737,7 +4737,7 @@ async def test_api_positions_with_data():
         commands = MagicMock()
         commands.is_paused = False
 
-        app, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+        app, _, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
         app[api_key_key] = "test-key"
         headers = {"Authorization": "Bearer test-key"}
 
@@ -4806,7 +4806,7 @@ async def test_api_portfolio_and_risk_nontrivial():
         commands = MagicMock()
         commands.is_paused = False
 
-        app, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+        app, _, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
         app[api_key_key] = "test-key"
         headers = {"Authorization": "Bearer test-key"}
 
@@ -4857,7 +4857,7 @@ async def test_websocket_auth_rejection_and_max_clients():
         await db.connect()
 
         risk = RiskManager(config.risk)
-        app, ws_manager = create_app(config, db, MagicMock(), risk, MagicMock(), {})
+        app, ws_manager, _ = create_app(config, db, MagicMock(), risk, MagicMock(), {})
         app[api_key_key] = "correct-token"
 
         async with TestClient(TestServer(app)) as client:
@@ -5888,6 +5888,527 @@ async def test_system_meta_table_exists():
         await db.commit()
         row = await db.fetchone("SELECT value FROM system_meta WHERE key = 'test_key'")
         assert row["value"] == "42"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Activity Log ---
+
+
+@pytest.mark.asyncio
+async def test_activity_log_write_and_query():
+    """Activity log: write entries and query with filters."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        await logger.log("TRADE", "BUY 0.5 SOL/USD", "info")
+        await logger.log("RISK", "HALTED: max drawdown", "error")
+        await logger.log("SYSTEM", "Daily reset", "info")
+        await logger.log("TRADE", "SELL 0.5 SOL/USD", "info")
+
+        # Query all
+        rows = await logger.query(limit=10)
+        assert len(rows) == 4
+
+        # Filter by category
+        trades = await logger.query(category="TRADE")
+        assert len(trades) == 2
+        assert all(r["category"] == "TRADE" for r in trades)
+
+        # Filter by severity
+        errors = await logger.query(severity="error")
+        assert len(errors) == 1
+        assert errors[0]["category"] == "RISK"
+
+        # Limit
+        limited = await logger.query(limit=2)
+        assert len(limited) == 2
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_activity_log_recent_chronological():
+    """Activity log: recent() returns oldest-first (chronological) order."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        await logger.log("SYSTEM", "First event")
+        await logger.log("SYSTEM", "Second event")
+        await logger.log("SYSTEM", "Third event")
+
+        recent = await logger.recent(limit=10)
+        assert len(recent) == 3
+        assert recent[0]["summary"] == "First event"
+        assert recent[1]["summary"] == "Second event"
+        assert recent[2]["summary"] == "Third event"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_activity_log_detail_json_roundtrip():
+    """Activity log: detail dict serializes and can be parsed back."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        detail = {"symbol": "BTC/USD", "qty": 0.001, "price": 42000.0}
+        await logger.log("TRADE", "BUY BTC", detail=detail)
+
+        rows = await logger.query(limit=1)
+        assert len(rows) == 1
+        stored_detail = json.loads(rows[0]["detail"])
+        assert stored_detail["symbol"] == "BTC/USD"
+        assert stored_detail["price"] == 42000.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_activity_ws_backfill():
+    """Activity WebSocket: DB has entries for backfill on connect."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger, ActivityWebSocketManager
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        # Insert 25 entries
+        for i in range(25):
+            await logger.log("SYSTEM", f"Event {i}")
+
+        # ActivityWebSocketManager should serve 20 backfill entries
+        ws_mgr = ActivityWebSocketManager()
+        ws_mgr.set_db(db)
+
+        # Verify DB has all 25 and backfill query returns 20
+        all_rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(all_rows) == 25
+        backfill = await db.fetchall(
+            "SELECT timestamp, category, severity, summary FROM activity_log ORDER BY id DESC LIMIT 20"
+        )
+        assert len(backfill) == 20
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_notifier_activity_hook():
+    """Notifier: trade_executed() creates TRADE activity_log entry."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        trade = {
+            "action": "BUY",
+            "symbol": "SOL/USD",
+            "qty": 0.5,
+            "price": 142.30,
+            "fee": 0.28,
+            "intent": "DAY",
+            "tag": "auto_SOLUSD_001",
+        }
+        await notifier.trade_executed(trade)
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["category"] == "TRADE"
+        assert rows[0]["severity"] == "info"
+        assert "SOL/USD" in rows[0]["summary"]
+        assert "BUY" in rows[0]["summary"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_notifier_skip_empty_scan():
+    """Notifier: scan_complete with 0 signals writes NO activity entry."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        await notifier.scan_complete(9, 0)
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_notifier_log_scan_with_signals():
+    """Notifier: scan_complete with signals writes SCAN activity entry."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        await notifier.scan_complete(9, 3)
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["category"] == "SCAN"
+        assert "9 symbols" in rows[0]["summary"]
+        assert "3 signals" in rows[0]["summary"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_activity_rest_endpoint():
+    """REST: /v1/activity returns correct envelope with filters."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.api.routes import activity_handler
+    from src.api import ctx_key
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        await logger.log("TRADE", "Trade A", "info")
+        await logger.log("RISK", "Halt B", "error")
+        await logger.log("TRADE", "Trade C", "info")
+
+        mock_config = MagicMock()
+        mock_config.mode = "paper"
+
+        request = MagicMock()
+        request.query = {"category": "TRADE", "limit": "10"}
+        request.app = {ctx_key: {"config": mock_config, "activity_logger": logger}}
+
+        response = await activity_handler(request)
+        body = json.loads(response.body)
+        assert len(body["data"]) == 2
+        assert all(e["category"] == "TRADE" for e in body["data"])
+        assert body["meta"]["mode"] == "paper"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_activity_log_pruning():
+    """Activity log: entries older than 90 days pruned by prune_old_data()."""
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.shell.config import DataConfig
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert an old entry (100 days ago)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y-%m-%d %H:%M:%S")
+        await db.execute(
+            "INSERT INTO activity_log (timestamp, category, severity, summary) VALUES (?, 'SYSTEM', 'info', 'Old event')",
+            (old_ts,),
+        )
+        # Insert a recent entry
+        recent_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        await db.execute(
+            "INSERT INTO activity_log (timestamp, category, severity, summary) VALUES (?, 'SYSTEM', 'info', 'Recent event')",
+            (recent_ts,),
+        )
+        await db.commit()
+
+        config = DataConfig()
+        ds = DataStore(db, config)
+        await ds.prune_old_data()
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["summary"] == "Recent event"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_context_includes_activity():
+    """The /ask command context includes recent activity entries."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+        config = load_config()
+
+        await logger.log("SYSTEM", "Daily reset: counters cleared")
+        await logger.log("SCAN", "Scan: 9 symbols, 2 signals")
+
+        mock_ai = AsyncMock()
+        mock_ai.ask_haiku = AsyncMock(return_value="Test response")
+
+        commands = BotCommands(
+            config=config, db=db, scan_state={},
+            ai_client=mock_ai, activity_logger=logger,
+        )
+
+        mock_update = MagicMock()
+        mock_update.effective_user = MagicMock()
+        mock_update.effective_user.id = config.telegram.allowed_user_ids[0] if config.telegram.allowed_user_ids else 0
+        mock_update.message = MagicMock()
+        mock_update.message.reply_text = AsyncMock()
+
+        mock_context = MagicMock()
+        mock_context.args = ["what", "happened?"]
+
+        await commands.cmd_ask(mock_update, mock_context)
+
+        # Check the prompt sent to Haiku contains activity
+        if mock_ai.ask_haiku.called:
+            prompt_arg = mock_ai.ask_haiku.call_args[0][0]
+            assert "Recent activity:" in prompt_arg
+            assert "Daily reset" in prompt_arg
+            assert "9 symbols" in prompt_arg
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Prometheus Metrics ---
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint():
+    """Prometheus: /metrics returns 200 with text/plain and tb_ prefixed metrics."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 300.0
+        portfolio.position_count = 1
+        portfolio.positions = {}
+        portfolio._fees_today = 0.50
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "models": {}})
+        ai.tokens_remaining = 1500000
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            assert "text/plain" in resp.headers.get("Content-Type", "")
+            body = await resp.text()
+            assert "tb_portfolio_value_usd" in body
+            assert "tb_cash_usd" in body
+            assert "tb_halted" in body
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_skips_auth():
+    """Prometheus: /metrics returns 200 without Bearer token (auth skipped)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=100.0)
+        portfolio.cash = 100.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "models": {}})
+        ai.tokens_remaining = 1500000
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        # Set an API key to ensure auth is active for normal routes
+        from src.api import api_key_key
+        app[api_key_key] = "test-key"
+
+        async with TestClient(TestServer(app)) as client:
+            # /metrics should work WITHOUT auth header
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+
+            # Normal route should reject without auth
+            resp_system = await client.get("/v1/system")
+            assert resp_system.status == 401
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_position_labels():
+    """Prometheus: /metrics includes per-position labels (symbol, tag)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=600.0)
+        portfolio.cash = 400.0
+        portfolio.position_count = 1
+        portfolio.positions = {
+            "auto_SOLUSD_001": {
+                "symbol": "SOL/USD",
+                "qty": 2.0,
+                "avg_entry": 100.0,
+                "current_price": 105.0,
+            }
+        }
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "models": {}})
+        ai.tokens_remaining = 1500000
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert 'symbol="SOL/USD"' in body
+            assert 'tag="auto_SOLUSD_001"' in body
+            assert "tb_position_value_usd" in body
+            assert "tb_position_pnl_usd" in body
 
         await db.close()
     finally:

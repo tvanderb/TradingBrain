@@ -222,6 +222,16 @@ CREATE TABLE IF NOT EXISTS system_meta (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Unified activity timeline (90-day retention)
+CREATE TABLE IF NOT EXISTS activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    summary TEXT NOT NULL,
+    detail TEXT
+);
+
 -- Exchange orders (fill confirmation tracking)
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +284,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_tag ON orders(tag);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_conditional_orders_tag ON conditional_orders(tag);
 CREATE INDEX IF NOT EXISTS idx_conditional_orders_status ON conditional_orders(status);
+CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_activity_cat ON activity_log(category, timestamp);
 """
 
 # Migrations for existing databases (columns added after initial schema)

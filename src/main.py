@@ -32,6 +32,7 @@ from src.orchestrator.ai_client import AIClient
 from src.orchestrator.orchestrator import Orchestrator
 from src.orchestrator.reporter import Reporter
 from src.strategy.loader import load_strategy, load_strategy_with_fallback, get_strategy_path, get_code_hash
+from src.shell.activity import ActivityLogger
 from src.telegram.bot import TelegramBot
 from src.telegram.commands import BotCommands
 from src.telegram.notifications import Notifier
@@ -64,6 +65,7 @@ class TradingBrain:
         self._scan_state: dict = {}
         self._commands: BotCommands | None = None
         self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
+        self._activity: ActivityLogger | None = None
         self._api_runner: web.AppRunner | None = None
         self._ws_task: asyncio.Task | None = None
         self._trade_lock = asyncio.Lock()  # Serializes trade execution across scan/monitor/emergency
@@ -88,6 +90,9 @@ class TradingBrain:
         self._db = Database(self._config.db_path)
         await self._db.connect()
 
+        # 2b. Activity logger (must be before any events)
+        self._activity = ActivityLogger(self._db)
+
         # 3. Shell components
         self._kraken = KrakenREST(self._config.kraken)
         self._risk = RiskManager(self._config.risk)
@@ -101,6 +106,8 @@ class TradingBrain:
         self._risk.evaluate_halt_state(portfolio_value, self._portfolio.daily_start_value)
         if self._risk.is_halted:
             log.warning("brain.halted_on_startup", reason=self._risk.halt_reason)
+            await self._activity.risk(
+                f"System started HALTED: {self._risk.halt_reason}", severity="warning")
 
         # 3c. Orphaned position detection (L3)
         config_symbols = set(self._config.symbols)
@@ -109,6 +116,8 @@ class TradingBrain:
         if orphaned:
             log.error("portfolio.orphaned_positions", symbols=list(orphaned))
             self._scan_state["orphaned_positions"] = list(orphaned)
+            await self._activity.system(
+                f"Orphaned positions: {', '.join(orphaned)}", severity="warning")
 
         # 3d. Reconcile unfilled orders from previous session (live mode only)
         if not self._config.is_paper():
@@ -148,9 +157,13 @@ class TradingBrain:
                 "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
             )
             self._scan_state["strategy_version"] = version_row["version"] if version_row else None
+            await self._activity.strategy(
+                f"Strategy v{version_row['version'] if version_row else '?'} loaded")
         else:
             log.error("brain.paused_mode", reason="Strategy failed to load from all sources")
             self._scan_state["paused"] = True
+            await self._activity.strategy(
+                "Strategy load FAILED — paused mode", severity="error")
 
         # 4b. Analysis module health check (L5)
         from src.statistics.loader import MODULE_FILES, get_module_path
@@ -174,6 +187,7 @@ class TradingBrain:
             self._config.telegram.chat_id,
             tg_filter=self._config.telegram.notifications,
         )
+        self._notifier.set_activity_logger(self._activity)
         self._commands = BotCommands(
             config=self._config,
             db=self._db,
@@ -183,6 +197,7 @@ class TradingBrain:
             ai_client=self._ai,
             reporter=self._reporter,
             notifier=self._notifier,
+            activity_logger=self._activity,
         )
         self._telegram = TelegramBot(self._config.telegram, self._commands)
         await self._telegram.start()
@@ -201,7 +216,7 @@ class TradingBrain:
 
         # 8b. API Server
         if self._config.api.enabled:
-            api_app, ws_manager = create_api_app(
+            api_app, ws_manager, activity_ws = create_api_app(
                 config=self._config,
                 db=self._db,
                 portfolio=self._portfolio,
@@ -209,8 +224,10 @@ class TradingBrain:
                 ai=self._ai,
                 scan_state=self._scan_state,
                 commands=self._commands,
+                activity_logger=self._activity,
             )
             self._notifier.set_ws_manager(ws_manager)
+            self._activity.set_ws_manager(activity_ws)
             self._api_runner = web.AppRunner(api_app)
             await self._api_runner.setup()
             site = web.TCPSite(
@@ -511,8 +528,11 @@ class TradingBrain:
                     )
 
         await self._db.commit()
+        total_checked = len(pending_orders) + len(active_conditionals)
         log.info("reconcile.complete",
                  orders=len(pending_orders), conditionals=len(active_conditionals))
+        if self._activity and total_checked > 0:
+            await self._activity.system(f"Order reconciliation: {total_checked} checked")
 
     async def _on_ws_failure(self) -> None:
         """Called when WebSocket permanently fails after max retries."""
@@ -1068,11 +1088,15 @@ class TradingBrain:
                 )
             await self._db.commit()
             log.info("fees.updated", pairs=len(self._pair_fees))
+            if self._activity:
+                await self._activity.system(f"Fee schedule updated for {len(self._pair_fees)} pairs")
         except Exception as e:
             log.warning("fees.check_failed", error=str(e))
 
     async def _daily_snapshot(self) -> None:
         await self._portfolio.snapshot_daily()
+        if self._activity:
+            await self._activity.system("Daily performance snapshot saved")
 
     async def _daily_reset(self) -> None:
         async with self._trade_lock:
@@ -1081,6 +1105,8 @@ class TradingBrain:
             self._ai.reset_daily_tokens()
             # Refresh daily start value for accurate daily P&L tracking
             self._portfolio._daily_start_value = await self._portfolio.total_value()
+        if self._activity:
+            await self._activity.system("Daily reset: counters cleared")
 
     async def _nightly_orchestration(self) -> None:
         """Run the nightly AI review cycle with timeout enforcement."""
@@ -1139,6 +1165,9 @@ class TradingBrain:
                 except Exception:
                     pass  # Scheduler job may not exist yet
                 log.info("strategy.reloaded_after_orchestration")
+                if self._activity:
+                    ver = self._scan_state.get("strategy_version", "?")
+                    await self._activity.strategy(f"Strategy reloaded: v{ver}")
 
             await self._notifier.daily_summary(report)
         except asyncio.TimeoutError:
@@ -1160,6 +1189,8 @@ class TradingBrain:
     async def _emergency_stop(self) -> bool:
         """Close all positions immediately. Returns True if all positions closed."""
         log.warning("brain.emergency_stop")
+        if self._activity:
+            await self._activity.system("Emergency stop initiated", severity="error")
         await self._notifier.system_error("Emergency stop initiated — closing all positions")
 
         # Pause position monitor AND scan loop to avoid concurrent trades during emergency
@@ -1267,12 +1298,17 @@ class TradingBrain:
         if remaining:
             symbols = [r["symbol"] for r in remaining]
             log.error("emergency.positions_remaining", symbols=symbols)
+            if self._activity:
+                await self._activity.system(
+                    f"Emergency stop incomplete: {', '.join(symbols)} remaining", severity="error")
             await self._notifier.system_error(
                 f"Emergency stop incomplete — positions remaining: {', '.join(symbols)}"
             )
             return False
         else:
             log.info("emergency.all_positions_closed")
+            if self._activity:
+                await self._activity.system("Emergency stop complete", severity="error")
             await self._notifier.system_error("Emergency stop complete — all positions closed")
             return True
 

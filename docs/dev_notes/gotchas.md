@@ -128,3 +128,7 @@ while running:
 ## Special Migration Crash Risk (L8)
 **Problem**: Positions table recreation (DROP → CREATE → INSERT) without explicit transaction. Crash between DROP and INSERT loses all position data.
 **Fix**: Wrap in `BEGIN IMMEDIATE` / `COMMIT` with rollback on error.
+
+## aiohttp Content-Type with charset (N1)
+**Problem**: `web.Response(content_type="text/plain; version=0.0.4; charset=utf-8")` raises `ValueError: charset must not be in content_type argument`. aiohttp parses charset separately.
+**Fix**: Create `web.Response(body=output)`, then set `resp.headers["Content-Type"]` directly to the full Prometheus content type string.

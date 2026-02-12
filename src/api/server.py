@@ -10,8 +10,10 @@ import structlog
 from aiohttp import web
 
 from src.api import api_key_key, ctx_key
+from src.api.metrics import metrics_handler
 from src.api.routes import setup_routes
 from src.api.websocket import WebSocketManager
+from src.shell.activity import ActivityWebSocketManager
 
 log = structlog.get_logger()
 
@@ -19,8 +21,8 @@ log = structlog.get_logger()
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     """Bearer token authentication. Skips WebSocket (handled separately)."""
-    # WebSocket auth is handled in WebSocketManager.handle
-    if request.path == "/v1/events":
+    # WebSocket auth is handled in their respective managers
+    if request.path in ("/v1/events", "/v1/activity/live", "/metrics"):
         return await handler(request)
 
     api_key = request.app.get(api_key_key, "")
@@ -69,7 +71,8 @@ def create_app(
     ai,
     scan_state: dict,
     commands=None,
-) -> tuple[web.Application, WebSocketManager]:
+    activity_logger=None,
+) -> tuple[web.Application, WebSocketManager, ActivityWebSocketManager]:
     """Create and configure the aiohttp application."""
     app = web.Application(middlewares=[error_middleware, auth_middleware])
 
@@ -85,14 +88,23 @@ def create_app(
         "ai": ai,
         "scan_state": scan_state,
         "commands": commands,
+        "activity_logger": activity_logger,
         "started_at": datetime.now(timezone.utc),
     }
 
     # REST routes
     setup_routes(app)
 
-    # WebSocket
+    # Prometheus metrics (no auth — Docker-network only)
+    app.router.add_get("/metrics", metrics_handler)
+
+    # WebSocket — main event stream
     ws_manager = WebSocketManager()
     app.router.add_get("/v1/events", ws_manager.handle)
 
-    return app, ws_manager
+    # WebSocket — activity log stream
+    activity_ws = ActivityWebSocketManager()
+    activity_ws.set_db(db)
+    app.router.add_get("/v1/activity/live", activity_ws.handle)
+
+    return app, ws_manager, activity_ws

@@ -2237,3 +2237,115 @@ First live deployment revealed L1 actively corrupting data: portfolio showed $10
 - Both added as schema/migration — backward compatible
 
 **Tests: 161/161 passing** (+16 new tests)
+
+## Session M (2026-02-11) — Activity Log: Unified Fund Timeline
+
+### Goal
+Add a unified chronological timeline so "what happened overnight?" can be answered from a single source instead of cross-referencing 5+ tables and Docker logs.
+
+### What Was Built
+
+**Phase 1: Database + Core Class**
+- New `activity_log` SQLite table (id, timestamp, category, severity, summary, detail)
+- Indexes on `timestamp` and `(category, timestamp)` for filtered queries
+- 90-day retention via `prune_old_data()` in DataStore
+- New `src/shell/activity.py`: `ActivityLogger` class (DB write + WS push + structlog)
+  - Convenience methods: `trade()`, `risk()`, `system()`, `scan()`, `orch()`, `strategy()`
+  - Query methods: `recent(limit)` (chronological), `query(limit, since, until, category, severity)`
+- `ActivityWebSocketManager` class: dedicated WS for activity stream, backfills 20 on connect
+
+**Phase 2: Notifier Hook**
+- 18-event mapping `_EVENT_ACTIVITY` (event → category + severity)
+- `_format_activity()` function: one-line human-readable summaries per event type
+- `scan_complete` with 0 signals returns `None` → skipped (no noise)
+- Hook in `_dispatch()`: auto-logs all Notifier events to activity log
+- Wrapped in try/except — activity log failures never break notifications
+
+**Phase 3: API Endpoints**
+- REST: `GET /v1/activity` — filtered query (limit, since, until, category, severity)
+  - Validates category against `{TRADE, RISK, SYSTEM, SCAN, ORCH, STRATEGY}`
+  - Validates severity against `{info, warning, error}`
+  - Detail JSON parsed for response
+- WebSocket: `/v1/activity/live` — streams activity entries, auth via `?token=`, backfills 20
+- Auth middleware updated to skip both WS paths
+- `create_app()` returns 3-tuple now: `(app, ws_manager, activity_ws)`
+
+**Phase 4: Wiring + Direct Writes**
+- `ActivityLogger` created after DB connect, wired to Notifier and BotCommands
+- `activity_ws` wired to ActivityLogger after API server setup
+- 12 direct writes for lifecycle events not going through Notifier:
+  - Strategy load success/failure, halt on startup, orphaned positions
+  - Fee refresh, daily snapshot, daily reset, strategy reloaded
+  - Emergency stop initiated/complete/incomplete, order reconciliation
+
+**Phase 5: /ask Integration**
+- `BotCommands` accepts `activity_logger` parameter
+- `/ask` injects last 30 activity entries into Haiku context (~2.5K tokens)
+- Format: `[HH:MM:SS] CATEGORY | summary` — compact timeline
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/shell/activity.py` | **NEW** (~170 lines) |
+| `src/shell/database.py` | MODIFY (table + 2 indexes) |
+| `src/shell/data_store.py` | MODIFY (90-day pruning) |
+| `src/telegram/notifications.py` | MODIFY (event map + formatter + dispatch hook) |
+| `src/api/server.py` | MODIFY (activity WS + 3-tuple return + auth skip) |
+| `src/api/routes.py` | MODIFY (activity_handler + route) |
+| `src/main.py` | MODIFY (wiring + 12 direct writes) |
+| `src/telegram/commands.py` | MODIFY (activity_logger param + /ask context) |
+| `tests/test_integration.py` | MODIFY (6 existing tests updated for 3-tuple, 10 new tests) |
+
+**Tests: 171/171 passing** (+10 new tests)
+
+## Session N — Observability Stack (Loki + Prometheus + Grafana)
+
+### Context
+No centralized dashboard for monitoring fund health, system performance, or historical trends. Logs went to Docker json-file driver (lost on rotation), metrics existed only in-memory. Added a full self-hosted observability stack.
+
+### Phase 1: Prometheus `/metrics` Endpoint
+- **New file**: `src/api/metrics.py` (~85 lines)
+- Custom `CollectorRegistry` (avoids pytest conflicts with global default)
+- 12 gauges: portfolio value, cash, position count, peak, drawdown%, daily trades, daily P&L, consecutive losses, halted, fees today, per-position value/PnL (with symbol+tag labels)
+- `tb_system_info` Info metric with mode + version labels
+- Auth skipped for `/metrics` (Prometheus convention, Docker-network only)
+- aiohttp gotcha: `charset must not be in content_type argument` — set Content-Type via `resp.headers` directly
+- Added `prometheus-client>=0.21` to pyproject.toml
+
+### Phase 2: Docker Compose — 3 New Services
+- **Loki** (grafana/loki:3.4): Log aggregation, 512m limit
+- **Prometheus** (prom/prometheus:v3.2): Metrics scraping at 30s intervals, 90d/500MB retention, 256m limit
+- **Grafana** (grafana/grafana:11.5): Dashboard UI, 192m limit
+- trading-brain logging driver changed from `json-file` to `loki`
+- Memory budget: ~1.46GB total (fits 2GB VPS with ~500MB headroom)
+
+### Phase 3: Grafana Provisioning
+- Auto-provisioned datasources (Prometheus + Loki)
+- Auto-provisioned dashboard with 4 rows:
+  - **Fund Overview**: Portfolio value timeseries, cash stat, positions stat, drawdown gauge (red >30%), halted indicator
+  - **Risk & Trading**: Daily P&L timeseries, daily trades, consecutive losses, fees
+  - **Positions**: Per-position value table, per-position P&L bar chart
+  - **Logs**: Loki log panel with JSON parsing
+
+### Phase 4: Deployment Updates
+- Ansible: monitoring directory creation, monitoring config sync, Loki Docker driver install (idempotent), firewall port 3000
+- Caddy: Grafana reverse proxy on `:3000`
+- env.j2: `GRAFANA_ADMIN_PASSWORD` variable added
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/api/metrics.py` | **NEW** (~85 lines) |
+| `src/api/server.py` | MODIFY (import + auth skip + route) |
+| `pyproject.toml` | MODIFY (prometheus-client dep) |
+| `docker-compose.yml` | MODIFY (3 new services + Loki log driver + volumes) |
+| `monitoring/prometheus.yml` | **NEW** |
+| `monitoring/grafana/provisioning/datasources/datasources.yml` | **NEW** |
+| `monitoring/grafana/provisioning/dashboards/dashboards.yml` | **NEW** |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | **NEW** |
+| `deploy/playbook.yml` | MODIFY (monitoring dirs + sync + Loki driver + firewall) |
+| `deploy/templates/Caddyfile.j2` | MODIFY (Grafana proxy) |
+| `deploy/templates/env.j2` | MODIFY (Grafana password) |
+| `tests/test_integration.py` | MODIFY (3 new tests) |
+
+**Tests: 174/174 passing** (+3 new tests)

@@ -240,6 +240,13 @@ class DataStore:
             (orch_cutoff,),
         )
 
+        # Activity log (90 days)
+        activity_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
+        await self._db.execute(
+            "DELETE FROM activity_log WHERE timestamp < ?",
+            (activity_cutoff,),
+        )
+
         await self._db.commit()
 
     async def run_nightly_maintenance(self) -> None:

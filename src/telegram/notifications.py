@@ -14,10 +14,132 @@ import structlog
 
 if TYPE_CHECKING:
     from src.api.websocket import WebSocketManager
+    from src.shell.activity import ActivityLogger
     from src.shell.config import NotificationConfig
     from telegram.ext import Application
 
 log = structlog.get_logger()
+
+# Event-to-activity mapping: event_name -> (category, severity)
+_EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
+    "trade_executed":              ("TRADE",    "info"),
+    "stop_triggered":              ("TRADE",    "warning"),
+    "signal_rejected":             ("RISK",     "info"),
+    "risk_halt":                   ("RISK",     "error"),
+    "risk_resumed":                ("RISK",     "info"),
+    "strategy_rollback":           ("RISK",     "error"),
+    "scan_complete":               ("SCAN",     "info"),
+    "strategy_deployed":           ("STRATEGY", "info"),
+    "paper_test_started":          ("STRATEGY", "info"),
+    "paper_test_completed":        ("STRATEGY", "info"),
+    "orchestrator_cycle_started":  ("ORCH",     "info"),
+    "orchestrator_cycle_completed": ("ORCH",    "info"),
+    "daily_summary":               ("ORCH",     "info"),
+    "weekly_report":               ("ORCH",     "info"),
+    "system_online":               ("SYSTEM",   "info"),
+    "system_shutdown":             ("SYSTEM",   "info"),
+    "system_error":                ("SYSTEM",   "error"),
+    "websocket_feed_lost":         ("SYSTEM",   "error"),
+}
+
+
+def _format_activity(event_name: str, data: dict) -> str | None:
+    """Format an event into a one-line activity summary. Returns None to skip."""
+    if event_name == "trade_executed":
+        action = data.get("action", "?")
+        qty = data.get("qty", 0)
+        symbol = data.get("symbol", "?")
+        tag = data.get("tag", "")
+        price = data.get("price", 0)
+        tag_str = f" [{tag}]" if tag else ""
+        parts = [f"{action} {qty:.4f} {symbol}{tag_str} @ ${price:,.2f}"]
+        pnl = data.get("pnl")
+        if pnl is not None:
+            parts.append(f"P&L ${pnl:+.2f}")
+        return " ".join(parts)
+
+    if event_name == "stop_triggered":
+        symbol = data.get("symbol", "?")
+        reason = data.get("reason", "SL")
+        price = data.get("price", 0)
+        return f"{reason.upper()} triggered on {symbol} @ ${price:,.2f}"
+
+    if event_name == "signal_rejected":
+        action = data.get("action", "?")
+        symbol = data.get("symbol", "?")
+        reason = data.get("reason", "unknown")
+        return f"{action} {symbol} rejected: {reason}"
+
+    if event_name == "risk_halt":
+        reason = data.get("reason", "unknown")
+        return f"TRADING HALTED: {reason}"
+
+    if event_name == "risk_resumed":
+        return "Trading resumed — halt cleared"
+
+    if event_name == "strategy_rollback":
+        version = data.get("version", "?")
+        reason = data.get("reason", "")
+        return f"ROLLBACK to {version}: {reason}"
+
+    if event_name == "scan_complete":
+        signal_count = data.get("signal_count", 0)
+        if signal_count == 0:
+            return None  # Skip empty scans
+        symbol_count = data.get("symbol_count", 0)
+        return f"Scan: {symbol_count} symbols, {signal_count} signals"
+
+    if event_name == "strategy_deployed":
+        version = data.get("version", "?")
+        tier_name = data.get("tier_name", "?")
+        tier = data.get("tier", 0)
+        return f"Strategy {version} deployed (tier {tier}: {tier_name})"
+
+    if event_name == "paper_test_started":
+        version = data.get("version", "?")
+        days = data.get("days", "?")
+        return f"Paper test started: {version} ({days} days)"
+
+    if event_name == "paper_test_completed":
+        version = data.get("version", "?")
+        passed = data.get("passed", False)
+        results = data.get("results", {})
+        status = "PASSED" if passed else "FAILED"
+        trades = results.get("trades", 0)
+        pnl = results.get("pnl", 0)
+        return f"Paper test {status}: {version} ({trades} trades, ${pnl:+.2f})"
+
+    if event_name == "orchestrator_cycle_started":
+        return "Nightly orchestration cycle started"
+
+    if event_name == "orchestrator_cycle_completed":
+        decision = data.get("decision_type", "?")
+        return f"Orchestration complete: {decision}"
+
+    if event_name == "daily_summary":
+        summary = data.get("summary", "")
+        return f"Daily summary: {summary[:120]}"
+
+    if event_name == "weekly_report":
+        report = data.get("report", "")
+        return f"Weekly report: {report[:120]}"
+
+    if event_name == "system_online":
+        pv = data.get("portfolio_value", 0)
+        pos = data.get("positions", 0)
+        return f"System online: ${pv:.2f} portfolio, {pos} positions"
+
+    if event_name == "system_shutdown":
+        return "System shutting down"
+
+    if event_name == "system_error":
+        msg = data.get("message", "unknown")
+        return f"ERROR: {msg[:200]}"
+
+    if event_name == "websocket_feed_lost":
+        return "WebSocket feed lost — REST fallback active"
+
+    return None
 
 
 class Notifier:
@@ -33,12 +155,16 @@ class Notifier:
         self._app = app
         self._tg_filter = tg_filter
         self._ws_manager: WebSocketManager | None = None
+        self._activity_logger: ActivityLogger | None = None
 
     def set_app(self, app: Application) -> None:
         self._app = app
 
     def set_ws_manager(self, ws_manager: WebSocketManager) -> None:
         self._ws_manager = ws_manager
+
+    def set_activity_logger(self, logger: ActivityLogger) -> None:
+        self._activity_logger = logger
 
     def _should_telegram(self, event_name: str) -> bool:
         if self._tg_filter is None:
@@ -75,6 +201,17 @@ class Notifier:
         await self._broadcast_ws(event_name, data)
         if telegram_text and self._should_telegram(event_name):
             asyncio.create_task(self._send_telegram(telegram_text))
+
+        # Activity log hook
+        if self._activity_logger:
+            meta = _EVENT_ACTIVITY.get(event_name)
+            if meta:
+                summary = _format_activity(event_name, data)
+                if summary is not None:
+                    try:
+                        await self._activity_logger.log(meta[0], summary, meta[1], detail=data)
+                    except Exception:
+                        pass  # Activity log must never break notifications
 
     # --- Trade Events ---
 

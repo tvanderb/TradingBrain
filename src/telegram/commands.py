@@ -40,6 +40,7 @@ class BotCommands:
         ai_client=None,
         reporter=None,
         notifier=None,
+        activity_logger=None,
     ) -> None:
         self._config = config
         self._db = db
@@ -49,6 +50,7 @@ class BotCommands:
         self._ai = ai_client
         self._reporter = reporter
         self._notifier = notifier
+        self._activity_logger = activity_logger
         self._paused = False
         self._last_ask_time: float = 0
         self._unauth_log_count: int = 0
@@ -502,6 +504,13 @@ class BotCommands:
             )
             if ver:
                 ctx_parts.append(f"Strategy version: {ver['version']}")
+
+            # Recent activity timeline
+            if self._activity_logger:
+                activity = await self._activity_logger.recent(30)
+                if activity:
+                    lines = [f"  [{a['timestamp'][11:19]}] {a['category']} | {a['summary']}" for a in activity]
+                    ctx_parts.append("Recent activity:\n" + "\n".join(lines))
 
             context_str = "\n\n".join(ctx_parts)
             prompt = (

@@ -325,6 +325,57 @@ async def benchmarks_handler(request: web.Request) -> web.Response:
     return web.json_response(_envelope(benchmarks, config.mode))
 
 
+_VALID_ACTIVITY_CATEGORIES = {"TRADE", "RISK", "SYSTEM", "SCAN", "ORCH", "STRATEGY"}
+_VALID_ACTIVITY_SEVERITIES = {"info", "warning", "error"}
+
+
+async def activity_handler(request: web.Request) -> web.Response:
+    ctx = request.app[ctx_key]
+    config = ctx["config"]
+    activity_logger = ctx.get("activity_logger")
+
+    if not activity_logger:
+        return web.json_response(
+            _error_envelope("unavailable", "Activity logger not configured", config.mode),
+            status=503,
+        )
+
+    limit = max(1, min(_safe_int(request.query.get("limit", "50"), 50), 500))
+    since = request.query.get("since")
+    until = request.query.get("until")
+    category = request.query.get("category")
+    severity = request.query.get("severity")
+
+    if category and category not in _VALID_ACTIVITY_CATEGORIES:
+        return web.json_response(
+            _error_envelope("invalid_param", f"Invalid category. Must be one of: {', '.join(sorted(_VALID_ACTIVITY_CATEGORIES))}", config.mode),
+            status=400,
+        )
+    if severity and severity not in _VALID_ACTIVITY_SEVERITIES:
+        return web.json_response(
+            _error_envelope("invalid_param", f"Invalid severity. Must be one of: {', '.join(sorted(_VALID_ACTIVITY_SEVERITIES))}", config.mode),
+            status=400,
+        )
+
+    rows = await activity_logger.query(
+        limit=limit, since=since, until=until, category=category, severity=severity,
+    )
+
+    # Parse detail JSON for each entry
+    entries = []
+    for row in rows:
+        entry = dict(row)
+        detail = entry.get("detail")
+        if isinstance(detail, str):
+            try:
+                entry["detail"] = json.loads(detail)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        entries.append(entry)
+
+    return web.json_response(_envelope(entries, config.mode))
+
+
 def setup_routes(app: web.Application) -> None:
     """Register all REST API routes."""
     app.router.add_get("/v1/system", system_handler)
@@ -337,3 +388,4 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/v1/strategy", strategy_handler)
     app.router.add_get("/v1/ai/usage", ai_usage_handler)
     app.router.add_get("/v1/benchmarks", benchmarks_handler)
+    app.router.add_get("/v1/activity", activity_handler)
