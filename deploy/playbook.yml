@@ -274,7 +274,7 @@
         proto: tcp
       tags: [caddy]
 
-    - name: Allow Grafana through firewall
+    - name: Allow Data API through firewall
       ufw:
         rule: allow
         port: "3000"
