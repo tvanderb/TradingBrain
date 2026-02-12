@@ -6413,3 +6413,285 @@ async def test_metrics_position_labels():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_truth_benchmarks():
+    """Prometheus: /metrics includes truth benchmark gauges from closed trades."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert a closed winning trade
+        await db.execute(
+            """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, opened_at, closed_at)
+               VALUES ('BTC/USD', 'buy', 0.01, 50000, 51000, 10.0, 0.02, 0.50, 'DAY',
+                       datetime('now', '-1 hour'), datetime('now'))"""
+        )
+        await db.commit()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 300.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 1000, "total_cost": 0.05, "daily_limit": 1500000, "models": {}})
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        # Clear truth cache to force fresh computation
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert "tb_win_rate" in body
+            assert "tb_trade_count" in body
+            assert "tb_net_pnl_usd" in body
+            assert "tb_profit_factor" in body
+            assert "tb_total_fees_usd" in body
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_ai_usage():
+    """Prometheus: /metrics includes AI usage gauges."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 50000, "total_cost": 1.23, "daily_limit": 1500000, "models": {}})
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert "tb_ai_daily_cost_usd" in body
+            assert "tb_ai_daily_tokens" in body
+            assert "tb_ai_token_budget_pct" in body
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_symbol_prices():
+    """Prometheus: /metrics includes per-symbol price labels from scan state."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "daily_limit": 1500000, "models": {}})
+        scan_state = {
+            "symbols": {
+                "BTC/USD": {"price": 50000.0, "spread": 10.0},
+                "ETH/USD": {"price": 3000.0, "spread": 2.0},
+            }
+        }
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert 'symbol="BTC/USD"' in body
+            assert 'symbol="ETH/USD"' in body
+            assert "tb_symbol_price_usd" in body
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_uptime():
+    """Prometheus: /metrics includes uptime seconds gauge with positive value."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "daily_limit": 1500000, "models": {}})
+        scan_state = {"symbols": {}}
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert "tb_uptime_seconds" in body
+            # Uptime should be > 0 since started_at was set during create_app
+            for line in body.split("\n"):
+                if line.startswith("tb_uptime_seconds "):
+                    val = float(line.split(" ")[1])
+                    assert val > 0
+                    break
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_metrics_scan_age():
+    """Prometheus: /metrics includes scan age seconds gauge."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api.server import create_app
+    from src.api.metrics import _truth_cache
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        risk = RiskManager(config.risk)
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=500.0)
+        portfolio.cash = 500.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+        portfolio._fees_today = 0.0
+        ai = MagicMock()
+        ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "daily_limit": 1500000, "models": {}})
+        # Set last_scan_at to 60 seconds ago
+        scan_state = {
+            "symbols": {},
+            "last_scan_at": datetime.now(timezone.utc) - timedelta(seconds=60),
+        }
+        commands = MagicMock()
+        commands.is_paused = False
+
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+
+        app, ws_manager, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            body = await resp.text()
+            assert "tb_scan_age_seconds" in body
+            for line in body.split("\n"):
+                if line.startswith("tb_scan_age_seconds "):
+                    val = float(line.split(" ")[1])
+                    assert val >= 59  # ~60 seconds, allowing small timing variance
+                    break
+
+        await db.close()
+    finally:
+        _truth_cache["data"] = None
+        _truth_cache["expires_at"] = 0.0
+        os.unlink(db_path)

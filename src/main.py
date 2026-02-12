@@ -809,6 +809,7 @@ class TradingBrain:
             # Update scan state
             self._scan_state["symbols"] = scan_symbols
             self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
+            self._scan_state["last_scan_at"] = datetime.now(timezone.utc)
             log.info("scan.complete", symbols=len(scan_symbols), signals=len(signals))
             await self._notifier.scan_complete(len(scan_symbols), len(signals))
 

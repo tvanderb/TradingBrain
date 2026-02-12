@@ -27,32 +27,25 @@
             "showPoints": "auto",
             "spanNulls": false
           },
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "decimals": 2
         },
         "overrides": []
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
       "id": 1,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
-      "title": "Portfolio Value",
+      "title": "Portfolio Value + Peak",
       "type": "timeseries",
       "targets": [
-        {
-          "expr": "tb_portfolio_value_usd",
-          "legendFormat": "Portfolio Value",
-          "refId": "A"
-        },
-        {
-          "expr": "tb_portfolio_peak_usd",
-          "legendFormat": "Peak",
-          "refId": "B"
-        }
+        { "expr": "tb_portfolio_value_usd", "legendFormat": "Portfolio Value", "refId": "A" },
+        { "expr": "tb_portfolio_peak_usd", "legendFormat": "Peak", "refId": "B" }
       ]
     },
     {
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
-        "defaults": { "unit": "currencyUSD", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
         "overrides": []
       },
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
@@ -65,11 +58,43 @@
     {
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
-        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "defaults": {
+          "unit": "percent", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] }
+        },
         "overrides": []
       },
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "id": 3,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Total Return",
+      "type": "stat",
+      "targets": [{ "expr": "tb_total_return_pct", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Net P&L",
+      "type": "stat",
+      "targets": [{ "expr": "tb_net_pnl_usd", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 5 },
+      "id": 5,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
       "title": "Positions",
       "type": "stat",
@@ -79,9 +104,7 @@
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "min": 0,
-          "max": 50,
+          "unit": "percent", "decimals": 2, "min": 0, "max": 50,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -94,8 +117,8 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
-      "id": 4,
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 5 },
+      "id": 6,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
       "title": "Drawdown %",
       "type": "gauge",
@@ -112,18 +135,199 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 5 },
-      "id": 5,
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 5 },
+      "id": 7,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
       "title": "Halted",
       "type": "stat",
       "targets": [{ "expr": "tb_halted", "refId": "A" }]
     },
+
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
-      "id": 101,
-      "title": "Risk & Trading",
+      "id": 200,
+      "title": "Performance",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1, "min": 0, "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 40 },
+              { "color": "green", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 10 },
+      "id": 201,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "title": "Win Rate",
+      "type": "gauge",
+      "targets": [{ "expr": "tb_win_rate * 100", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 10 },
+      "id": 202,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Trade Count",
+      "type": "stat",
+      "targets": [{ "expr": "tb_trade_count", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 10 },
+      "id": 203,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Profit Factor",
+      "type": "stat",
+      "targets": [{ "expr": "tb_profit_factor", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0 }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 10 },
+      "id": 204,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Sharpe Ratio",
+      "type": "stat",
+      "targets": [{ "expr": "tb_sharpe_ratio", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 10 },
+      "id": 205,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Sortino Ratio",
+      "type": "stat",
+      "targets": [{ "expr": "tb_sortino_ratio", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 10 },
+      "id": 206,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Expectancy",
+      "type": "stat",
+      "targets": [{ "expr": "tb_expectancy_usd", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 14 },
+      "id": 207,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Wins",
+      "type": "stat",
+      "targets": [{ "expr": "tb_win_count", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 14 },
+      "id": 208,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Losses",
+      "type": "stat",
+      "targets": [{ "expr": "tb_loss_count", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 14 },
+      "id": 209,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Best Trade",
+      "type": "stat",
+      "targets": [{ "expr": "tb_best_trade_pct", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 14 },
+      "id": 210,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Worst Trade",
+      "type": "stat",
+      "targets": [{ "expr": "tb_worst_trade_pct", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "h", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 14 },
+      "id": 211,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Avg Duration",
+      "type": "stat",
+      "targets": [{ "expr": "tb_avg_trade_duration_hours", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 14 },
+      "id": 212,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "All-Time Fees",
+      "type": "stat",
+      "targets": [{ "expr": "tb_total_fees_usd", "refId": "A" }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 300,
+      "title": "Risk & Daily",
       "type": "row"
     },
     {
@@ -132,12 +336,12 @@
         "defaults": {
           "color": { "mode": "palette-classic" },
           "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "pointSize": 5, "showPoints": "auto", "spanNulls": false },
-          "unit": "currencyUSD"
+          "unit": "currencyUSD", "decimals": 2
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
-      "id": 6,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "id": 301,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
       "title": "Daily P&L",
       "type": "timeseries",
@@ -149,8 +353,8 @@
         "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 10 },
-      "id": 7,
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 19 },
+      "id": 302,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
       "title": "Daily Trades",
       "type": "stat",
@@ -171,8 +375,8 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 10 },
-      "id": 8,
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 19 },
+      "id": 303,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
       "title": "Consecutive Losses",
       "type": "stat",
@@ -181,31 +385,304 @@
     {
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
-        "defaults": { "unit": "currencyUSD", "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] } },
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] } },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 10 },
-      "id": 9,
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 19 },
+      "id": 304,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
       "title": "Fees Today",
       "type": "stat",
       "targets": [{ "expr": "tb_fees_today_usd", "refId": "A" }]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 10 }, { "color": "red", "value": 25 }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 23 },
+      "id": 305,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Max Drawdown",
+      "type": "stat",
+      "targets": [{ "expr": "tb_max_drawdown_pct", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 23 },
+      "id": 306,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Signal Act Rate",
+      "type": "stat",
+      "targets": [{ "expr": "tb_signal_act_rate * 100", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 23 },
+      "id": 307,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Allocation",
+      "type": "stat",
+      "targets": [{ "expr": "tb_portfolio_allocation_pct", "refId": "A" }]
+    },
+
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
-      "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "id": 400,
+      "title": "AI & System",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 28 },
+      "id": 401,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "AI Cost Today",
+      "type": "stat",
+      "targets": [{ "expr": "tb_ai_daily_cost_usd", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 28 },
+      "id": 402,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Tokens Used",
+      "type": "stat",
+      "targets": [{ "expr": "tb_ai_daily_tokens", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1, "min": 0, "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 28 },
+      "id": 403,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "title": "Token Budget",
+      "type": "gauge",
+      "targets": [{ "expr": "tb_ai_token_budget_pct", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 28 },
+      "id": 404,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Strategy Versions",
+      "type": "stat",
+      "targets": [{ "expr": "tb_strategy_version_count", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 28 },
+      "id": 405,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Total Scans",
+      "type": "stat",
+      "targets": [{ "expr": "tb_total_scans", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s", "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "orange", "value": 450 },
+              { "color": "red", "value": 600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 28 },
+      "id": 406,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "title": "Scan Age",
+      "type": "stat",
+      "targets": [{ "expr": "tb_scan_age_seconds", "refId": "A" }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "id": 500,
+      "title": "Market Prices",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 33 },
+      "id": 501,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "BTC/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"BTC/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 33 },
+      "id": 502,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "ETH/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"ETH/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 33 },
+      "id": 503,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "SOL/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"SOL/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 36 },
+      "id": 504,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "XRP/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"XRP/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 5, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 36 },
+      "id": 505,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "DOGE/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"DOGE/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 36 },
+      "id": 506,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "ADA/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"ADA/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 39 },
+      "id": 507,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "LINK/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"LINK/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 39 },
+      "id": 508,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "AVAX/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"AVAX/USD\"}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 3, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 39 },
+      "id": 509,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "title": "DOT/USD",
+      "type": "stat",
+      "targets": [{ "expr": "tb_symbol_price_usd{symbol=\"DOT/USD\"}", "refId": "A" }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "id": 600,
       "title": "Positions",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
-        "defaults": { "unit": "currencyUSD" },
+        "defaults": { "unit": "currencyUSD", "decimals": 2 },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
-      "id": 10,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "id": 601,
       "options": {
         "showHeader": true,
         "footer": { "show": false }
@@ -222,12 +699,13 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "continuous-GrYlRd" },
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "decimals": 2
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
-      "id": 11,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "id": 602,
       "options": {
         "orientation": "horizontal",
         "showValue": "always",
@@ -240,17 +718,49 @@
         { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "symbol": "Symbol", "tag": "Tag", "Value": "P&L (USD)" } } }
       ]
     },
+
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
-      "id": 103,
-      "title": "Logs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "id": 700,
+      "title": "Orchestrator Spool",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
-      "id": 12,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
+      "id": 701,
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "title": "Orchestrator Thoughts & Observations",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{compose_service=\"trading-brain\"} |= \"orchestrator.\" | json | line_format \"{{.level | ToUpper}} [{{.event}}] {{if .step}}step={{.step}} model={{.model}}{{end}} {{if .display}}{{.display}}{{end}} {{if .market}}market={{.market}}{{end}} {{if .assessment}}assessment={{.assessment}}{{end}} {{if .cycle_id}}cycle={{.cycle_id}}{{end}}\"",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "id": 800,
+      "title": "Application Logs",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 61 },
+      "id": 801,
       "options": {
         "showTime": true,
         "showLabels": false,
@@ -265,7 +775,7 @@
       "type": "logs",
       "targets": [
         {
-          "expr": "{compose_service=\"trading-brain\"} | json | line_format \"{{.level | ToUpper}} [{{.event}}]{{if .summary}} {{.summary}}{{end}}{{if .portfolio}} portfolio={{.portfolio}}{{end}}{{if .symbols}} symbols={{.symbols}}{{end}}{{if .signals}} signals={{.signals}}{{end}}{{if .pairs}} pairs={{.pairs}}{{end}}{{if .mode}} mode={{.mode}}{{end}}{{if .url}} url={{.url}}{{end}}{{if .path}} path={{.path}}{{end}}{{if .error}} error={{.error}}{{end}}\"",
+          "expr": "{compose_service=\"trading-brain\"} | json | line_format \"{{.level | ToUpper}} [{{.event}}]{{if .summary}} {{.summary}}{{end}}{{if .portfolio}} portfolio={{.portfolio}}{{end}}{{if .symbols}} symbols={{.symbols}}{{end}}{{if .signals}} signals={{.signals}}{{end}}{{if .pairs}} pairs={{.pairs}}{{end}}{{if .mode}} mode={{.mode}}{{end}}{{if .error}} error={{.error}}{{end}}\"",
           "refId": "A"
         }
       ]
@@ -280,5 +790,5 @@
   "timezone": "browser",
   "title": "Trading Brain",
   "uid": "trading-brain-main",
-  "version": 1
+  "version": 2
 }

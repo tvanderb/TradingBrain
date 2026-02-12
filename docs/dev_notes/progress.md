@@ -2359,3 +2359,52 @@ No centralized dashboard for monitoring fund health, system performance, or hist
 - **VPS rebuilt**: Previous VPS SSH locked out (no console paste), rebuilt fresh Hetzner instance
 
 **Tests: 174/174 passing** (+3 new tests)
+
+## Session O (2026-02-12) — Grafana Dashboard Overhaul & Metrics Expansion
+
+### Goal
+Expand the `/metrics` Prometheus endpoint from 13 gauges to 41 gauges and overhaul the Grafana dashboard from 12 panels to 53 panels across 8 rows.
+
+### Changes
+
+**Phase 1: Metrics Expansion (`src/api/metrics.py`)**
+- Added 28 new Prometheus gauges:
+  - **21 truth benchmark gauges**: total return %, win rate, trade count, wins/losses, net P&L, fees, avg win/loss, expectancy, profit factor, Sharpe/Sortino ratios, max drawdown, avg duration, best/worst trade %, signal act rate, total signals/scans, strategy version count
+  - **3 AI gauges**: daily cost, tokens used, token budget %
+  - **4 system/scan gauges**: scan age seconds, uptime seconds, per-symbol prices (labeled), portfolio allocation %
+- Added truth benchmark cache (5-minute TTL via `time.monotonic()`) to avoid repeated DB queries on 30s Prometheus scrapes
+- Profit factor infinity guard: `float("inf")` → 0 for Prometheus compatibility
+
+**Phase 2: Scan Timing (`src/main.py`)**
+- Added `last_scan_at` key (UTC datetime) alongside existing `last_scan` HH:MM:SS string — non-breaking, enables scan age calculation in metrics handler
+
+**Phase 3: Orchestrator Structlog (`src/orchestrator/orchestrator.py`)**
+- `_store_thought()`: Emits `orchestrator.thought_stored` with step, model, display (summary), detail (full JSON). Code generation steps show `[GENERATED CODE]` placeholder.
+- `_store_observation()`: Emits `orchestrator.observation_stored` with cycle_id, market summary (300 chars), strategy assessment (300 chars)
+- These appear in Loki and are filterable in the new Orchestrator Spool Grafana panel
+
+**Phase 4: Dashboard Overhaul (`monitoring/grafana/.../trading-brain.json`)**
+- **Row 1 — Fund Overview** (7 panels): Portfolio+Peak timeseries, Cash, Total Return, Net P&L, Positions, Drawdown gauge, Halted
+- **Row 2 — Performance** (12 panels): Win Rate gauge, Trade Count, Profit Factor, Sharpe, Sortino, Expectancy, Wins, Losses, Best/Worst Trade, Avg Duration, All-Time Fees
+- **Row 3 — Risk & Daily** (7 panels): Daily P&L timeseries, Daily Trades, Consecutive Losses, Fees Today, Max Drawdown, Signal Act Rate, Allocation
+- **Row 4 — AI & System** (6 panels): AI Cost, Tokens Used, Token Budget gauge, Strategy Versions, Total Scans, Scan Age
+- **Row 5 — Market Prices** (9 panels): Per-symbol sparkline stats (BTC, ETH, SOL, XRP, DOGE, ADA, LINK, AVAX, DOT)
+- **Row 6 — Positions** (2 panels): Position Values table, Position P&L barchart
+- **Row 7 — Orchestrator Spool** (1 panel): Loki log panel filtering `orchestrator.*` events with `enableLogDetails: true`
+- **Row 8 — Application Logs** (1 panel): Full Loki log panel (unchanged query)
+- Dashboard version bumped to 2
+
+**Tests**
+- 5 new tests: truth benchmarks, AI usage, symbol prices, uptime, scan age
+- All follow existing pattern (TestClient + TestServer + temp DB)
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/api/metrics.py` | REWRITE (28 new gauges + truth cache) |
+| `src/main.py` | MODIFY (+1 line: `last_scan_at`) |
+| `src/orchestrator/orchestrator.py` | MODIFY (+2 structlog emissions) |
+| `monitoring/grafana/.../trading-brain.json` | REWRITE (53 panels, 8 rows) |
+| `tests/test_integration.py` | MODIFY (+5 new tests) |
+
+**Tests: 179/179 passing** (+5 new tests)

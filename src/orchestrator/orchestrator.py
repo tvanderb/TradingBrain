@@ -435,6 +435,18 @@ class Orchestrator:
                 ),
             )
             await self._db.commit()
+
+            # Emit to structlog for Loki/Grafana spool
+            if step == "generate" or step.startswith("code_gen") or step.startswith("analysis_gen"):
+                display = "[GENERATED CODE]"
+            elif parsed_result:
+                display = str(parsed_result)[:500]
+            else:
+                display = (full_response or "")[:500]
+            log.info("orchestrator.thought_stored",
+                     step=step, model=model,
+                     display=display,
+                     detail=json.dumps(parsed_result, default=str) if parsed_result else "")
         except Exception as e:
             log.warning("orchestrator.store_thought_failed", step=step, error=str(e))
 
@@ -1413,7 +1425,12 @@ The orchestrator wants to change this module because: {changes[:500]}"""
                 "DELETE FROM orchestrator_thoughts WHERE created_at < datetime('now', '-30 days')"
             )
             await self._db.commit()
-            log.info("orchestrator.observation_stored", cycle_id=self._cycle_id)
+            market_summary = decision.get("market_observations", "")
+            strategy_assessment = decision.get("reasoning", "")
+            log.info("orchestrator.observation_stored",
+                     cycle_id=self._cycle_id,
+                     market=market_summary[:300] if market_summary else "",
+                     assessment=strategy_assessment[:300] if strategy_assessment else "")
         except Exception as e:
             log.warning("orchestrator.observation_store_failed", error=str(e))
 
