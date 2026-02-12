@@ -158,17 +158,17 @@ class AIClient:
 
         return text
 
-    async def ask_opus(self, prompt: str, system: str = "", max_tokens: int = 4096, purpose: str = "") -> str:
+    async def ask_opus(self, prompt: str, system: str = "", max_tokens: int = 16384, purpose: str = "") -> str:
         """Shortcut for Opus model calls."""
         return await self.ask(prompt, model=self._config.opus_model, system=system,
                               max_tokens=max_tokens, purpose=purpose)
 
-    async def ask_sonnet(self, prompt: str, system: str = "", max_tokens: int = 8192, purpose: str = "") -> str:
+    async def ask_sonnet(self, prompt: str, system: str = "", max_tokens: int = 16384, purpose: str = "") -> str:
         """Shortcut for Sonnet model calls."""
         return await self.ask(prompt, model=self._config.sonnet_model, system=system,
                               max_tokens=max_tokens, purpose=purpose)
 
-    async def ask_haiku(self, prompt: str, system: str = "", max_tokens: int = 1000, purpose: str = "") -> str:
+    async def ask_haiku(self, prompt: str, system: str = "", max_tokens: int = 4096, purpose: str = "") -> str:
         """Shortcut for Haiku model calls."""
         return await self.ask(prompt, model=self._config.haiku_model, system=system,
                               max_tokens=max_tokens, purpose=purpose)

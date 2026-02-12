@@ -427,7 +427,7 @@ class Orchestrator:
                     self._cycle_id,
                     step,
                     model,
-                    (input_summary[:500] if input_summary else None),
+                    input_summary,
                     full_response,
                     json.dumps(parsed_result, default=str)
                     if parsed_result is not None
@@ -440,9 +440,9 @@ class Orchestrator:
             if step == "generate" or step.startswith("code_gen") or step.startswith("analysis_gen"):
                 display = "[GENERATED CODE]"
             elif parsed_result:
-                display = str(parsed_result)[:500]
+                display = str(parsed_result)
             else:
-                display = (full_response or "")[:500]
+                display = full_response or ""
             log.info("orchestrator.thought_stored",
                      step=step, model=model,
                      display=display,
@@ -821,19 +821,19 @@ Respond in JSON format."""
         )
 
         response = await self._ai.ask_opus(
-            prompt, system=system_prompt, max_tokens=2048, purpose="nightly_analysis"
+            prompt, system=system_prompt, purpose="nightly_analysis"
         )
 
         # Parse JSON from response
         parsed = self._extract_json(response)
         if parsed is None:
-            log.warning("orchestrator.json_parse_failed", response=response[:200])
+            log.warning("orchestrator.json_parse_failed", response=response)
             parsed = {
                 "decision": "NO_CHANGE",
                 "reasoning": "Failed to parse analysis response",
             }
 
-        await self._store_thought("analysis", "opus", prompt[:500], response, parsed)
+        await self._store_thought("analysis", "opus", prompt, response, parsed)
         return parsed
 
     async def _execute_change(self, decision: dict, context: dict) -> str:
@@ -917,11 +917,10 @@ Generate the complete strategy.py file."""
             code = await self._ai.ask_sonnet(
                 gen_prompt,
                 system=CODE_GEN_SYSTEM,
-                max_tokens=8192,
                 purpose=f"code_gen_attempt_{attempt + 1}",
             )
             await self._store_thought(
-                f"code_gen_{attempt + 1}", "sonnet", gen_prompt[:500], code
+                f"code_gen_{attempt + 1}", "sonnet", gen_prompt, code
             )
 
             # Strip markdown code fences if present
@@ -971,7 +970,6 @@ Is this classification correct?
             review_response = await self._ai.ask_opus(
                 review_prompt,
                 system=CODE_REVIEW_SYSTEM,
-                max_tokens=1024,
                 purpose=f"code_review_attempt_{attempt + 1}",
             )
 
@@ -982,7 +980,7 @@ Is this classification correct?
             await self._store_thought(
                 f"code_review_{attempt + 1}",
                 "opus",
-                review_prompt[:500],
+                review_prompt,
                 review_response,
                 review,
             )
@@ -1030,9 +1028,9 @@ Is this classification correct?
                         parent_version,
                         code_hash,
                         actual_tier,
-                        changes[:500],
-                        backtest_summary[:500],
-                        decision.get("market_observations", "")[:500],
+                        changes,
+                        backtest_summary,
+                        decision.get("market_observations", ""),
                         code,
                     ),
                 )
@@ -1064,7 +1062,7 @@ Is this classification correct?
 
                 return (
                     f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"
-                    f"Changes: {changes[:200]}"
+                    f"Changes: {changes}"
                 )
             else:
                 feedback = review.get("feedback", "No feedback")
@@ -1194,13 +1192,12 @@ Generate the complete {module_name}.py file."""
             code = await self._ai.ask_sonnet(
                 gen_prompt,
                 system=ANALYSIS_CODE_GEN_SYSTEM,
-                max_tokens=8192,
                 purpose=f"analysis_gen_{module_name}_attempt_{attempt + 1}",
             )
             await self._store_thought(
                 f"analysis_gen_{module_name}_{attempt + 1}",
                 "sonnet",
-                gen_prompt[:500],
+                gen_prompt,
                 code,
             )
 
@@ -1229,12 +1226,11 @@ Generate the complete {module_name}.py file."""
 {code}
 ```
 
-The orchestrator wants to change this module because: {changes[:500]}"""
+The orchestrator wants to change this module because: {changes}"""
 
             review_response = await self._ai.ask_opus(
                 review_prompt,
                 system=ANALYSIS_REVIEW_SYSTEM,
-                max_tokens=1024,
                 purpose=f"analysis_review_{module_name}_attempt_{attempt + 1}",
             )
 
@@ -1245,7 +1241,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             await self._store_thought(
                 f"analysis_review_{module_name}_{attempt + 1}",
                 "opus",
-                review_prompt[:500],
+                review_prompt,
                 review_response,
                 review,
             )
@@ -1264,7 +1260,7 @@ The orchestrator wants to change this module because: {changes[:500]}"""
 
                 return (
                     f"Analysis module '{module_name}' updated ({version}).\n"
-                    f"Changes: {changes[:200]}"
+                    f"Changes: {changes}"
                 )
             else:
                 feedback = review.get("feedback", "No feedback")
@@ -1429,8 +1425,8 @@ The orchestrator wants to change this module because: {changes[:500]}"""
             strategy_assessment = decision.get("reasoning", "")
             log.info("orchestrator.observation_stored",
                      cycle_id=self._cycle_id,
-                     market=market_summary[:300] if market_summary else "",
-                     assessment=strategy_assessment[:300] if strategy_assessment else "")
+                     market=market_summary or "",
+                     assessment=strategy_assessment or "")
         except Exception as e:
             log.warning("orchestrator.observation_store_failed", error=str(e))
 
