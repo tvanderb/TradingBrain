@@ -2415,6 +2415,11 @@ Expand the `/metrics` Prometheus endpoint from 13 gauges to 41 gauges and overha
 - All 4 services confirmed running: trading-brain, Prometheus, Loki, Grafana
 - Grafana auto-querying Loki every 30s with new dashboard panels — all `status=ok`
 
+### Post-Deploy Fixes
+- **Trade qty display**: `:.4f` → `:.8f` in `_format_activity()` — BTC trades at small capital showed `0.0000` (4 decimals insufficient for satoshi-level quantities)
+- **Fees lost on restart**: `_fees_today` was initialized to `0.0` and never restored from DB. Added restoration in `portfolio.initialize()` — sums `trades.fees` for today's closed trades + `positions.entry_fee` for positions opened today. Follows same pattern as `risk.initialize()` counter restoration.
+
 ### Gotchas
 - **Prometheus `float("inf")`**: Gauge `.set()` can't hold infinity — profit factor mapped to 0 when infinite (wins with no losses)
 - **Truth cache cross-test contamination**: New metrics tests must clear `_truth_cache` in setup/teardown to avoid stale data from previous tests
+- **`_fees_today` not surviving restarts**: Unlike risk counters, portfolio fees had no DB restoration — showed $0.00 after container restart even when trades occurred

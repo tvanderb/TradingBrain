@@ -156,3 +156,11 @@ while running:
 ## Truth cache cross-test contamination (O2)
 **Problem**: Metrics tests that insert trades into temp DBs share the module-level `_truth_cache` dict. A stale cache from a prior test causes assertions to fail.
 **Fix**: Clear `_truth_cache["data"] = None` in both setup and teardown of each metrics test.
+
+## _fees_today lost on restart (O3)
+**Problem**: `portfolio._fees_today` initialized to `0.0` at startup with no DB restoration. Container restart wipes the counter — Grafana "Fees Today" shows $0.0000 even after trades.
+**Fix**: Restore in `portfolio.initialize()` by summing `trades.fees` for today's closed trades + `positions.entry_fee` for positions opened today (same timezone-aware boundary as risk counter restoration).
+
+## Trade quantity display too few decimals (O4)
+**Problem**: Activity log formatted qty with `:.4f` — BTC trades with small capital (e.g., $5 at $67K = 0.0000743 BTC) displayed as `0.0000`.
+**Fix**: Changed to `:.8f` (satoshi-level precision) in `_format_activity()` in `notifications.py`.
