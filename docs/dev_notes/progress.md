@@ -2408,3 +2408,13 @@ Expand the `/metrics` Prometheus endpoint from 13 gauges to 41 gauges and overha
 | `tests/test_integration.py` | MODIFY (+5 new tests) |
 
 **Tests: 179/179 passing** (+5 new tests)
+
+### Deployment
+- Committed as `d6e7c3b`
+- Deployed via Ansible (`playbook.yml --tags "sync,build,start,verify"`)
+- All 4 services confirmed running: trading-brain, Prometheus, Loki, Grafana
+- Grafana auto-querying Loki every 30s with new dashboard panels — all `status=ok`
+
+### Gotchas
+- **Prometheus `float("inf")`**: Gauge `.set()` can't hold infinity — profit factor mapped to 0 when infinite (wins with no losses)
+- **Truth cache cross-test contamination**: New metrics tests must clear `_truth_cache` in setup/teardown to avoid stale data from previous tests

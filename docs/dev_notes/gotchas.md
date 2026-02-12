@@ -148,3 +148,11 @@ while running:
 ## UFW SSH lockout on fresh deploy (N5)
 **Problem**: Deployment playbook had firewall rules for ports 80, 443, 3000 but not 22. On a fresh VPS where `setup.yml` set the initial rules, subsequent `playbook.yml` runs could interact with UFW without ensuring SSH is allowed.
 **Fix**: Added explicit `ufw allow 22/tcp` rule to `playbook.yml`, placed before all other firewall rules.
+
+## Prometheus gauge can't hold infinity (O1)
+**Problem**: `profit_factor` can be `float("inf")` when there are wins but no losses. Calling `gauge.set(float("inf"))` silently produces invalid Prometheus output.
+**Fix**: Guard with `pf if pf != float("inf") else 0` before setting the gauge.
+
+## Truth cache cross-test contamination (O2)
+**Problem**: Metrics tests that insert trades into temp DBs share the module-level `_truth_cache` dict. A stale cache from a prior test causes assertions to fail.
+**Fix**: Clear `_truth_cache["data"] = None` in both setup and teardown of each metrics test.
