@@ -30,8 +30,10 @@ region = "us-east5"
 start_hour = 3               # 3:30 AM EST
 start_minute = 30
 end_hour = 6                 # 6:00 AM EST
-# Max revision cycles per night
+# Max code quality iterations per strategy attempt
 max_revisions = 3
+# Max strategy direction iterations (Opus redirects)
+max_strategy_iterations = 3
 min_paper_test_trades = 5
 
 [telegram]

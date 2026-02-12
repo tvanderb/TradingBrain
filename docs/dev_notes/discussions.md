@@ -1357,3 +1357,27 @@ Full awareness update required:
 - Risk limits are emergency backstops, not operational constraints
 - One conditional close per entry (no native OCO — system manages cancel-other)
 - Paper mode simulates everything; live mode places real orders
+
+---
+
+## Session S — Bootstrap Backfill + Orchestrator Loop Redesign
+
+### Problem Statement
+After the first live orchestration cycle (Session R), two structural issues:
+
+1. **Shallow data**: Bootstrap thresholds were too low — 1h skipped at 200 candles (~8 days), 1d at 30 candles (~1 month). The backtester only had ~30 days to work with. Need deeper data for more market regime coverage.
+
+2. **Flat retry loop**: When Opus rejected backtest results, the rejection text was appended to Sonnet's prompt and the same flat loop continued. Opus never re-analyzed — just accumulated error text in Sonnet's context. This doesn't match the "hedge fund manager directing a developer" mental model.
+
+### Design Discussion
+- User wants Opus to be the **central decision-maker** — it directs Sonnet, evaluates results, and either deploys or provides fresh strategic direction.
+- Key insight: code quality failures (sandbox, review) are different from strategic failures (bad backtest results). Mixing them in one loop muddies responsibilities.
+- Solution: **nested loops** — inner handles code quality (Sonnet iterates), outer handles strategy direction (Opus redirects).
+- Opus's `revision_instructions` **replace** the changes (fresh direction), not append. This prevents prompt bloat and gives Sonnet a clean starting point.
+- `attempt_history` shows Opus what's been tried so it can meaningfully redirect rather than repeating the same approach.
+
+### Key Design Choices
+- Inner loop exhaustion returns immediately (code quality failure is terminal for that cycle)
+- Backtest crash feeds into outer loop (Opus can redirect around the crash)
+- `original_changes` preserved so Opus's revision always references the original goal
+- Bootstrap thresholds aligned with retention windows and backtester request sizes

@@ -6990,3 +6990,135 @@ def test_backtester_result_date_metadata():
     assert result.total_days >= 4  # 100 hours ≈ 4 days
     # summary() should include period info
     assert "Period:" in result.summary()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_outer_loop_iterates():
+    """Outer loop: Opus rejects backtest on first iteration with revision_instructions,
+    approves on second iteration. Verifies nested loop structure."""
+    from src.orchestrator.orchestrator import Orchestrator
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 500
+        ai.get_daily_usage = AsyncMock(return_value={
+            "used": 500, "daily_limit": 1500000, "total_cost": 0.02, "models": {}
+        })
+
+        # Minimal valid strategy code that passes sandbox
+        valid_code = '''
+from src.shell.contract import StrategyBase, Signal, RiskLimits
+
+class Strategy(StrategyBase):
+    """Test strategy."""
+    def initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None:
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+
+        # Sonnet always returns valid code
+        ai.ask_sonnet = AsyncMock(return_value=valid_code)
+
+        # Track Opus call count to return different responses
+        opus_call_count = 0
+
+        async def mock_ask_opus(prompt, system="", purpose=""):
+            nonlocal opus_call_count
+            opus_call_count += 1
+            # Call 1: nightly analysis — STRATEGY_TWEAK decision
+            if purpose == "nightly_analysis":
+                return json.dumps({
+                    "decision": "STRATEGY_TWEAK",
+                    "risk_tier": 1,
+                    "reasoning": "Need to adjust parameters",
+                    "specific_changes": "Increase RSI threshold",
+                    "cross_reference_findings": "",
+                    "market_observations": "BTC trending up",
+                })
+            # Code reviews — always approve
+            if "code_review" in purpose:
+                return json.dumps({
+                    "approved": True,
+                    "issues": [],
+                    "risk_tier_correct": True,
+                    "suggested_tier": 1,
+                    "feedback": "Looks good",
+                })
+            # Backtest reviews — reject first, approve second
+            if purpose == "backtest_review":
+                # Check if attempt_history is mentioned (indicates second attempt)
+                if "rejected" in prompt:
+                    return json.dumps({
+                        "deploy": True,
+                        "reasoning": "Second attempt shows improvement",
+                        "concerns": [],
+                        "revision_instructions": "",
+                    })
+                else:
+                    return json.dumps({
+                        "deploy": False,
+                        "reasoning": "Win rate too low",
+                        "concerns": ["Need better entry criteria"],
+                        "revision_instructions": "Switch to EMA crossover with volatility filter",
+                    })
+            return "{}"
+
+        ai.ask_opus = AsyncMock(side_effect=mock_ask_opus)
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+
+        # Patch _run_backtest to return a passing result without needing real data
+        mock_bt_result = MagicMock()
+        mock_bt_result.summary.return_value = "Trades: 10, Net P&L: $5.00"
+        mock_bt_result.detailed_summary.return_value = "Detailed: Trades: 10, Net P&L: $5.00, Win rate: 60%"
+
+        with patch.object(orch, "_run_backtest", new_callable=AsyncMock) as mock_bt:
+            mock_bt.return_value = (True, "Trades: 10, Net P&L: $5.00", mock_bt_result)
+            report = await orch.run_nightly_cycle()
+
+        # Should have deployed successfully after second outer iteration
+        assert "deployed" in report.lower()
+
+        # ask_sonnet called at least twice (once per outer iteration)
+        assert ai.ask_sonnet.call_count >= 2
+
+        # Backtest ran twice (once per outer iteration)
+        assert mock_bt.call_count == 2
+
+        # Verify thought spool has entries for both iterations
+        thoughts = await db.fetchall(
+            "SELECT step FROM orchestrator_thoughts WHERE cycle_id = ? ORDER BY id",
+            (orch._cycle_id,),
+        )
+        thought_steps = [t["step"] for t in thoughts]
+        # Should have code_gen and code_review for at least 2 outer iterations
+        assert any("o1" in s for s in thought_steps)
+        assert any("o2" in s for s in thought_steps)
+        # Should have 2 backtest reviews
+        bt_reviews = [s for s in thought_steps if s == "backtest_review"]
+        assert len(bt_reviews) == 2
+
+        # Strategy version was deployed
+        ver = await db.fetchone(
+            "SELECT version, description FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
+        )
+        assert ver is not None
+        # Description should contain revision instructions from Opus
+        assert "Revision from fund manager" in ver["description"]
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)

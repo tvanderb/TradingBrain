@@ -96,7 +96,10 @@ You operate within a rigid shell (Kraken exchange client, risk manager, portfoli
 
 ### Your Decisions and Their Consequences
 
-**Strategy changes** trigger a pipeline: Sonnet generates code → Opus reviews → sandbox validates → backtest → you review backtest results → paper test → deploy.
+**Strategy changes** trigger a two-loop pipeline:
+- **Inner loop** (code quality): You direct changes → Sonnet generates code → sandbox validates → you review code quality. Up to 3 iterations to get clean code.
+- **Outer loop** (strategy direction): Clean code is backtested → you review results → deploy OR provide fresh strategic direction for another attempt. Up to 3 strategy iterations.
+After backtesting, you will see the full results and previous attempt history. If you reject, provide specific revision instructions — these replace (not append to) the previous direction, giving Sonnet a fresh starting point.
 - **NO_CHANGE** (tier 0): Data keeps accumulating. Active paper tests continue.
 - **STRATEGY_TWEAK** (tier 1): Targeted changes, 1-day paper test. Any active paper test on the previous version terminates and its data becomes incomplete.
 - **STRATEGY_RESTRUCTURE** (tier 2): Logic changes, 2-day paper test. Same consequences.
@@ -136,8 +139,6 @@ Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_
 
 ### Backtester Capabilities and Limitations
 The backtester runs against all available historical data: 5m (30 days), 1h (up to 1 year), 1d (up to 7 years). It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5m resolution where available for intra-hour precision.
-
-After backtesting, you will see the full results and decide whether to deploy to paper testing.
 
 What the backtester does:
 - Simulates MARKET orders with configurable slippage and taker fees.
@@ -290,7 +291,7 @@ These are simulation results — deterministic computation on a simplified marke
 **Deployment context:**
 - Approving means the strategy enters paper testing (simulated trading with live prices)
 - Paper testing is NOT live trading — no real money at risk
-- Rejecting sends the strategy back for revision
+- Rejecting sends the strategy back for revision with your new direction
 
 **Consider:**
 - Trade count vs statistical significance (few trades = unreliable metrics)
@@ -299,11 +300,17 @@ These are simulation results — deterministic computation on a simplified marke
 - Fee drag relative to gross P&L
 - Whether the results suggest a real edge or noise
 
+**If rejecting:** Provide specific, actionable revision instructions. Don't just say what's wrong —
+say what to try differently. You are the fund manager directing a developer.
+Examples: "Switch from momentum to mean reversion", "Add a volatility filter to reduce false signals",
+"The entry criteria are too loose — require confirmation from multiple timeframes."
+
 Respond in JSON:
 {
     "deploy": true | false,
     "reasoning": "Your analysis of the backtest results and why you chose to deploy or reject",
-    "concerns": ["Any concerns worth noting even if deploying"]
+    "concerns": ["Any concerns worth noting even if deploying"],
+    "revision_instructions": "If rejecting: specific new direction for the next attempt. If deploying: empty string."
 }"""
 
 ANALYSIS_CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading analysis module.
@@ -874,13 +881,19 @@ Respond in JSON format."""
         return parsed
 
     async def _execute_change(self, decision: dict, context: dict) -> str:
-        """Execute a strategy change: generate -> review -> sandbox -> backtest."""
+        """Execute a strategy change with nested loops.
+
+        Outer loop (strategy direction): Opus evaluates backtest results and redirects.
+        Inner loop (code quality): Sonnet iterates on sandbox/review feedback.
+        """
         try:
             tier = max(1, min(3, int(decision.get("risk_tier", 1))))
         except (TypeError, ValueError):
             tier = 1
         changes = str(decision.get("specific_changes") or "")
-        max_revisions = self._config.orchestrator.max_revisions
+        original_changes = changes  # preserve Opus's original direction
+        max_inner = self._config.orchestrator.max_revisions
+        max_outer = self._config.orchestrator.max_strategy_iterations
 
         # Get parent version for lineage tracking
         current_ver = await self._db.fetchone(
@@ -888,28 +901,37 @@ Respond in JSON format."""
         )
         parent_version = current_ver["version"] if current_ver else None
 
-        for attempt in range(max_revisions):
-            # Sonnet generates code — tier 1 gets targeted edit instructions
-            # System constraints shared by both tier 1 and tier 2+ prompts
-            system_constraints = (
-                f"## System Constraints\n"
-                f"- Trading pairs: {', '.join(self._config.symbols)}\n"
-                f"- Long-only (no short selling, no leverage)\n"
-                f"- Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%\n"
-                f"- Default slippage: {self._config.default_slippage_factor * 100:.2f}%\n"
-                f"- Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio\n"
-                f"- Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio\n"
-                f"- Max positions: {self._config.risk.max_positions}\n"
-                f"- Max position per symbol: {self._config.risk.max_position_pct * 100:.0f}% of portfolio\n"
-                f"- SymbolData includes maker_fee_pct and taker_fee_pct per pair\n"
-                f"- Signal supports optional slippage_tolerance override (float)"
-            )
+        # System constraints shared by both tier 1 and tier 2+ prompts
+        system_constraints = (
+            f"## System Constraints\n"
+            f"- Trading pairs: {', '.join(self._config.symbols)}\n"
+            f"- Long-only (no short selling, no leverage)\n"
+            f"- Maker fee: {self._config.kraken.maker_fee_pct}% / Taker fee: {self._config.kraken.taker_fee_pct}%\n"
+            f"- Default slippage: {self._config.default_slippage_factor * 100:.2f}%\n"
+            f"- Max trade size: {self._config.risk.max_trade_pct * 100:.0f}% of portfolio\n"
+            f"- Default trade size: {self._config.risk.default_trade_pct * 100:.0f}% of portfolio\n"
+            f"- Max positions: {self._config.risk.max_positions}\n"
+            f"- Max position per symbol: {self._config.risk.max_position_pct * 100:.0f}% of portfolio\n"
+            f"- SymbolData includes maker_fee_pct and taker_fee_pct per pair\n"
+            f"- Signal supports optional slippage_tolerance override (float)"
+        )
 
-            if tier == 1:
-                gen_prompt = f"""Make targeted changes to the existing trading strategy.
+        attempt_history = []  # tracks outer iterations for Opus awareness
+
+        for outer in range(max_outer):
+            # === INNER LOOP: Sonnet writes clean code ===
+            approved_code = None
+            diff = None
+            actual_tier = tier
+            inner_changes = changes  # reset inner feedback each outer iteration
+
+            for inner in range(max_inner):
+                # Sonnet generates code — tier 1 gets targeted edit instructions
+                if tier == 1:
+                    gen_prompt = f"""Make targeted changes to the existing trading strategy.
 
 ## Change Request
-{changes}
+{inner_changes}
 
 ## IMPORTANT: This is a tier 1 tweak — make minimal, targeted changes only.
 - Modify ONLY the specific parameters, thresholds, or logic described above.
@@ -930,11 +952,11 @@ Respond in JSON format."""
 {system_constraints}
 
 Output the complete strategy.py file with your targeted changes applied."""
-            else:
-                gen_prompt = f"""Generate a new trading strategy based on these requirements:
+                else:
+                    gen_prompt = f"""Generate a new trading strategy based on these requirements:
 
 ## Change Request
-{changes}
+{inner_changes}
 
 ## Current Strategy (for reference)
 ```python
@@ -951,43 +973,44 @@ Output the complete strategy.py file with your targeted changes applied."""
 
 Generate the complete strategy.py file."""
 
-            code = await self._ai.ask_sonnet(
-                gen_prompt,
-                system=CODE_GEN_SYSTEM,
-                purpose=f"code_gen_attempt_{attempt + 1}",
-            )
-            await self._store_thought(
-                f"code_gen_{attempt + 1}", "sonnet", gen_prompt, code
-            )
-
-            # Strip markdown code fences if present
-            fence_match = re.search(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
-            if fence_match:
-                code = fence_match.group(1)
-            code = code.strip()
-
-            # Sandbox validation
-            sandbox_result = validate_strategy(code)
-            if not sandbox_result.passed:
-                log.warning(
-                    "orchestrator.sandbox_failed",
-                    attempt=attempt + 1,
-                    errors=sandbox_result.errors,
+                code = await self._ai.ask_sonnet(
+                    gen_prompt,
+                    system=CODE_GEN_SYSTEM,
+                    purpose=f"code_gen_outer{outer + 1}_inner{inner + 1}",
                 )
-                changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
-                continue
-
-            # Generate diff for reviewer context
-            old_lines = context["strategy_code"].splitlines(keepends=True)
-            new_lines = code.splitlines(keepends=True)
-            diff = "".join(
-                difflib.unified_diff(
-                    old_lines, new_lines, fromfile="current", tofile="proposed", n=3
+                await self._store_thought(
+                    f"code_gen_o{outer + 1}_i{inner + 1}", "sonnet", gen_prompt, code
                 )
-            )
 
-            # Opus code review — includes diff for change context
-            review_prompt = f"""Review this trading strategy code for correctness and safety.
+                # Strip markdown code fences if present
+                fence_match = re.search(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
+                if fence_match:
+                    code = fence_match.group(1)
+                code = code.strip()
+
+                # Sandbox validation
+                sandbox_result = validate_strategy(code)
+                if not sandbox_result.passed:
+                    log.warning(
+                        "orchestrator.sandbox_failed",
+                        outer=outer + 1,
+                        inner=inner + 1,
+                        errors=sandbox_result.errors,
+                    )
+                    inner_changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
+                    continue
+
+                # Generate diff for reviewer context
+                old_lines = context["strategy_code"].splitlines(keepends=True)
+                new_lines = code.splitlines(keepends=True)
+                diff = "".join(
+                    difflib.unified_diff(
+                        old_lines, new_lines, fromfile="current", tofile="proposed", n=3
+                    )
+                )
+
+                # Opus code review — includes diff for change context
+                review_prompt = f"""Review this trading strategy code for correctness and safety.
 
 ## Changes from current strategy (diff)
 ```diff
@@ -1004,58 +1027,71 @@ Is this classification correct?
 
 {json.dumps(decision, indent=2, default=str)}"""
 
-            review_response = await self._ai.ask_opus(
-                review_prompt,
-                system=CODE_REVIEW_SYSTEM,
-                purpose=f"code_review_attempt_{attempt + 1}",
+                review_response = await self._ai.ask_opus(
+                    review_prompt,
+                    system=CODE_REVIEW_SYSTEM,
+                    purpose=f"code_review_outer{outer + 1}_inner{inner + 1}",
+                )
+
+                review = self._extract_json(review_response)
+                if review is None:
+                    review = {"approved": False, "feedback": "Failed to parse review"}
+
+                await self._store_thought(
+                    f"code_review_o{outer + 1}_i{inner + 1}",
+                    "opus",
+                    review_prompt,
+                    review_response,
+                    review,
+                )
+
+                if review.get("approved"):
+                    approved_code = code
+                    # Determine actual risk tier
+                    try:
+                        actual_tier = max(1, min(3, int(review.get("suggested_tier", tier))))
+                    except (TypeError, ValueError):
+                        actual_tier = tier
+                    break  # exit inner loop — code quality approved
+                else:
+                    feedback = review.get("feedback", "No feedback")
+                    issues = review.get("issues", [])
+                    log.warning(
+                        "orchestrator.review_rejected",
+                        outer=outer + 1,
+                        inner=inner + 1,
+                        feedback=feedback,
+                    )
+                    inner_changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
+
+            if approved_code is None:
+                log.warning("orchestrator.code_quality_exhausted", outer=outer + 1, max_inner=max_inner)
+                return f"Strategy change aborted: code quality failed after {max_inner} attempts."
+
+            # === BACKTEST the approved code ===
+            backtest_passed, backtest_summary, backtest_result = await self._run_backtest(approved_code)
+            if not backtest_passed:
+                log.warning(
+                    "orchestrator.backtest_failed",
+                    outer=outer + 1,
+                    summary=backtest_summary,
+                )
+                attempt_history.append({
+                    "attempt": outer + 1,
+                    "outcome": "backtest_crash",
+                    "summary": backtest_summary,
+                })
+                changes = f"Original goal: {original_changes}\n\nPrevious attempt crashed during backtest: {backtest_summary}. Try a different approach."
+                continue
+
+            # === OPUS REVIEWS BACKTEST ===
+            bt_review = await self._review_backtest(
+                backtest_result, backtest_summary, decision, diff, attempt_history
             )
 
-            review = self._extract_json(review_response)
-            if review is None:
-                review = {"approved": False, "feedback": "Failed to parse review"}
-
-            await self._store_thought(
-                f"code_review_{attempt + 1}",
-                "opus",
-                review_prompt,
-                review_response,
-                review,
-            )
-
-            if review.get("approved"):
-                # Determine actual risk tier
-                try:
-                    actual_tier = max(1, min(3, int(review.get("suggested_tier", tier))))
-                except (TypeError, ValueError):
-                    actual_tier = tier
+            if bt_review.get("deploy", False):
+                # === DEPLOY ===
                 paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
-
-                # Backtest against historical data
-                backtest_passed, backtest_summary, backtest_result = await self._run_backtest(code)
-                if not backtest_passed:
-                    log.warning(
-                        "orchestrator.backtest_failed", summary=backtest_summary
-                    )
-                    changes += (
-                        f"\n\nBacktest failed: {backtest_summary}. Adjust the strategy."
-                    )
-                    continue
-
-                # Opus reviews backtest results — decides deploy or reject
-                bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff)
-                if not bt_review.get("deploy", False):
-                    reasoning = bt_review.get("reasoning", "No reasoning provided")
-                    concerns = bt_review.get("concerns", [])
-                    log.warning(
-                        "orchestrator.backtest_review_rejected",
-                        reasoning=reasoning,
-                        concerns=concerns,
-                    )
-                    changes += (
-                        f"\n\nBacktest review rejected: {reasoning}. "
-                        f"Concerns: {concerns}. Adjust the strategy."
-                    )
-                    continue
 
                 # Terminate any running paper tests (superseded by new strategy)
                 await self._terminate_running_paper_tests("superseded by new deploy")
@@ -1069,7 +1105,7 @@ Is this classification correct?
 
                 # Deploy to active
                 version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                code_hash = deploy_strategy(code, version)
+                code_hash = deploy_strategy(approved_code, version)
 
                 # Record in strategy index with parent version lineage + source code (L4 fallback)
                 await self._db.execute(
@@ -1084,7 +1120,7 @@ Is this classification correct?
                         changes,
                         backtest_summary,
                         decision.get("market_observations", ""),
-                        code,
+                        approved_code,
                     ),
                 )
 
@@ -1115,17 +1151,31 @@ Is this classification correct?
                     f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"
                     f"Changes: {changes}"
                 )
-            else:
-                feedback = review.get("feedback", "No feedback")
-                issues = review.get("issues", [])
-                log.warning(
-                    "orchestrator.review_rejected",
-                    attempt=attempt + 1,
-                    feedback=feedback,
-                )
-                changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
 
-        return f"Strategy change aborted after {max_revisions} failed attempts."
+            # Opus rejected — record history, use fresh direction
+            reasoning = bt_review.get("reasoning", "No reasoning provided")
+            concerns = bt_review.get("concerns", [])
+            revision = bt_review.get("revision_instructions", "")
+            attempt_history.append({
+                "attempt": outer + 1,
+                "outcome": "rejected",
+                "backtest_summary": backtest_summary,
+                "reasoning": reasoning,
+            })
+
+            log.info(
+                "orchestrator.strategy_iteration",
+                outer=outer + 1,
+                reasoning=reasoning,
+            )
+
+            # Fresh direction from Opus replaces accumulated feedback
+            if revision:
+                changes = f"Original goal: {original_changes}\n\nRevision from fund manager (attempt {outer + 1}): {revision}"
+            else:
+                changes = f"{original_changes}\n\nPrevious backtest rejected: {reasoning}. Try a different approach."
+
+        return f"Strategy change aborted after {max_outer} strategy iterations."
 
     async def _terminate_running_paper_tests(self, reason: str = "superseded") -> int:
         """Terminate all running paper tests. Called before deploying a new strategy."""
@@ -1431,18 +1481,29 @@ The orchestrator wants to change this module because: {changes}"""
             sys.modules.pop("backtest_strategy", None)
 
     async def _review_backtest(
-        self, result: BacktestResult | None, summary: str, decision: dict, diff: str
+        self, result: BacktestResult | None, summary: str, decision: dict, diff: str,
+        attempt_history: list[dict] | None = None,
     ) -> dict:
         """Opus reviews backtest results and decides whether to deploy to paper test.
 
-        Returns parsed JSON with 'deploy' bool, 'reasoning', and 'concerns'.
+        Returns parsed JSON with 'deploy' bool, 'reasoning', 'concerns', and 'revision_instructions'.
         """
         if result is None:
             return {
                 "deploy": True,
                 "reasoning": "No historical data available — deploying to paper test for live evaluation.",
                 "concerns": ["No backtest data to evaluate"],
+                "revision_instructions": "",
             }
+
+        # Format attempt history so Opus sees what's been tried
+        if attempt_history:
+            history_text = "\n".join(
+                f"- Attempt {h['attempt']}: {h['outcome']} — {h.get('reasoning') or h.get('summary', '')}"
+                for h in attempt_history
+            )
+        else:
+            history_text = "This is the first attempt."
 
         review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to paper testing.
 
@@ -1455,7 +1516,10 @@ The orchestrator wants to change this module because: {changes}"""
 ## Code Diff
 ```diff
 {diff if diff else "(no textual diff)"}
-```"""
+```
+
+## Previous Attempts
+{history_text}"""
 
         response = await self._ai.ask_opus(
             review_prompt,
@@ -1465,7 +1529,7 @@ The orchestrator wants to change this module because: {changes}"""
 
         parsed = self._extract_json(response)
         if parsed is None:
-            parsed = {"deploy": False, "reasoning": "Failed to parse backtest review response", "concerns": []}
+            parsed = {"deploy": False, "reasoning": "Failed to parse backtest review response", "concerns": [], "revision_instructions": ""}
 
         await self._store_thought("backtest_review", "opus", review_prompt, response, parsed)
         return parsed

@@ -82,7 +82,8 @@ class OrchestratorConfig:
     start_hour: int = 3
     start_minute: int = 30
     end_hour: int = 6
-    max_revisions: int = 3
+    max_revisions: int = 3              # inner loop: code quality iterations
+    max_strategy_iterations: int = 3    # outer loop: Opus strategy direction
     min_paper_test_trades: int = 5
 
 
@@ -185,6 +186,7 @@ def load_config() -> Config:
         config.orchestrator.start_minute = orch.get("start_minute", config.orchestrator.start_minute)
         config.orchestrator.end_hour = orch.get("end_hour", config.orchestrator.end_hour)
         config.orchestrator.max_revisions = orch.get("max_revisions", config.orchestrator.max_revisions)
+        config.orchestrator.max_strategy_iterations = orch.get("max_strategy_iterations", config.orchestrator.max_strategy_iterations)
         config.orchestrator.min_paper_test_trades = max(1, orch.get("min_paper_test_trades", config.orchestrator.min_paper_test_trades))
 
         tg = settings.get("telegram", {})

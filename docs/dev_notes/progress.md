@@ -2507,3 +2507,37 @@ First live orchestration cycle (2026-02-12) revealed three problems:
 - `test_backtester_result_date_metadata`: Verifies single-TF mode populates start/end dates correctly
 
 **Tests: 185/185 passing** (+2 new tests)
+
+## Session S — Bootstrap Backfill + Orchestrator Loop Redesign
+
+### Context
+After Session R's first live orchestration cycle, two problems surfaced:
+1. **Shallow historical data**: Bootstrap skip thresholds too low — 1h skips at 200 candles (~8 days), 1d at 30 candles (~1 month). Backtester only works with ~30 days of data.
+2. **Flat retry loop**: When Opus rejects backtest results, rejection text is appended to Sonnet's prompt and the same flat loop continues. Opus never re-analyzes — just accumulates error text.
+
+### Changes
+
+**`src/main.py` — Bootstrap backfill thresholds:**
+- 5m: 1000 → 8000 (skip at ~28 days, close to 30d retention)
+- 1h: 200 → 8000 (skip at ~333 days, close to 1y retention)
+- 1d: 30 → 2000, lookback 365 → 2555 days (7 year lookback, skip at ~5.5 years)
+
+**`src/shell/config.py` — New config field:**
+- `OrchestratorConfig.max_strategy_iterations = 3` — outer loop limit
+- Wired in `load_config()` and `settings.example.toml`
+
+**`src/orchestrator/orchestrator.py` — Nested loop redesign:**
+- `_execute_change()` restructured: inner loop (code quality) + outer loop (strategy direction)
+- Inner loop: Sonnet generates → sandbox → Opus code review → break on approval
+- Outer loop: Backtest approved code → Opus reviews results → deploy or redirect
+- `attempt_history` tracks prior iterations — Opus sees what's been tried
+- `original_changes` preserved — Opus's `revision_instructions` replaces (not appends to) `changes`
+- `BACKTEST_REVIEW_SYSTEM` prompt: added `revision_instructions` field + guidance for rejections
+- `_review_backtest()`: new `attempt_history` parameter, "Previous Attempts" section in prompt
+- `LAYER_2_SYSTEM`: pipeline description updated to reflect two-loop structure
+- Structlog: `orchestrator.strategy_iteration` (outer redirect), `orchestrator.code_quality_exhausted` (inner exhausted)
+
+**`tests/test_integration.py`:**
+- `test_orchestrator_outer_loop_iterates`: Mocks 2 outer iterations (reject then approve), verifies call counts, thought spool, and deployment
+
+**Tests: 186/186 passing** (+1 new test)

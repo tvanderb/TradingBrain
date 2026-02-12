@@ -364,9 +364,9 @@ class TradingBrain:
         """
         # (timeframe_label, kraken_interval_minutes, lookback_days, min_threshold)
         timeframes = [
-            ("5m", 5, 30, 1000),
-            ("1h", 60, 365, 200),
-            ("1d", 1440, 365, 30),
+            ("5m", 5, 30, 8000),      # ~28 days — close to full 30d retention
+            ("1h", 60, 365, 8000),     # ~333 days — close to full 1y retention
+            ("1d", 1440, 2555, 2000),  # 7 year lookback, skip at ~5.5 years
         ]
 
         for symbol in self._config.symbols:

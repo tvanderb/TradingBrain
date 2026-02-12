@@ -389,7 +389,7 @@ Analyzes: trades, signals, portfolio snapshots
      "USER CONSTRAINTS (you cannot change this)"
 7. Opus analysis                     → decisions + reasoning
 8. Possible decisions (zero or more per cycle):
-     - STRATEGY_TWEAK / RESTRUCTURE / OVERHAUL → generate → review → backtest → deploy
+     - STRATEGY_TWEAK / RESTRUCTURE / OVERHAUL → nested loop pipeline (see below)
      - UPDATE_MARKET_ANALYSIS → generate → review (math focus) → deploy
      - UPDATE_TRADE_PERFORMANCE → generate → review (math focus) → deploy
      - NO_CHANGE
@@ -397,6 +397,30 @@ Analyzes: trades, signals, portfolio snapshots
 10. Data maintenance (aggregation, pruning)
 11. Send report via Telegram
 ```
+
+### Strategy Change Pipeline (Nested Loops)
+```
+OUTER LOOP (max_strategy_iterations=3): Opus directs strategy
+│
+├─ INNER LOOP (max_revisions=3): Sonnet writes clean code
+│  ├─ Sonnet generates code
+│  ├─ Sandbox validation → fail? append feedback, continue inner
+│  ├─ Opus code review   → fail? append feedback, continue inner
+│  └─ Approved? break inner
+│
+├─ If no code approved → return "code quality failed"
+│
+├─ Backtest approved code
+│  └─ Crash? record in attempt_history, continue outer
+│
+├─ Opus reviews backtest results (sees attempt_history)
+│  ├─ Deploy? → deploy + paper test → return success
+│  └─ Reject? → revision_instructions REPLACE changes → continue outer
+│
+└─ After max iterations → return "aborted"
+```
+
+Key: Opus's `revision_instructions` replace (not append to) the accumulated changes, giving Sonnet a fresh starting point. `attempt_history` shows Opus what's been tried.
 
 ### Database Schema (Key Tables)
 

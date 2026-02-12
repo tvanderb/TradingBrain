@@ -278,3 +278,13 @@
 ### Decision: Extended Config Validation (Session L, L6)
 - **What**: Validate timezone (`ZoneInfo`), symbol format (`/` + `USD`), trade size consistency (`default <= max_trade <= max_position`).
 - **Why**: Invalid config values previously caused silent runtime failures. Fail-fast on startup is cheaper than debugging a running system.
+
+### Decision: Nested Orchestrator Loops (Session S)
+- **What**: Replaced flat retry loop in `_execute_change()` with nested inner (code quality) + outer (strategy direction) loops.
+- **Why**: Flat loop treated all failures identically — sandbox errors, review rejections, and backtest rejections all just appended text to Sonnet's prompt. Opus never re-analyzed the strategic direction after seeing backtest results. The user's mental model: "Opus is the fund manager directing a developer" — it should evaluate results and redirect, not just accumulate error text.
+- **Design**: Inner loop (max_revisions=3) handles Sonnet → sandbox → Opus code review. Outer loop (max_strategy_iterations=3) handles backtest → Opus reviews results → deploy or provide `revision_instructions`. Opus's revision instructions replace (not append to) the accumulated changes, giving Sonnet a fresh starting point each outer iteration.
+- **Alternative considered**: Keep flat loop but have Opus re-analyze mid-loop. Rejected because separating code quality from strategic direction makes each loop's responsibility clear.
+
+### Decision: Deeper Bootstrap Backfill (Session S)
+- **What**: Raised skip thresholds: 5m 1000→8000, 1h 200→8000, 1d 30→2000 (with 2555d lookback).
+- **Why**: First live backtest had only ~30 days of 1h data. Deeper data means more market regimes covered. One-time cost on startup (~3 min for 9 symbols).

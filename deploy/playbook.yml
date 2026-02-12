@@ -152,6 +152,21 @@
       tags: [sync]
       notify: restart container
 
+    - name: Fix ownership on mounted volumes (container runs as uid 1000)
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: true
+      loop:
+        - "{{ deploy_dir }}/data"
+        - "{{ deploy_dir }}/strategy/active"
+        - "{{ deploy_dir }}/strategy/archive"
+        - "{{ deploy_dir }}/statistics/active"
+        - "{{ deploy_dir }}/statistics/archive"
+      tags: [sync]
+
     - name: Sync build files
       copy:
         src: "{{ item.src }}"
