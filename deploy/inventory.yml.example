@@ -15,3 +15,4 @@ all:
           telegram_bot_token: ""
           telegram_chat_id: ""
           api_key: ""
+          grafana_admin_password: ""

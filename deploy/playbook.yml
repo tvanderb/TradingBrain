@@ -75,7 +75,7 @@
       tags: [setup]
 
     - name: Install Loki Docker log driver
-      command: docker plugin install grafana/loki-docker-driver:3.4.0 --alias loki --grant-all-permissions
+      command: docker plugin install grafana/loki-docker-driver:latest --alias loki --grant-all-permissions
       register: loki_driver
       failed_when: loki_driver.rc != 0 and "already exists" not in loki_driver.stderr
       changed_when: loki_driver.rc == 0
@@ -251,6 +251,13 @@
         dest: /etc/caddy/Caddyfile
         mode: "0644"
       notify: reload caddy
+      tags: [caddy]
+
+    - name: Allow SSH through firewall
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
       tags: [caddy]
 
     - name: Allow HTTP through firewall

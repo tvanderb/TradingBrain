@@ -265,7 +265,7 @@
       "type": "logs",
       "targets": [
         {
-          "expr": "{service=\"trading-brain\"} | json",
+          "expr": "{compose_service=\"trading-brain\"} | json | line_format \"{{.level | ToUpper}} [{{.event}}]{{if .summary}} {{.summary}}{{end}}{{if .portfolio}} portfolio={{.portfolio}}{{end}}{{if .symbols}} symbols={{.symbols}}{{end}}{{if .signals}} signals={{.signals}}{{end}}{{if .pairs}} pairs={{.pairs}}{{end}}{{if .mode}} mode={{.mode}}{{end}}{{if .url}} url={{.url}}{{end}}{{if .path}} path={{.path}}{{end}}{{if .error}} error={{.error}}{{end}}\"",
           "refId": "A"
         }
       ]

@@ -132,3 +132,19 @@ while running:
 ## aiohttp Content-Type with charset (N1)
 **Problem**: `web.Response(content_type="text/plain; version=0.0.4; charset=utf-8")` raises `ValueError: charset must not be in content_type argument`. aiohttp parses charset separately.
 **Fix**: Create `web.Response(body=output)`, then set `resp.headers["Content-Type"]` directly to the full Prometheus content type string.
+
+## Loki Docker log driver version tags (N2)
+**Problem**: `docker plugin install grafana/loki-docker-driver:3.4.0` fails with "not found". Same for `3.6.0`. The Docker plugin registry doesn't publish semver tags.
+**Fix**: Always use `grafana/loki-docker-driver:latest`.
+
+## Docker Compose `$` in .env passwords (N3)
+**Problem**: Passwords containing `$` in `.env` cause Docker Compose warnings like `The "XOw80T" variable is not set` — `$` triggers variable interpolation.
+**Fix**: In Jinja2 templates, escape with `{{ password | replace('$', '$$') }}`.
+
+## Loki Docker label name mapping (N4)
+**Problem**: Docker Compose `service` key maps to `compose_service` label in Loki, not `service`. LogQL query `{service="trading-brain"}` returns nothing.
+**Fix**: Use `{compose_service="trading-brain"}` in LogQL queries.
+
+## UFW SSH lockout on fresh deploy (N5)
+**Problem**: Deployment playbook had firewall rules for ports 80, 443, 3000 but not 22. On a fresh VPS where `setup.yml` set the initial rules, subsequent `playbook.yml` runs could interact with UFW without ensuring SSH is allowed.
+**Fix**: Added explicit `ufw allow 22/tcp` rule to `playbook.yml`, placed before all other firewall rules.

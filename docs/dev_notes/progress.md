@@ -2348,4 +2348,14 @@ No centralized dashboard for monitoring fund health, system performance, or hist
 | `deploy/templates/env.j2` | MODIFY (Grafana password) |
 | `tests/test_integration.py` | MODIFY (3 new tests) |
 
+### Deployment Fixes (post-commit)
+- **Loki Docker driver**: Version-specific tags (3.4.0, 3.6.0) don't exist — must use `latest`
+- **Prometheus image**: `v3.2` doesn't exist, need exact `v3.2.1`
+- **Grafana password**: `$` signs in password interpreted by Docker Compose — escaped with `replace('$', '$$')` in Jinja2
+- **Caddy port conflict**: Caddy and Grafana both on :3000 — removed Caddy proxy, Grafana binds `0.0.0.0:3000` directly
+- **Loki label mismatch**: Docker Compose `service` → Loki label `compose_service` (not `service`)
+- **Log formatting**: Added `line_format` template to Loki query for single-line log display
+- **SSH firewall**: Playbook missing `ufw allow 22/tcp` — locked out after fresh deploy. Added SSH rule.
+- **VPS rebuilt**: Previous VPS SSH locked out (no console paste), rebuilt fresh Hetzner instance
+
 **Tests: 174/174 passing** (+3 new tests)

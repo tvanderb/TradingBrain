@@ -53,7 +53,9 @@ An autonomous crypto trading fund managed by AI. The system trades 24/7 — scan
 - **Paper and live modes** with identical logic paths and fill confirmation
 - **Restart safety**: 9 landmine fixes — persistent starting capital, halt evaluation on startup, strategy DB fallback, orphaned position detection, config validation
 - **Telegram observability** with 16 commands for monitoring, plus an emergency kill switch
-- **REST API** (10 endpoints) and **WebSocket** event stream (18 event types) for programmatic access
+- **REST API** (11 endpoints) and **WebSocket** event stream (19 event types) for programmatic access
+- **Activity log**: unified timeline across all subsystems with REST + WebSocket endpoints
+- **Observability stack**: Prometheus metrics, Loki log aggregation, Grafana dashboard — all self-hosted
 - **Truth benchmarks**: 28 rigid metrics computed from raw DB data (not AI-generated)
 - **Full audit trail**: every signal, trade, orchestrator decision, and AI response is recorded
 
@@ -109,7 +111,8 @@ src/
 │   └── readonly_db.py       # Read-only DB wrapper for analysis
 ├── api/                     # Data API
 │   ├── server.py            # aiohttp app with auth + error middleware
-│   ├── routes.py            # 10 REST endpoints
+│   ├── routes.py            # 11 REST endpoints
+│   ├── metrics.py           # Prometheus /metrics endpoint
 │   └── websocket.py         # WebSocket event stream
 └── telegram/                # Telegram bot
     ├── commands.py           # 16 bot commands
@@ -118,7 +121,8 @@ src/
 strategy/active/             # AI-rewritable strategy module
 statistics/active/           # AI-rewritable analysis modules
 config/                      # TOML configuration files
-tests/                       # 161 integration tests
+monitoring/                  # Prometheus, Grafana provisioning, dashboard JSON
+tests/                       # 174 integration tests
 docs/                        # Deployment guide and dev notes
 deploy/                      # Ansible playbooks, VPS hardening, restart script
 ```
@@ -147,11 +151,22 @@ deploy/                      # Ansible playbooks, VPS hardening, restart script
 
 Bearer token auth. Set `API_KEY` in `.env`.
 
-**REST** (10 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, signals, strategy, ai/usage, benchmarks.
+**REST** (11 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, signals, strategy, ai/usage, benchmarks, activity.
 
-**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (18 event types).
+**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (19 event types). Activity stream at `/v1/activity/live`.
+
+**Prometheus** at `/metrics`: portfolio, risk, and per-position gauges scraped every 30s.
 
 All responses use an envelope format: `{data: ..., meta: {timestamp, mode, version}}`.
+
+## Observability
+
+Self-hosted monitoring stack (Prometheus + Loki + Grafana) on the same VPS:
+
+- **Grafana dashboard** at port 3000 — fund overview, risk/trading metrics, per-position P&L, structured logs
+- **Prometheus** scrapes `/metrics` every 30s — 12 gauges with per-position labels, 90-day retention
+- **Loki** ingests Docker container logs via the Loki log driver — structured JSON, queryable via LogQL
+- **Memory budget**: ~1.46GB total (fits 2GB VPS with swap headroom)
 
 ## Development
 

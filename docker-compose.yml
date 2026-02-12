@@ -34,7 +34,7 @@ services:
       - loki
 
   loki:
-    image: grafana/loki:3.4
+    image: grafana/loki:3.6
     container_name: loki
     restart: unless-stopped
     volumes:
@@ -48,7 +48,7 @@ services:
           memory: 512m
 
   prometheus:
-    image: prom/prometheus:v3.2
+    image: prom/prometheus:v3.2.1
     container_name: prometheus
     restart: unless-stopped
     volumes:
@@ -73,7 +73,7 @@ services:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "127.0.0.1:3000:3000"
+      - "0.0.0.0:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
       - GF_SERVER_ROOT_URL=http://178.156.216.93:3000
