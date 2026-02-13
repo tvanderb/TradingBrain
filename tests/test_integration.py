@@ -3757,12 +3757,15 @@ async def test_risk_counters_restored_on_restart():
         db = Database(config.db_path)
         await db.connect()
 
-        # Seed trades with UTC timestamps (matching what portfolio.py stores)
-        from datetime import timezone as tz_utc
-        now = datetime.now(tz_utc.utc)
-        t1 = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
-        t2 = (now - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
-        t3 = (now - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+        # Seed trades with UTC timestamps that are clearly "today" in configured timezone.
+        # Use noon local time to avoid midnight boundary issues across timezones.
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(config.timezone)
+        local_noon = datetime.now(tz).replace(hour=12, minute=0, second=0, microsecond=0)
+        noon_utc = local_noon.astimezone(timezone.utc)
+        t1 = (noon_utc - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+        t2 = (noon_utc - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+        t3 = (noon_utc - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
 
         # First: win at t1. Then two consecutive losses (t2, t3 — most recent)
         await db.execute(

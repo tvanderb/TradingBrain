@@ -107,6 +107,7 @@
         - "{{ deploy_dir }}/statistics/archive"
         - "{{ deploy_dir }}/monitoring/grafana/provisioning/datasources"
         - "{{ deploy_dir }}/monitoring/grafana/provisioning/dashboards/json"
+        - "{{ deploy_dir }}/keys"
       tags: [sync]
 
     # --- Sync Project Files ---
@@ -180,6 +181,18 @@
       notify: rebuild container
 
     # --- Secrets ---
+
+    - name: Deploy Google Vertex service account key
+      copy:
+        src: "{{ vertex_sa_key_file | default('keys/vertex-sa.json') }}"
+        dest: "{{ deploy_dir }}/keys/vertex-sa.json"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+      when: vertex_sa_key_file is defined or lookup('file', 'keys/vertex-sa.json', errors='ignore')
+      tags: [secrets]
+      notify: restart container
+      ignore_errors: true
 
     - name: Deploy .env file
       template:

@@ -44,7 +44,8 @@ data/*.db-wal
 # Logs
 *.log
 
-# Ansible (contains secrets)
+# Secrets / keys
+keys/
 deploy/inventory.yml
 deploy/keys/
 

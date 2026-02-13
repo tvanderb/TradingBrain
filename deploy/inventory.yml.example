@@ -11,8 +11,11 @@ all:
           # Secrets — fill in or use ansible-vault
           kraken_api_key: ""
           kraken_secret_key: ""
-          anthropic_api_key: ""
+          anthropic_api_key: ""            # Used when ai.provider = "anthropic"
           telegram_bot_token: ""
           telegram_chat_id: ""
           api_key: ""
           grafana_admin_password: ""
+
+          # Google Vertex AI (used when ai.provider = "vertex")
+          # vertex_sa_key_file: "keys/vertex-sa.json"  # Path to service account key (relative to deploy/)
