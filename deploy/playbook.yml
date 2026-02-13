@@ -189,7 +189,7 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: "0600"
-      when: vertex_sa_key_file is defined or lookup('file', 'keys/vertex-sa.json', errors='ignore')
+      when: vertex_sa_key_file is defined or lookup('file', 'keys/vertex-sa.json', errors='ignore') | length > 0
       tags: [secrets]
       notify: restart container
       ignore_errors: true
