@@ -949,9 +949,8 @@ async def test_orchestrator_gather_context_includes_truth_and_analysis():
 
 def test_orchestrator_decision_type_routing():
     """Verify the orchestrator correctly routes different decision types."""
-    # Strategy decisions
-    for decision_type in ("STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
-                          "TWEAK", "RESTRUCTURE", "OVERHAUL"):
+    # Candidate decisions are distinct from analysis module decisions
+    for decision_type in ("CREATE_CANDIDATE", "CANCEL_CANDIDATE", "PROMOTE_CANDIDATE"):
         assert decision_type not in ("NO_CHANGE", "MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE")
 
     # Analysis module decisions
@@ -960,11 +959,10 @@ def test_orchestrator_decision_type_routing():
 
     # These are the complete set of valid decisions
     valid_decisions = {
-        "NO_CHANGE", "STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
+        "NO_CHANGE", "CREATE_CANDIDATE", "CANCEL_CANDIDATE", "PROMOTE_CANDIDATE",
         "MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE",
-        "TWEAK", "RESTRUCTURE", "OVERHAUL",  # legacy names
     }
-    assert len(valid_decisions) == 9
+    assert len(valid_decisions) == 6
 
 
 # --- Analysis Module Evolution Pipeline ---
@@ -998,11 +996,13 @@ def test_analysis_code_gen_prompts_exist():
     # Layer 2: Decision types
     assert "MARKET_ANALYSIS_UPDATE" in LAYER_2_SYSTEM
     assert "TRADE_ANALYSIS_UPDATE" in LAYER_2_SYSTEM
-    assert "STRATEGY_TWEAK" in LAYER_2_SYSTEM
+    assert "CREATE_CANDIDATE" in LAYER_2_SYSTEM
+    assert "CANCEL_CANDIDATE" in LAYER_2_SYSTEM
+    assert "PROMOTE_CANDIDATE" in LAYER_2_SYSTEM
 
     # Layer 2: Key system facts
     assert "Long-only" in LAYER_2_SYSTEM
-    assert "paper test" in LAYER_2_SYSTEM.lower()
+    assert "candidate" in LAYER_2_SYSTEM.lower()
 
     # Analysis code gen should mention AnalysisBase, ReadOnlyDB
     assert "AnalysisBase" in ANALYSIS_CODE_GEN_SYSTEM
@@ -1378,49 +1378,7 @@ async def test_risk_peak_loaded_from_db():
         os.unlink(db_path)
 
 
-@pytest.mark.asyncio
-async def test_paper_test_lifecycle():
-    """C6: Paper tests are terminated on new deploy and evaluated at end date."""
-    from src.shell.database import Database
-
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-
-    try:
-        db = Database(db_path)
-        await db.connect()
-
-        # Create a running paper test
-        await db.execute(
-            """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, ends_at, status)
-               VALUES ('v001', 1, 1, datetime('now', '-1 day'), 'running')"""
-        )
-        # Create another one still running (future end)
-        await db.execute(
-            """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, ends_at, status)
-               VALUES ('v002', 2, 2, datetime('now', '+1 day'), 'running')"""
-        )
-        await db.commit()
-
-        # Verify both are running
-        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
-        assert len(running) == 2
-
-        # Terminate all (simulating new deploy)
-        await db.execute("UPDATE paper_tests SET status = 'terminated' WHERE status = 'running'")
-        await db.commit()
-
-        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
-        assert len(running) == 0
-
-        terminated = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'terminated'")
-        assert len(terminated) == 2
-
-        await db.close()
-    finally:
-        os.unlink(db_path)
+# test_paper_test_lifecycle removed — paper tests replaced by candidate system (Session T)
 
 
 # --- T1: Nightly Orchestration Cycle (mocked) ---
@@ -1569,71 +1527,7 @@ class Strategy(StrategyBase):
             f.unlink()
 
 
-# --- T3: Paper Test Pipeline ---
-
-@pytest.mark.asyncio
-async def test_paper_test_full_pipeline():
-    """T3: Paper test create → evaluate → pass/fail based on trade P&L."""
-    from src.shell.config import load_config
-    from src.shell.database import Database
-    from src.shell.data_store import DataStore
-    from src.orchestrator.orchestrator import Orchestrator
-
-    config = load_config()
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        config.db_path = f.name
-
-    try:
-        db = Database(config.db_path)
-        await db.connect()
-        data_store = DataStore(db, config.data)
-
-        ai = AsyncMock()
-        ai.tokens_remaining = 1000000
-        ai._daily_tokens_used = 0
-
-        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
-
-        # Create a paper test that has already ended (past ends_at)
-        await db.execute(
-            """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, started_at, ends_at, status)
-               VALUES ('v_test', 1, 1, datetime('now', '-3 hours'), datetime('now', '-1 hour'), 'running')"""
-        )
-        # Insert enough winning trades for that version (within the paper test time window)
-        for i in range(config.orchestrator.min_paper_test_trades):
-            await db.execute(
-                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
-                   fees, intent, strategy_version, opened_at, closed_at)
-                   VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_test',
-                           datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
-            )
-        await db.commit()
-
-        # Evaluate paper tests
-        results = await orch._evaluate_paper_tests()
-        assert len(results) == 1
-        assert results[0]["status"] in ("passed", "failed")
-
-        # Verify DB updated
-        test = await db.fetchone("SELECT * FROM paper_tests WHERE strategy_version = 'v_test'")
-        assert test["status"] in ("passed", "failed")
-
-        # Test termination of running tests
-        await db.execute(
-            """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, ends_at, status)
-               VALUES ('v_test2', 2, 2, datetime('now', '+1 day'), 'running')"""
-        )
-        await db.commit()
-
-        count = await orch._terminate_running_paper_tests("new deploy")
-        running = await db.fetchall("SELECT * FROM paper_tests WHERE status = 'running'")
-        assert len(running) == 0
-
-        await db.close()
-    finally:
-        os.unlink(config.db_path)
+# --- T3: Paper test removed — replaced by candidate system (Session T) ---
 
 
 # --- T4: Telegram Commands ---
@@ -4564,23 +4458,8 @@ def test_data_store_rowcount_uses_len():
 # --- Session E: Final audit fixes ---
 
 
-def test_paper_test_timestamp_format():
-    """E-C1: Paper test ends_at uses strftime format matching SQLite datetime()."""
-    import inspect
-    from src.orchestrator.orchestrator import Orchestrator
-    source = inspect.getsource(Orchestrator)
-    # ends_at should use strftime (not isoformat) to match SQLite datetime('now', 'utc')
-    assert "strftime(\"%Y-%m-%d %H:%M:%S\")" in source, "ends_at should use strftime for SQLite compatibility"
-    # Query should use datetime('now', 'utc') not datetime('now')
-    assert "datetime('now', 'utc')" in source, "Paper test query should use UTC"
-
-
-def test_paper_test_trade_query_upper_bound():
-    """E-C3: Paper test trade query filters by both start and end time."""
-    import inspect
-    from src.orchestrator.orchestrator import Orchestrator
-    source = inspect.getsource(Orchestrator._evaluate_paper_tests)
-    assert "datetime(closed_at) <= datetime(?)" in source, "Trade query should normalize timestamps with datetime()"
+# test_paper_test_timestamp_format removed — paper tests replaced by candidate system (Session T)
+# test_paper_test_trade_query_upper_bound removed — paper tests replaced by candidate system (Session T)
 
 
 def test_broadcast_ws_error_handling():
@@ -5343,63 +5222,7 @@ async def test_truth_benchmarks_expanded():
         os.unlink(db_path)
 
 
-# --- Phase 5: Paper Test Minimum Trade Count ---
-
-@pytest.mark.asyncio
-async def test_paper_test_inconclusive_below_minimum():
-    """Paper test with fewer trades than min_paper_test_trades → inconclusive."""
-    from src.shell.config import load_config
-    from src.shell.database import Database
-    from src.shell.data_store import DataStore
-    from src.orchestrator.orchestrator import Orchestrator
-
-    config = load_config()
-    config.orchestrator.min_paper_test_trades = 5  # Require 5 trades
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        config.db_path = f.name
-
-    try:
-        db = Database(config.db_path)
-        await db.connect()
-        data_store = DataStore(db, config.data)
-
-        ai = AsyncMock()
-        ai.tokens_remaining = 1000000
-        ai._daily_tokens_used = 0
-
-        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
-
-        # Create a paper test that has already ended
-        await db.execute(
-            """INSERT INTO paper_tests
-               (strategy_version, risk_tier, required_days, started_at, ends_at, status)
-               VALUES ('v_min', 1, 1, datetime('now', '-3 hours'), datetime('now', '-1 hour'), 'running')"""
-        )
-        # Insert only 3 trades (below minimum of 5)
-        for i in range(3):
-            await db.execute(
-                """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
-                   fees, intent, strategy_version, opened_at, closed_at)
-                   VALUES ('BTC/USD', 'long', 0.001, 50000, 51000, 1.0, 0.02, 0.20, 'DAY', 'v_min',
-                           datetime('now', '-2 hours'), datetime('now', '-1 hour'))"""
-            )
-        await db.commit()
-
-        results = await orch._evaluate_paper_tests()
-        assert len(results) == 1
-        assert results[0]["status"] == "inconclusive"
-        assert results[0]["trades"] == 3
-        assert results[0]["min_required"] == 5
-
-        # Verify DB updated
-        test = await db.fetchone("SELECT * FROM paper_tests WHERE strategy_version = 'v_min'")
-        assert test["status"] == "inconclusive"
-        result_data = json.loads(test["result"])
-        assert result_data["min_required"] == 5
-
-        await db.close()
-    finally:
-        os.unlink(config.db_path)
+# test_paper_test_inconclusive_below_minimum removed — paper tests replaced by candidate system (Session T)
 
 
 # --- Phase 6: Orchestrator Prompt Accuracy ---
@@ -5416,7 +5239,10 @@ def test_prompt_content_accuracy():
     # Paper vs Live differences
     assert "Paper mode" in LAYER_2_SYSTEM
     assert "Live mode" in LAYER_2_SYSTEM
-    assert "inconclusive" in LAYER_2_SYSTEM
+
+    # Candidate system (replaced paper tests)
+    assert "candidate" in LAYER_2_SYSTEM.lower()
+    assert "promote" in LAYER_2_SYSTEM.lower()
 
     # Backtester capabilities
     assert "LIMIT" in LAYER_2_SYSTEM
@@ -6995,8 +6821,9 @@ def test_backtester_result_date_metadata():
 @pytest.mark.asyncio
 async def test_orchestrator_outer_loop_iterates():
     """Outer loop: Opus rejects backtest on first iteration with revision_instructions,
-    approves on second iteration. Verifies nested loop structure."""
+    approves on second iteration. Verifies nested loop structure with candidate system."""
     from src.orchestrator.orchestrator import Orchestrator
+    from src.candidates.manager import CandidateManager
     from src.shell.config import load_config
     from src.shell.database import Database
     from src.shell.data_store import DataStore
@@ -7038,23 +6865,24 @@ class Strategy(StrategyBase):
         async def mock_ask_opus(prompt, system="", purpose=""):
             nonlocal opus_call_count
             opus_call_count += 1
-            # Call 1: nightly analysis — STRATEGY_TWEAK decision
+            # Call 1: nightly analysis — CREATE_CANDIDATE decision
             if purpose == "nightly_analysis":
                 return json.dumps({
-                    "decision": "STRATEGY_TWEAK",
-                    "risk_tier": 1,
+                    "decision": "CREATE_CANDIDATE",
                     "reasoning": "Need to adjust parameters",
                     "specific_changes": "Increase RSI threshold",
+                    "slot": None,
+                    "replace_slot": None,
+                    "evaluation_duration_days": 7,
+                    "position_handling": None,
                     "cross_reference_findings": "",
                     "market_observations": "BTC trending up",
                 })
             # Code reviews — always approve
-            if "code_review" in purpose:
+            if "candidate_review" in purpose:
                 return json.dumps({
                     "approved": True,
                     "issues": [],
-                    "risk_tier_correct": True,
-                    "suggested_tier": 1,
                     "feedback": "Looks good",
                 })
             # Backtest reviews — reject first, approve second
@@ -7078,7 +6906,11 @@ class Strategy(StrategyBase):
 
         ai.ask_opus = AsyncMock(side_effect=mock_ask_opus)
 
-        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
+        candidate_manager = CandidateManager(config, db)
+        await candidate_manager.initialize()
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store,
+                            candidate_manager=candidate_manager)
 
         # Patch _run_backtest to return a passing result without needing real data
         mock_bt_result = MagicMock()
@@ -7089,8 +6921,8 @@ class Strategy(StrategyBase):
             mock_bt.return_value = (True, "Trades: 10, Net P&L: $5.00", mock_bt_result)
             report = await orch.run_nightly_cycle()
 
-        # Should have deployed successfully after second outer iteration
-        assert "deployed" in report.lower()
+        # Should have created candidate successfully after second outer iteration
+        assert "candidate" in report.lower()
 
         # ask_sonnet called at least twice (once per outer iteration)
         assert ai.ask_sonnet.call_count >= 2
@@ -7111,13 +6943,12 @@ class Strategy(StrategyBase):
         bt_reviews = [s for s in thought_steps if s == "backtest_review"]
         assert len(bt_reviews) == 2
 
-        # Strategy version was deployed
-        ver = await db.fetchone(
-            "SELECT version, description FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
+        # Candidate was created in DB
+        cand = await db.fetchone(
+            "SELECT * FROM candidates WHERE status = 'running' ORDER BY created_at DESC LIMIT 1"
         )
-        assert ver is not None
-        # Description should contain revision instructions from Opus
-        assert "Revision from fund manager" in ver["description"]
+        assert cand is not None
+        assert cand["slot"] == 1
 
         await db.close()
     finally:

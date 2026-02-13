@@ -2541,3 +2541,87 @@ After Session R's first live orchestration cycle, two problems surfaced:
 - `test_orchestrator_outer_loop_iterates`: Mocks 2 outer iterations (reject then approve), verifies call counts, thought spool, and deployment
 
 **Tests: 186/186 passing** (+1 new test)
+
+## Session T (2026-02-12) — Candidate Strategy System
+
+### Context
+After the first live orchestration cycle, a design flaw was identified: when a strategy is deployed, it immediately becomes the active trading strategy AND simultaneously enters a "paper test." In live mode, this means real money is at risk while the strategy is supposedly being "tested." The paper test concept was broken.
+
+### Design
+Replace paper-test-on-active-strategy model with a **candidate strategy system**:
+- Up to 3 candidate strategies run in paper simulation alongside the active strategy
+- Each candidate mirrors the fund's portfolio at creation time and trades independently
+- Opus decides when to create, evaluate, cancel, or promote candidates
+- No risk tiers — Opus chooses evaluation duration freely
+- On promotion, Opus decides whether to keep or close fund positions
+
+### New Files Created
+- `src/candidates/__init__.py` — Package init
+- `src/candidates/runner.py` — CandidateRunner: per-slot paper simulation engine
+- `src/candidates/manager.py` — CandidateManager: lifecycle management for all slots
+- `tests/test_candidates.py` — 13 new tests
+
+### Files Modified
+
+**`src/shell/database.py`:**
+- 3 new tables: `candidates`, `candidate_positions`, `candidate_trades`
+- 3 new indexes
+
+**`src/shell/config.py`:**
+- Added `max_candidates = 3` to OrchestratorConfig
+- Removed `min_paper_test_trades`
+- Added 3 candidate notification config fields
+
+**`config/settings.example.toml`:**
+- Updated `[orchestrator]` section with `max_candidates`
+
+**`src/strategy/loader.py`:**
+- Added `hash_code_string()` helper
+
+**`src/orchestrator/orchestrator.py` (largest change):**
+- New decision types: CREATE_CANDIDATE, CANCEL_CANDIDATE, PROMOTE_CANDIDATE
+- Removed: STRATEGY_TWEAK, STRATEGY_RESTRUCTURE, STRATEGY_OVERHAUL, risk tiers
+- Removed: `_execute_change()`, `_evaluate_paper_tests()`, `_terminate_running_paper_tests()`
+- Added: `_create_candidate()` (reuses nested loop pipeline), `_cancel_candidate()`, `_promote_candidate()`
+- Added: `set_close_all_callback()`, `set_scan_state()`, `_pick_candidate_slot()`
+- LAYER_2_SYSTEM prompt: replaced risk tier/paper test sections with candidate system description
+- BACKTEST_REVIEW_SYSTEM: updated deployment context to reference candidate slots
+- New response format with slot, replace_slot, evaluation_duration_days, position_handling fields
+
+**`src/main.py`:**
+- CandidateManager created and initialized at startup
+- Wired into orchestrator with close_all_callback and scan_state
+- Candidate scans run after active strategy in `_scan_loop`
+- Candidate SL/TP checked in `_position_monitor`
+- `_close_all_positions_for_promotion()` method for clean-slate promotions
+- Strategy hot-reload via `strategy_reload_needed` flag
+
+**`src/telegram/commands.py`:**
+- Added `cmd_candidates()` handler
+- Added `set_candidate_manager()` method
+
+**`src/telegram/bot.py`:**
+- Registered "candidates" command handler
+
+**`src/telegram/notifications.py`:**
+- 3 new events: candidate_created, candidate_canceled, candidate_promoted
+- 3 new Notifier methods + _format_activity cases
+
+**`src/api/metrics.py`:**
+- 5 per-candidate Prometheus gauges (value, pnl, trades, win_rate, active)
+
+**`src/api/routes.py`:**
+- Added `GET /v1/candidates` endpoint
+
+**`src/api/server.py`:**
+- Added `candidate_manager` parameter to `create_app()`
+
+**`tests/test_integration.py`:**
+- Updated 4 tests for new decision types
+- Removed 5 dead paper test tests
+
+**`tests/test_candidates.py` (new):**
+- 6 CandidateRunner tests: paper_fills, sl_tp, risk_limits, portfolio_snapshot, modify_signal, get_status
+- 7 CandidateManager tests: create, cancel, promote, recover, replace_slot, persist_state, context_for_orchestrator
+
+**Tests: 194/194 passing** (186 - 5 removed + 13 new)

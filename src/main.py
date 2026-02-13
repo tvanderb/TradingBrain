@@ -31,6 +31,7 @@ from src.shell.risk import RiskManager
 from src.orchestrator.ai_client import AIClient
 from src.orchestrator.orchestrator import Orchestrator
 from src.orchestrator.reporter import Reporter
+from src.candidates.manager import CandidateManager
 from src.strategy.loader import load_strategy, load_strategy_with_fallback, get_strategy_path, get_code_hash
 from src.shell.activity import ActivityLogger
 from src.telegram.bot import TelegramBot
@@ -66,6 +67,7 @@ class TradingBrain:
         self._commands: BotCommands | None = None
         self._pair_fees: dict[str, tuple[float, float]] = {}  # symbol -> (maker, taker)
         self._activity: ActivityLogger | None = None
+        self._candidate_manager: CandidateManager | None = None
         self._api_runner: web.AppRunner | None = None
         self._ws_task: asyncio.Task | None = None
         self._trade_lock = asyncio.Lock()  # Serializes trade execution across scan/monitor/emergency
@@ -204,13 +206,21 @@ class TradingBrain:
         if self._telegram.app:
             self._notifier.set_app(self._telegram.app)
 
-        # 7. Orchestrator (after notifier so it's not None)
+        # 7. Candidate Manager
+        self._candidate_manager = CandidateManager(self._config, self._db)
+        await self._candidate_manager.initialize()
+
+        # 7b. Orchestrator (after notifier and candidate manager)
         self._orchestrator = Orchestrator(
             self._config, self._db, self._ai, self._reporter, self._data_store,
             notifier=self._notifier,
+            candidate_manager=self._candidate_manager,
         )
+        self._orchestrator.set_close_all_callback(self._close_all_positions_for_promotion)
+        self._orchestrator.set_scan_state(self._scan_state)
 
         self._commands.set_orchestrator(self._orchestrator)
+        self._commands.set_candidate_manager(self._candidate_manager)
 
         # 8. WebSocket
         self._ws = KrakenWebSocket(self._config.kraken.ws_url, self._config.symbols)
@@ -227,6 +237,7 @@ class TradingBrain:
                 scan_state=self._scan_state,
                 commands=self._commands,
                 activity_logger=self._activity,
+                candidate_manager=self._candidate_manager,
             )
             self._notifier.set_ws_manager(ws_manager)
             self._activity.set_ws_manager(activity_ws)
@@ -833,6 +844,14 @@ class TradingBrain:
             )
             await self._db.commit()
 
+            # Run candidate strategies (paper simulation alongside active strategy)
+            if self._candidate_manager and self._candidate_manager.get_active_slots():
+                try:
+                    await self._candidate_manager.run_scans(markets, datetime.now(timezone.utc))
+                    await self._candidate_manager.persist_state()
+                except Exception as e:
+                    log.error("scan.candidate_error", error=str(e))
+
         except Exception as e:
             import traceback
             log.error("scan.failed", error=str(e), traceback=traceback.format_exc())
@@ -890,6 +909,14 @@ class TradingBrain:
         for t in triggered:
             async with self._trade_lock:
                 await self._handle_sl_tp_trigger(t)
+
+        # Check candidate SL/TP (paper simulation — no exchange orders)
+        if self._candidate_manager and self._candidate_manager.get_active_slots():
+            try:
+                await self._candidate_manager.check_sl_tp(prices)
+                await self._candidate_manager.persist_state()
+            except Exception as e:
+                log.error("position_monitor.candidate_error", error=str(e))
 
     async def _handle_sl_tp_trigger(self, t: dict) -> None:
         """Process a single SL/TP trigger — shared between client-side and exchange-fill paths."""
@@ -1320,6 +1347,38 @@ class TradingBrain:
                 await self._activity.system("Emergency stop complete", severity="error")
             await self._notifier.system_error("Emergency stop complete — all positions closed")
             return True
+
+    async def _close_all_positions_for_promotion(self) -> None:
+        """Close all fund positions for strategy promotion (clean slate)."""
+        positions = list(self._portfolio.positions.items())
+        if not positions:
+            return
+        for tag, pos in positions:
+            try:
+                ticker = await self._kraken.get_ticker(pos["symbol"])
+                price = float(ticker["c"][0])
+            except Exception:
+                price = pos.get("current_price", pos["avg_entry"])
+            signal = Signal(
+                symbol=pos["symbol"], action=Action.CLOSE, size_pct=1.0,
+                intent=Intent.DAY, confidence=1.0,
+                reasoning="Positions closed for strategy promotion", tag=tag,
+            )
+            sym_fees = self._pair_fees.get(pos["symbol"])
+            async with self._trade_lock:
+                result = await self._portfolio.execute_signal(
+                    signal, price,
+                    sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
+                    sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
+                    close_reason="promotion",
+                )
+                if result:
+                    results = result if isinstance(result, list) else [result]
+                    for r in results:
+                        if r.get("pnl") is not None:
+                            self._risk.record_trade_result(r["pnl"])
+                        await self._notifier.trade_executed(r)
+        log.info("promotion.all_positions_closed", count=len(positions))
 
     async def stop(self) -> None:
         """Graceful shutdown sequence."""

@@ -288,3 +288,15 @@
 ### Decision: Deeper Bootstrap Backfill (Session S)
 - **What**: Raised skip thresholds: 5m 1000→8000, 1h 200→8000, 1d 30→2000 (with 2555d lookback).
 - **Why**: First live backtest had only ~30 days of 1h data. Deeper data means more market regimes covered. One-time cost on startup (~3 min for 9 symbols).
+
+### Decision: Candidate Strategy System — Replace Paper Tests (Session T)
+- **What**: Replace paper-test-on-active-strategy model with a candidate strategy system. Up to 3 candidate strategies run in paper simulation alongside the active strategy. Opus decides lifecycle: create, evaluate, cancel, promote.
+- **Why**: The paper test concept was fundamentally broken. When a strategy was deployed, it became the active trading strategy AND simultaneously entered a "paper test" — meaning real money was at risk while the strategy was supposedly being "tested." The test evaluated trades that were executed for real.
+- **Design**: CandidateRunner (per-slot paper simulation engine) + CandidateManager (lifecycle management). Candidates mirror fund portfolio at creation time, trade with live market data using paper fills with slippage. Data segregation: separate tables (candidate_positions, candidate_trades). On promotion, Opus chooses "keep" (inherit positions) or "close_all" (clean slate).
+- **Risk tiers removed**: No more TWEAK/RESTRUCTURE/OVERHAUL with hard-coded paper test durations. Opus chooses evaluation duration freely or leaves indefinite.
+- **Alternative considered**: Fix paper tests by running them in a separate portfolio tracker. Rejected because the candidate system is conceptually cleaner — it separates "testing a strategy" from "trading with a strategy" entirely.
+
+### Decision: Candidate Slot UNIQUE Constraint (Session T)
+- **What**: `candidates` table has `UNIQUE(slot)` constraint. `INSERT OR REPLACE` overwrites slot rows.
+- **Why**: Only one candidate per slot at a time. Historical candidate metadata (version, description) is overwritten, but the important historical data (trades, positions in `candidate_trades`/`candidate_positions`) is preserved in separate tables linked by `candidate_slot`.
+- **Trade-off accepted**: We lose the `candidates` row history when a slot is reused. This is acceptable because the trade/position data is what matters for analysis.

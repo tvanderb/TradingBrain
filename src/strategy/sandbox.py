@@ -262,7 +262,12 @@ def validate_strategy(code: str) -> SandboxResult:
             warnings.append(f"scan_interval_minutes={interval} is invalid, must be positive int")
 
     except BaseException as e:
-        errors.append(f"Runtime error: {type(e).__name__}: {e}")
+        msg = f"Runtime error: {type(e).__name__}: {e}"
+        if isinstance(e, AttributeError) and "SymbolData" in str(e):
+            msg += " — SymbolData has: candles_5m, candles_1h, candles_1d (NOT .candles or .data)"
+        elif isinstance(e, AttributeError) and "Portfolio" in str(e):
+            msg += " — Portfolio has: cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today"
+        errors.append(msg)
     finally:
         # Cleanup
         if module_name in sys.modules:

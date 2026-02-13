@@ -37,6 +37,11 @@ def get_code_hash(path: Path) -> str:
     return hashlib.sha256(content).hexdigest()[:16]
 
 
+def hash_code_string(code: str) -> str:
+    """Compute SHA256 hash of strategy code string (no file needed)."""
+    return hashlib.sha256(code.encode()).hexdigest()[:12]
+
+
 def load_strategy() -> StrategyBase:
     """Load the active strategy module and return a Strategy instance.
 

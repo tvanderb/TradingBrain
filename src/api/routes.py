@@ -376,6 +376,28 @@ async def activity_handler(request: web.Request) -> web.Response:
     return web.json_response(_envelope(entries, config.mode))
 
 
+async def candidates_handler(request: web.Request) -> web.Response:
+    ctx = request.app[ctx_key]
+    config = ctx["config"]
+    candidate_manager = ctx.get("candidate_manager")
+
+    if not candidate_manager:
+        return web.json_response(
+            _error_envelope("unavailable", "Candidate system not configured", config.mode),
+            status=503,
+        )
+
+    try:
+        slots = await candidate_manager.get_context_for_orchestrator()
+    except Exception as e:
+        log.error("api.candidates_error", error=str(e))
+        return web.json_response(
+            _error_envelope("internal_error", "Failed to fetch candidate data", config.mode),
+            status=500,
+        )
+    return web.json_response(_envelope(slots, config.mode))
+
+
 def setup_routes(app: web.Application) -> None:
     """Register all REST API routes."""
     app.router.add_get("/v1/system", system_handler)
@@ -389,3 +411,4 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/v1/ai/usage", ai_usage_handler)
     app.router.add_get("/v1/benchmarks", benchmarks_handler)
     app.router.add_get("/v1/activity", activity_handler)
+    app.router.add_get("/v1/candidates", candidates_handler)

@@ -40,6 +40,9 @@ _EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
     "system_shutdown":             ("SYSTEM",   "info"),
     "system_error":                ("SYSTEM",   "error"),
     "websocket_feed_lost":         ("SYSTEM",   "error"),
+    "candidate_created":           ("STRATEGY", "info"),
+    "candidate_canceled":          ("STRATEGY", "info"),
+    "candidate_promoted":          ("STRATEGY", "info"),
 }
 
 
@@ -138,6 +141,22 @@ def _format_activity(event_name: str, data: dict) -> str | None:
 
     if event_name == "websocket_feed_lost":
         return "WebSocket feed lost — REST fallback active"
+
+    if event_name == "candidate_created":
+        slot = data.get("slot", "?")
+        version = data.get("version", "?")
+        eval_days = data.get("eval_days")
+        eval_str = f"{eval_days}d" if eval_days else "indefinite"
+        return f"Candidate created: slot {slot}, {version} ({eval_str} eval)"
+
+    if event_name == "candidate_canceled":
+        slot = data.get("slot", "?")
+        return f"Candidate canceled: slot {slot}"
+
+    if event_name == "candidate_promoted":
+        slot = data.get("slot", "?")
+        version = data.get("version", "?")
+        return f"Candidate promoted: slot {slot} → {version}"
 
     return None
 
@@ -368,4 +387,28 @@ class Notifier:
             {},
             "WARNING: WebSocket permanently disconnected after max retries.\n"
             "Live price feed is down. Position monitor using REST fallback.",
+        )
+
+    # --- Candidate Events ---
+
+    async def candidate_created(self, slot: int, version: str, eval_days: int | None = None) -> None:
+        eval_str = f"{eval_days}d" if eval_days else "indefinite"
+        await self._dispatch(
+            "candidate_created",
+            {"slot": slot, "version": version, "eval_days": eval_days},
+            f"Candidate Created: slot {slot}\nVersion: {version}\nEvaluation: {eval_str}",
+        )
+
+    async def candidate_canceled(self, slot: int) -> None:
+        await self._dispatch(
+            "candidate_canceled",
+            {"slot": slot},
+            f"Candidate Canceled: slot {slot}",
+        )
+
+    async def candidate_promoted(self, slot: int, version: str) -> None:
+        await self._dispatch(
+            "candidate_promoted",
+            {"slot": slot, "version": version},
+            f"Candidate Promoted: slot {slot} → {version}",
         )

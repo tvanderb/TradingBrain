@@ -52,6 +52,7 @@ class BotCommands:
         self._notifier = notifier
         self._activity_logger = activity_logger
         self._orchestrator = None
+        self._candidate_manager = None
         self._paused = False
         self._last_ask_time: float = 0
         self._unauth_log_count: int = 0
@@ -59,6 +60,9 @@ class BotCommands:
 
     def set_orchestrator(self, orchestrator) -> None:
         self._orchestrator = orchestrator
+
+    def set_candidate_manager(self, candidate_manager) -> None:
+        self._candidate_manager = candidate_manager
 
     @property
     def is_paused(self) -> bool:
@@ -662,6 +666,43 @@ class BotCommands:
         await update.message.reply_text(
             "Orchestration cycle triggered. You'll be notified when it completes."
         )
+
+    async def cmd_candidates(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show candidate strategy status."""
+        if not self._authorized(update):
+            return
+        if not self._candidate_manager:
+            await update.message.reply_text("Candidate system not available.")
+            return
+        try:
+            slots = await self._candidate_manager.get_context_for_orchestrator()
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+            return
+
+        lines = ["Candidate Strategies\n"]
+        for s in slots:
+            slot_num = s.get("slot", "?")
+            status = s.get("status", "empty")
+            if status == "empty":
+                lines.append(f"Slot {slot_num}: empty")
+            else:
+                version = s.get("version", "?")
+                value = s.get("total_value", 0)
+                pnl = s.get("pnl", 0)
+                trades = s.get("trade_count", 0)
+                wr = s.get("win_rate", 0)
+                desc = s.get("description", "")
+                lines.append(
+                    f"Slot {slot_num}: {version}\n"
+                    f"  Value: ${value:.2f} | P&L: ${pnl:+.2f}\n"
+                    f"  Trades: {trades} | Win: {wr*100:.0f}%\n"
+                    f"  {desc[:80]}" if desc else
+                    f"Slot {slot_num}: {version}\n"
+                    f"  Value: ${value:.2f} | P&L: ${pnl:+.2f}\n"
+                    f"  Trades: {trades} | Win: {wr*100:.0f}%"
+                )
+        await self._send_long(update, "\n".join(lines))
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

@@ -30,11 +30,12 @@ region = "us-east5"
 start_hour = 3               # 3:30 AM EST
 start_minute = 30
 end_hour = 6                 # 6:00 AM EST
-# Max code quality iterations per strategy attempt
-max_revisions = 3
-# Max strategy direction iterations (Opus redirects)
-max_strategy_iterations = 3
-min_paper_test_trades = 5
+# Max code quality iterations per strategy attempt (inner loop: sandbox + review)
+max_revisions = 12
+# Max strategy direction iterations (outer loop: Opus redirects after backtest)
+max_strategy_iterations = 9
+# Max simultaneous candidate strategies running in paper simulation
+max_candidates = 3
 
 [telegram]
 enabled = true

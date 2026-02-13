@@ -54,6 +54,8 @@ class BacktestResult:
     end_date: datetime | None = None
     total_days: int = 0
     timeframe_mode: str = "single"  # "single" or "multi"
+    strategy_errors: int = 0  # times analyze() threw an exception
+    first_error: str = ""     # first error message for diagnosis
 
     def summary(self) -> str:
         parts = []
@@ -89,6 +91,10 @@ class BacktestResult:
         if self.limit_orders_attempted > 0:
             fill_rate = self.limit_orders_filled / self.limit_orders_attempted
             lines.append(f"Limit Fill Rate: {fill_rate:.0%} ({self.limit_orders_filled}/{self.limit_orders_attempted})")
+        if self.strategy_errors > 0:
+            lines.append(f"Strategy Errors: {self.strategy_errors} (analyze() crashed — signals lost)")
+            if self.first_error:
+                lines.append(f"First Error: {self.first_error}")
         return "\n".join(lines)
 
 
@@ -183,6 +189,8 @@ class Backtester:
 
         limit_attempted = 0
         limit_filled = 0
+        strategy_errors = 0
+        first_error_msg = ""
 
         self._strategy.initialize(self._risk_limits, self._symbols)
 
@@ -301,6 +309,9 @@ class Backtester:
             try:
                 signals = self._strategy.analyze(markets, portfolio, ts)
             except Exception as e:
+                strategy_errors += 1
+                if strategy_errors == 1:
+                    first_error_msg = f"{type(e).__name__}: {e}"
                 log.warning("backtest.strategy_error", error=str(e), ts=str(ts))
                 continue
 
@@ -576,6 +587,8 @@ class Backtester:
         result.timeframe_mode = "multi"
         result.limit_orders_attempted = limit_attempted
         result.limit_orders_filled = limit_filled
+        result.strategy_errors = strategy_errors
+        result.first_error = first_error_msg
         result.total_trades = len(all_trades)
         result.wins = sum(1 for t in all_trades if t.pnl > 0)
         result.losses = sum(1 for t in all_trades if t.pnl < 0)
@@ -635,6 +648,8 @@ class Backtester:
 
         limit_attempted = 0
         limit_filled = 0
+        strategy_errors = 0
+        first_error_msg = ""
 
         self._strategy.initialize(self._risk_limits, self._symbols)
 
@@ -752,6 +767,9 @@ class Backtester:
             try:
                 signals = self._strategy.analyze(markets, portfolio, ts)
             except Exception as e:
+                strategy_errors += 1
+                if strategy_errors == 1:
+                    first_error_msg = f"{type(e).__name__}: {e}"
                 log.warning("backtest.strategy_error", error=str(e), ts=str(ts))
                 continue
 
@@ -1021,6 +1039,8 @@ class Backtester:
         result = BacktestResult(trades=all_trades)
         result.limit_orders_attempted = limit_attempted
         result.limit_orders_filled = limit_filled
+        result.strategy_errors = strategy_errors
+        result.first_error = first_error_msg
         result.total_trades = len(all_trades)
         result.wins = sum(1 for t in all_trades if t.pnl > 0)
         result.losses = sum(1 for t in all_trades if t.pnl < 0)

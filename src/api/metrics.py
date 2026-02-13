@@ -76,6 +76,13 @@ tb_portfolio_allocation_pct = Gauge("tb_portfolio_allocation_pct", "Percent of p
 tb_trades_by_reason = Gauge("tb_trades_by_reason", "Trade count by close reason", ["reason"], registry=registry)
 tb_trades_by_symbol = Gauge("tb_trades_by_symbol", "Trade count by symbol", ["symbol"], registry=registry)
 
+# --- Candidate gauges ---
+cand_value = Gauge("tb_candidate_value_usd", "Candidate portfolio value", ["slot"], registry=registry)
+cand_pnl = Gauge("tb_candidate_pnl_usd", "Candidate total P&L", ["slot"], registry=registry)
+cand_trades = Gauge("tb_candidate_trade_count", "Candidate trade count", ["slot"], registry=registry)
+cand_win_rate = Gauge("tb_candidate_win_rate", "Candidate win rate", ["slot"], registry=registry)
+cand_active = Gauge("tb_candidate_active", "Candidate slot active (1/0)", ["slot"], registry=registry)
+
 # --- Truth benchmark cache ---
 _truth_cache: dict = {"data": None, "expires_at": 0.0}
 TRUTH_CACHE_TTL = 300  # 5 minutes
@@ -203,6 +210,32 @@ async def metrics_handler(request: web.Request) -> web.Response:
         tb_portfolio_allocation_pct.set(
             (total - portfolio.cash) / total * 100 if total > 0 else 0
         )
+
+        # --- Candidates ---
+        cand_value._metrics.clear()
+        cand_pnl._metrics.clear()
+        cand_trades._metrics.clear()
+        cand_win_rate._metrics.clear()
+        cand_active._metrics.clear()
+        candidate_manager = ctx.get("candidate_manager")
+        if candidate_manager:
+            max_slots = config.orchestrator.max_candidates
+            for slot in range(1, max_slots + 1):
+                slot_str = str(slot)
+                runner = candidate_manager.get_runner(slot)
+                if runner:
+                    status = runner.get_status()
+                    cand_active.labels(slot=slot_str).set(1)
+                    cand_value.labels(slot=slot_str).set(status.get("total_value", 0))
+                    cand_pnl.labels(slot=slot_str).set(status.get("pnl", 0))
+                    cand_trades.labels(slot=slot_str).set(status.get("trade_count", 0))
+                    cand_win_rate.labels(slot=slot_str).set(status.get("win_rate", 0))
+                else:
+                    cand_active.labels(slot=slot_str).set(0)
+                    cand_value.labels(slot=slot_str).set(0)
+                    cand_pnl.labels(slot=slot_str).set(0)
+                    cand_trades.labels(slot=slot_str).set(0)
+                    cand_win_rate.labels(slot=slot_str).set(0)
 
     except Exception as e:
         log.error("metrics.collect_error", error=str(e), error_type=type(e).__name__)

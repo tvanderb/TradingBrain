@@ -6,14 +6,16 @@ Runs daily during the nightly EST window (configurable, default 3:30-6am):
    - Market analysis module output (flexible, can rewrite)
    - Trade performance module output (flexible, can rewrite)
    - Strategy code, doc, version history
+   - Candidate strategies (up to 3 slots running in paper simulation)
    - User constraints (risk limits, goals)
 2. Opus analyzes with labeled inputs and cross-references
-3. Decides: NO_CHANGE / STRATEGY_TWEAK / STRATEGY_RESTRUCTURE / STRATEGY_OVERHAUL
+3. Decides: NO_CHANGE / CREATE_CANDIDATE / CANCEL_CANDIDATE / PROMOTE_CANDIDATE
            / MARKET_ANALYSIS_UPDATE / TRADE_ANALYSIS_UPDATE
-4. If strategy change: Sonnet generates -> Opus reviews -> sandbox -> backtest -> paper test
-5. If analysis change: Sonnet generates -> Opus reviews (math focus) -> sandbox -> deploy (no paper test)
-6. Update strategy document with findings
-7. Data maintenance
+4. If create candidate: Sonnet generates -> Opus reviews -> sandbox -> backtest -> deploy to candidate slot
+5. If promote candidate: candidate code deployed to active strategy, all candidates cleared
+6. If analysis change: Sonnet generates -> Opus reviews (math focus) -> sandbox -> deploy (no paper test)
+7. Update strategy document with findings
+8. Data maintenance
 """
 
 from __future__ import annotations
@@ -96,20 +98,27 @@ You operate within a rigid shell (Kraken exchange client, risk manager, portfoli
 
 ### Your Decisions and Their Consequences
 
-**Strategy changes** trigger a two-loop pipeline:
-- **Inner loop** (code quality): You direct changes → Sonnet generates code → sandbox validates → you review code quality. Up to 3 iterations to get clean code.
-- **Outer loop** (strategy direction): Clean code is backtested → you review results → deploy OR provide fresh strategic direction for another attempt. Up to 3 strategy iterations.
-After backtesting, you will see the full results and previous attempt history. If you reject, provide specific revision instructions — these replace (not append to) the previous direction, giving Sonnet a fresh starting point.
-- **NO_CHANGE** (tier 0): Data keeps accumulating. Active paper tests continue.
-- **STRATEGY_TWEAK** (tier 1): Targeted changes, 1-day paper test. Any active paper test on the previous version terminates and its data becomes incomplete.
-- **STRATEGY_RESTRUCTURE** (tier 2): Logic changes, 2-day paper test. Same consequences.
-- **STRATEGY_OVERHAUL** (tier 3): Fundamental approach change, 1-week paper test. Same consequences.
+**Strategy evolution** uses a candidate system:
+- You can run up to {max_candidates} candidate strategies simultaneously in paper simulation.
+- Each candidate mirrors the fund's portfolio at creation time and trades independently with live market data.
+- Candidates go through the code pipeline (sandbox, code review, backtest) before deployment to a candidate slot.
+- You choose how long to evaluate each candidate (or leave indefinite and promote when ready).
+- You can cancel underperforming candidates at any time.
+- When you promote a candidate, it becomes the active strategy. All other candidates are canceled.
+- On promotion, you decide what happens to fund positions: "keep" (new strategy inherits them) or "close_all" (clean slate).
+
+**Candidate execution:**
+Candidates participate in every scan cycle. Same market data, same risk limits for signal sizing. Paper fills with slippage. Candidates never halt — risk halts only affect the fund.
+
+**Decision types:**
+- **NO_CHANGE**: Data keeps accumulating. Active candidates continue running.
+- **CREATE_CANDIDATE**: Creates a new candidate strategy in a paper simulation slot. Goes through the code pipeline first.
+- **CANCEL_CANDIDATE**: Cancels an underperforming or stale candidate. Frees the slot.
+- **PROMOTE_CANDIDATE**: Promotes a candidate to become the active fund strategy. All candidates are cleared.
+- **MARKET_ANALYSIS_UPDATE**: Rewrites the market analysis module (read-only, no paper test needed).
+- **TRADE_ANALYSIS_UPDATE**: Rewrites the trade performance module (read-only, no paper test needed).
 
 **Analysis module changes** — Sonnet generates → Opus reviews (math correctness focus) → sandbox → immediate deploy. No paper test needed (read-only modules).
-- **MARKET_ANALYSIS_UPDATE**: Changes what market data you see next cycle.
-- **TRADE_ANALYSIS_UPDATE**: Changes what performance data you see next cycle.
-
-Deploying a new strategy while a paper test is active terminates that test. Rapid strategy changes destroy the ability to evaluate whether previous changes helped.
 
 ### Shell-Enforced Boundaries
 These hard constraints cannot be bypassed, modified, or overridden:
@@ -135,8 +144,6 @@ Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_
 ### Paper vs Live Execution
 - **Paper mode**: Instant simulated fills with configurable slippage (default 0.05%). SL/TP checked client-side every 30 seconds. No exchange API calls.
 - **Live mode**: Orders placed on Kraken with 30-second fill timeout. Partial fills are supported. Exchange-native SL/TP orders placed on Kraken after each BUY fill (3 retry attempts each). Startup reconciliation checks for orders that filled while the system was down.
-- **Paper test evaluation**: A paper test must generate at least the configured minimum number of trades to pass. Below that threshold, the result is "inconclusive" — the strategy is not deployed. This prevents deploying untested strategies.
-
 ### Backtester Capabilities and Limitations
 The backtester runs against all available historical data: 5m (30 days), 1h (up to 1 year), 1d (up to 7 years). It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5m resolution where available for intra-hour precision.
 
@@ -195,21 +202,24 @@ All timeframes are bootstrapped from Kraken on cold start — the strategy has r
 
 ### Response Format
 Respond in JSON:
-{
-    "decision": "NO_CHANGE" | "STRATEGY_TWEAK" | "STRATEGY_RESTRUCTURE" | "STRATEGY_OVERHAUL" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
-    "risk_tier": 0 | 1 | 2 | 3,
+{{
+    "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
     "reasoning": "Your analysis and the basis for your decision",
-    "specific_changes": "What exactly to change, if applicable",
+    "specific_changes": "What to build (CREATE_CANDIDATE only)",
+    "slot": null,
+    "replace_slot": null,
+    "evaluation_duration_days": null,
+    "position_handling": null,
     "cross_reference_findings": "Findings from comparing market conditions to trade outcomes",
     "market_observations": "Notable market observations from this cycle"
-}"""
+}}"""
 
 CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading strategy.
 
 You MUST:
 1. Inherit from StrategyBase (imported from src.shell.contract)
-2. Implement initialize() and analyze() methods
-3. Return list[Signal] from analyze()
+2. Implement initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None
+3. Implement analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime) -> list[Signal]
 4. Keep the strategy in a single file
 5. Include clear docstring explaining the strategy
 
@@ -236,26 +246,60 @@ scipy.stats provides statistical tools:
 scipy.signal: argrelextrema (support/resistance level detection)
 scipy.optimize: minimize (position sizing optimization)
 
-The strategy receives:
-- markets: dict[str, SymbolData] with candles_5m (30d), candles_1h (1yr), candles_1d (7yr), current_price, spread, volume_24h, maker_fee_pct, taker_fee_pct
-  - maker_fee_pct and taker_fee_pct are per-pair (may differ across symbols)
-- portfolio: Portfolio with cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today
-- timestamp: datetime
+### SymbolData — EXACT attribute names (do NOT use `.candles` — it does not exist)
 
-Return list[Signal] with: symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct, order_type (MARKET/LIMIT), limit_price (for LIMIT orders), stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional float override), tag (optional str — position identifier)
+  class SymbolData:
+      symbol: str
+      current_price: float
+      candles_5m: pd.DataFrame   # Last 30 days of 5-min OHLCV
+      candles_1h: pd.DataFrame   # Last 1 year of 1-hour OHLCV
+      candles_1d: pd.DataFrame   # Last 7 years of daily OHLCV
+      spread: float
+      volume_24h: float
+      maker_fee_pct: float       # Per-pair maker fee (%)
+      taker_fee_pct: float       # Per-pair taker fee (%)
+
+  Each DataFrame has columns: open, high, low, close, volume (DatetimeIndex).
+  Access pattern:
+      data = markets["BTC/USD"]
+      df_1h = data.candles_1h
+      close = df_1h["close"]
+      rsi = ta.momentum.rsi(close, window=14)
+
+  IMPORTANT: During backtesting, DataFrames may be short or empty at early timestamps.
+  Always check length before applying indicators:
+      if len(df_1h) < 50:
+          continue  # Not enough data for this symbol yet
+
+### Portfolio
+
+  class Portfolio:
+      cash: float
+      total_value: float
+      positions: list[OpenPosition]   # OpenPosition has: symbol, qty, avg_entry, current_price, unrealized_pnl, unrealized_pnl_pct, intent, stop_loss, take_profit, tag
+      recent_trades: list[ClosedTrade]  # Last 100 — ClosedTrade has: symbol, entry_price, exit_price, pnl, pnl_pct, fees, intent
+      daily_pnl: float
+      total_pnl: float
+      fees_today: float
+
+### Signal output
+
+Return list[Signal] with: symbol, action (BUY/SELL/CLOSE/MODIFY), size_pct (0.0-1.0 of portfolio), order_type (MARKET/LIMIT), limit_price (for LIMIT), stop_loss, take_profit, intent (DAY/SWING/POSITION), confidence, reasoning, slippage_tolerance (optional), tag (optional)
 
 Fee awareness:
 - MARKET orders use taker fees. LIMIT orders use maker fees (lower).
-- Access per-pair fees via SymbolData.maker_fee_pct / SymbolData.taker_fee_pct.
+- Access per-pair fees via data.maker_fee_pct / data.taker_fee_pct.
 
 Position tags:
-- Each position has a unique tag. Access via OpenPosition.tag in portfolio.positions.
+- Each position has a unique tag. Access via position.tag in portfolio.positions.
 - BUY without tag creates a new position. BUY with an existing tag averages in.
 - SELL/CLOSE without tag targets the oldest position for that symbol.
 - MODIFY requires a tag — updates SL/TP/intent without closing. Use size_pct=0.
 
-Example MODIFY signal:
-  Signal(symbol="BTC/USD", action=Action.MODIFY, size_pct=0, tag="auto_BTCUSD_001", stop_loss=95000.0)
+### Performance rules (prevent backtest timeout)
+- Do NOT call .copy() on large DataFrames — compute indicators on originals.
+- Use ta's functional API (e.g., ta.momentum.rsi()) not class-based API.
+- Add early returns / guard clauses for empty or insufficient data.
 
 Output ONLY the Python code. No markdown, no explanation, just the code."""
 
@@ -265,20 +309,40 @@ CODE_REVIEW_SYSTEM = """You are a code reviewer for a trading strategy. Check fo
 2. Safety — no forbidden imports, no side effects, no network calls
 3. Logic correctness — edge cases, division by zero, empty data handling
 4. Risk management — stop losses set, position sizing within limits
-5. Risk tier accuracy — is the self-assessed tier correct?
-6. Long-only compliance — no SHORT signals (system has no margin access)
+5. Long-only compliance — no SHORT signals (system has no margin access)
 7. Tag hygiene — MODIFY signals must include a tag. MODIFY without tag will be rejected.
+8. Data access correctness — see IO Contract below. Flag ANY wrong attribute name as an error.
+
+### IO Contract (MUST match exactly — wrong names cause runtime crashes)
+
+SymbolData attributes:
+  .symbol (str), .current_price (float), .spread (float), .volume_24h (float)
+  .candles_5m (DataFrame), .candles_1h (DataFrame), .candles_1d (DataFrame)
+  .maker_fee_pct (float), .taker_fee_pct (float)
+
+  THERE IS NO .candles, .data, .ohlcv, or .df attribute. Only candles_5m, candles_1h, candles_1d.
+  Each DataFrame columns: open, high, low, close, volume (DatetimeIndex).
+
+Portfolio attributes:
+  .cash, .total_value, .positions (list[OpenPosition]), .recent_trades (list[ClosedTrade])
+  .daily_pnl, .total_pnl, .fees_today
+
+OpenPosition attributes:
+  .symbol, .qty, .avg_entry, .current_price, .unrealized_pnl, .unrealized_pnl_pct
+  .intent, .stop_loss, .take_profit, .tag, .side, .opened_at
+
+Method signatures:
+  initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None
+  analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime) -> list[Signal]
 
 Respond in JSON:
 {
     "approved": true | false,
     "issues": ["..."],
-    "risk_tier_correct": true | false,
-    "suggested_tier": 1 | 2 | 3,
     "feedback": "..."
 }"""
 
-BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trading strategy before it enters paper testing.
+BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trading strategy before it enters a candidate slot for forward testing.
 
 These are simulation results — deterministic computation on a simplified market model.
 
@@ -289,8 +353,8 @@ These are simulation results — deterministic computation on a simplified marke
 - Historical data may not capture future market conditions
 
 **Deployment context:**
-- Approving means the strategy enters paper testing (simulated trading with live prices)
-- Paper testing is NOT live trading — no real money at risk
+- Approving means the strategy enters a candidate slot for forward paper testing alongside the active strategy
+- Candidates trade with paper fills using live market data — no real money at risk
 - Rejecting sends the strategy back for revision with your new direction
 
 **Consider:**
@@ -394,6 +458,7 @@ class Orchestrator:
         reporter: Reporter,
         data_store: DataStore,
         notifier: Notifier | None = None,
+        candidate_manager=None,
     ) -> None:
         self._config = config
         self._db = db
@@ -401,9 +466,20 @@ class Orchestrator:
         self._reporter = reporter
         self._data_store = data_store
         self._notifier = notifier
+        self._candidate_manager = candidate_manager
+        self._close_all_callback = None
+        self._scan_state: dict | None = None
         self._cycle_id: str | None = None
         self._running = False
         self._cycle_lock = asyncio.Lock()
+
+    def set_close_all_callback(self, callback) -> None:
+        """Set callback for closing all fund positions during promotion."""
+        self._close_all_callback = callback
+
+    def set_scan_state(self, scan_state: dict) -> None:
+        """Set reference to the shared scan_state dict."""
+        self._scan_state = scan_state
 
     def _extract_json(self, response: str) -> dict | None:
         """Extract JSON object from AI response text.
@@ -521,14 +597,8 @@ class Orchestrator:
                     await self._notifier.orchestrator_cycle_completed("SKIPPED_BUDGET")
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
-            # 0b. Evaluate any paper tests that have completed
-            paper_results = await self._evaluate_paper_tests()
-
             # 1. Gather context
             context = await self._gather_context()
-
-            # Include completed paper test results so Opus can learn from outcomes
-            context["completed_paper_tests"] = paper_results
 
             # 2. Opus analysis
             decision = await self._analyze(context)
@@ -537,26 +607,24 @@ class Orchestrator:
             decision_type = str(decision.get("decision") or "NO_CHANGE").strip().upper()
             deployed_version = None
 
-            valid_strategy_types = {
-                "STRATEGY_TWEAK", "STRATEGY_RESTRUCTURE", "STRATEGY_OVERHAUL",
-                "TWEAK", "RESTRUCTURE", "OVERHAUL",
-            }
-
             if decision_type == "NO_CHANGE":
                 report = f"Orchestrator: No changes. {decision.get('reasoning', '')}"
             elif decision_type in ("MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE"):
                 report = await self._execute_analysis_change(decision, context)
-            elif decision_type in valid_strategy_types:
-                report = await self._execute_change(decision, context)
-                # Extract deployed version from report if deploy succeeded
-                if "deployed" in report.lower():
+            elif decision_type == "CREATE_CANDIDATE":
+                report = await self._create_candidate(decision, context)
+            elif decision_type == "CANCEL_CANDIDATE":
+                report = await self._cancel_candidate(decision)
+            elif decision_type == "PROMOTE_CANDIDATE":
+                report = await self._promote_candidate(decision)
+                if "promoted" in report.lower():
                     ver_row = await self._db.fetchone(
-                        "SELECT version FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
+                        "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
                     )
                     deployed_version = ver_row["version"] if ver_row else None
             else:
                 log.warning("orchestrator.unknown_decision_type", decision_type=decision_type)
-                report = f"Orchestrator: Unknown decision type '{decision_type}' — treated as NO_CHANGE."
+                report = f"Orchestrator: Unknown decision '{decision_type}' — treated as NO_CHANGE."
 
             # 4. Store daily observations
             await self._store_observation(decision)
@@ -687,7 +755,7 @@ class Orchestrator:
 
         try:
             versions = await self._db.fetchall(
-                "SELECT version, description, risk_tier, backtest_result, paper_test_result, market_conditions "
+                "SELECT version, description, backtest_result, market_conditions "
                 "FROM strategy_versions ORDER BY created_at DESC LIMIT 10"
             )
         except Exception as e:
@@ -701,14 +769,13 @@ class Orchestrator:
             log.warning("orchestrator.context_error", section="usage", error=str(e))
             usage = {"models": {}, "total_cost": 0, "daily_limit": 0, "used": 0}
 
-        try:
-            active_paper_tests = await self._db.fetchall(
-                """SELECT strategy_version, risk_tier, required_days, started_at, ends_at, status
-                   FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC"""
-            )
-        except Exception as e:
-            log.warning("orchestrator.context_error", section="paper_tests", error=str(e))
-            active_paper_tests = []
+        # --- 6. CANDIDATE STRATEGIES ---
+        candidate_context = []
+        if self._candidate_manager:
+            try:
+                candidate_context = await self._candidate_manager.get_context_for_orchestrator()
+            except Exception as e:
+                log.warning("orchestrator.context_error", section="candidates", error=str(e))
 
         # Signal drought detection
         try:
@@ -764,7 +831,7 @@ class Orchestrator:
             "version_history": [dict(v) for v in versions],
             # Operational
             "token_usage": usage,
-            "active_paper_tests": [dict(t) for t in active_paper_tests],
+            "candidates": candidate_context,
             "recent_observations": [dict(o) for o in recent_observations],
             "signal_drought": drought_info,
         }
@@ -837,20 +904,19 @@ class Orchestrator:
 - Max daily loss: {self._config.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts)
 - Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts)
 - Consecutive loss halt: {self._config.risk.rollback_consecutive_losses} consecutive losses (persists across days)
-- Min paper test trades: {self._config.orchestrator.min_paper_test_trades} (below this → inconclusive, no deploy)
+- Max candidate slots: {self._config.orchestrator.max_candidates}
 - Token budget: {context["token_usage"].get("used", 0)} / {context["token_usage"].get("daily_limit", 0)} tokens used today (${context["token_usage"].get("total_cost", 0):.4f})
+
+---
+
+## CANDIDATE STRATEGIES
+{json.dumps(context.get("candidates", []), indent=2, default=str) if context.get("candidates") else "No active candidates. All slots available."}
 
 ---
 
 ## SIGNAL & OBSERVATION STATE
 ### Signal Drought Detection:
 {json.dumps(context["signal_drought"], indent=2, default=str)}
-
-### Active Paper Tests:
-{json.dumps(context["active_paper_tests"], indent=2, default=str) if context["active_paper_tests"] else "No active paper tests."}
-
-### Completed Paper Tests (this cycle):
-{json.dumps(context.get("completed_paper_tests", []), indent=2, default=str) if context.get("completed_paper_tests") else "No paper tests completed this cycle."}
 
 ### Recent Observations (last 14 days):
 {json.dumps(context["recent_observations"], indent=2, default=str) if context["recent_observations"] else "No prior observations."}
@@ -880,28 +946,25 @@ Respond in JSON format."""
         await self._store_thought("analysis", "opus", prompt, response, parsed)
         return parsed
 
-    async def _execute_change(self, decision: dict, context: dict) -> str:
-        """Execute a strategy change with nested loops.
+    async def _create_candidate(self, decision: dict, context: dict) -> str:
+        """Create a candidate strategy with nested loops (same pipeline as old _execute_change).
 
-        Outer loop (strategy direction): Opus evaluates backtest results and redirects.
-        Inner loop (code quality): Sonnet iterates on sandbox/review feedback.
+        Instead of deploying to active strategy, deploys to a candidate slot.
         """
-        try:
-            tier = max(1, min(3, int(decision.get("risk_tier", 1))))
-        except (TypeError, ValueError):
-            tier = 1
+        if not self._candidate_manager:
+            return "Cannot create candidate: no candidate manager."
+
+        # Pick slot
+        slot = self._pick_candidate_slot(decision)
+        if slot is None:
+            return "Cannot create candidate: all slots full and no replace_slot specified."
+
         changes = str(decision.get("specific_changes") or "")
-        original_changes = changes  # preserve Opus's original direction
+        original_changes = changes
         max_inner = self._config.orchestrator.max_revisions
         max_outer = self._config.orchestrator.max_strategy_iterations
+        eval_days = decision.get("evaluation_duration_days")
 
-        # Get parent version for lineage tracking
-        current_ver = await self._db.fetchone(
-            "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
-        )
-        parent_version = current_ver["version"] if current_ver else None
-
-        # System constraints shared by both tier 1 and tier 2+ prompts
         system_constraints = (
             f"## System Constraints\n"
             f"- Trading pairs: {', '.join(self._config.symbols)}\n"
@@ -916,44 +979,15 @@ Respond in JSON format."""
             f"- Signal supports optional slippage_tolerance override (float)"
         )
 
-        attempt_history = []  # tracks outer iterations for Opus awareness
+        attempt_history = []
 
         for outer in range(max_outer):
-            # === INNER LOOP: Sonnet writes clean code ===
             approved_code = None
             diff = None
-            actual_tier = tier
-            inner_changes = changes  # reset inner feedback each outer iteration
+            inner_changes = changes
 
             for inner in range(max_inner):
-                # Sonnet generates code — tier 1 gets targeted edit instructions
-                if tier == 1:
-                    gen_prompt = f"""Make targeted changes to the existing trading strategy.
-
-## Change Request
-{inner_changes}
-
-## IMPORTANT: This is a tier 1 tweak — make minimal, targeted changes only.
-- Modify ONLY the specific parameters, thresholds, or logic described above.
-- Keep everything else IDENTICAL to the current strategy.
-- Do NOT restructure, reorganize, or rewrite unrelated code.
-
-## Current Strategy (modify this)
-```python
-{context["strategy_code"]}
-```
-
-## Strategy Document
-{context["strategy_doc"]}
-
-## Performance Context
-{json.dumps(context["performance_7d"], indent=2, default=str)}
-
-{system_constraints}
-
-Output the complete strategy.py file with your targeted changes applied."""
-                else:
-                    gen_prompt = f"""Generate a new trading strategy based on these requirements:
+                gen_prompt = f"""Generate a new trading strategy based on these requirements:
 
 ## Change Request
 {inner_changes}
@@ -976,40 +1010,32 @@ Generate the complete strategy.py file."""
                 code = await self._ai.ask_sonnet(
                     gen_prompt,
                     system=CODE_GEN_SYSTEM,
-                    purpose=f"code_gen_outer{outer + 1}_inner{inner + 1}",
+                    purpose=f"candidate_gen_outer{outer + 1}_inner{inner + 1}",
                 )
                 await self._store_thought(
-                    f"code_gen_o{outer + 1}_i{inner + 1}", "sonnet", gen_prompt, code
+                    f"candidate_gen_o{outer + 1}_i{inner + 1}", "sonnet", gen_prompt, code
                 )
 
-                # Strip markdown code fences if present
+                # Strip markdown code fences
                 fence_match = re.search(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
                 if fence_match:
                     code = fence_match.group(1)
                 code = code.strip()
 
-                # Sandbox validation
+                # Sandbox
                 sandbox_result = validate_strategy(code)
                 if not sandbox_result.passed:
-                    log.warning(
-                        "orchestrator.sandbox_failed",
-                        outer=outer + 1,
-                        inner=inner + 1,
-                        errors=sandbox_result.errors,
-                    )
+                    log.warning("orchestrator.candidate_sandbox_failed",
+                                outer=outer + 1, inner=inner + 1, errors=sandbox_result.errors)
                     inner_changes += f"\n\nPrevious attempt failed sandbox: {sandbox_result.errors}. Fix these issues."
                     continue
 
-                # Generate diff for reviewer context
+                # Diff
                 old_lines = context["strategy_code"].splitlines(keepends=True)
                 new_lines = code.splitlines(keepends=True)
-                diff = "".join(
-                    difflib.unified_diff(
-                        old_lines, new_lines, fromfile="current", tofile="proposed", n=3
-                    )
-                )
+                diff = "".join(difflib.unified_diff(old_lines, new_lines, fromfile="current", tofile="proposed", n=3))
 
-                # Opus code review — includes diff for change context
+                # Code review
                 review_prompt = f"""Review this trading strategy code for correctness and safety.
 
 ## Changes from current strategy (diff)
@@ -1022,233 +1048,214 @@ Generate the complete strategy.py file."""
 {code}
 ```
 
-The agent classified this change as risk tier {tier} ({["", "tweak", "restructure", "overhaul"][tier]}).
-Is this classification correct?
+This is a candidate strategy that will run in paper simulation alongside the active strategy.
 
 {json.dumps(decision, indent=2, default=str)}"""
 
                 review_response = await self._ai.ask_opus(
-                    review_prompt,
-                    system=CODE_REVIEW_SYSTEM,
-                    purpose=f"code_review_outer{outer + 1}_inner{inner + 1}",
+                    review_prompt, system=CODE_REVIEW_SYSTEM,
+                    purpose=f"candidate_review_outer{outer + 1}_inner{inner + 1}",
                 )
-
                 review = self._extract_json(review_response)
                 if review is None:
                     review = {"approved": False, "feedback": "Failed to parse review"}
 
                 await self._store_thought(
-                    f"code_review_o{outer + 1}_i{inner + 1}",
-                    "opus",
-                    review_prompt,
-                    review_response,
-                    review,
+                    f"candidate_review_o{outer + 1}_i{inner + 1}", "opus",
+                    review_prompt, review_response, review,
                 )
 
                 if review.get("approved"):
                     approved_code = code
-                    # Determine actual risk tier
-                    try:
-                        actual_tier = max(1, min(3, int(review.get("suggested_tier", tier))))
-                    except (TypeError, ValueError):
-                        actual_tier = tier
-                    break  # exit inner loop — code quality approved
+                    break
                 else:
                     feedback = review.get("feedback", "No feedback")
                     issues = review.get("issues", [])
-                    log.warning(
-                        "orchestrator.review_rejected",
-                        outer=outer + 1,
-                        inner=inner + 1,
-                        feedback=feedback,
-                    )
+                    log.warning("orchestrator.candidate_review_rejected",
+                                outer=outer + 1, inner=inner + 1, feedback=feedback)
                     inner_changes += f"\n\nCode review feedback: {feedback}\nIssues: {issues}"
 
             if approved_code is None:
-                log.warning("orchestrator.code_quality_exhausted", outer=outer + 1, max_inner=max_inner)
-                return f"Strategy change aborted: code quality failed after {max_inner} attempts."
+                log.warning("orchestrator.candidate_code_quality_exhausted", outer=outer + 1)
+                return f"Candidate creation aborted: code quality failed after {max_inner} attempts."
 
-            # === BACKTEST the approved code ===
+            # Backtest
             backtest_passed, backtest_summary, backtest_result = await self._run_backtest(approved_code)
             if not backtest_passed:
-                log.warning(
-                    "orchestrator.backtest_failed",
-                    outer=outer + 1,
-                    summary=backtest_summary,
-                )
-                attempt_history.append({
-                    "attempt": outer + 1,
-                    "outcome": "backtest_crash",
-                    "summary": backtest_summary,
-                })
+                attempt_history.append({"attempt": outer + 1, "outcome": "backtest_crash", "summary": backtest_summary})
                 changes = f"Original goal: {original_changes}\n\nPrevious attempt crashed during backtest: {backtest_summary}. Try a different approach."
                 continue
 
-            # === OPUS REVIEWS BACKTEST ===
-            bt_review = await self._review_backtest(
-                backtest_result, backtest_summary, decision, diff, attempt_history
-            )
+            # Opus reviews backtest
+            bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff, attempt_history)
 
             if bt_review.get("deploy", False):
-                # === DEPLOY ===
-                paper_days = {1: 1, 2: 2, 3: 7}.get(actual_tier, 1)
+                # Deploy to candidate slot
+                version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}_candidate"
 
-                # Terminate any running paper tests (superseded by new strategy)
-                await self._terminate_running_paper_tests("superseded by new deploy")
+                # Build portfolio snapshot from fund state
+                snapshot = await self._get_portfolio_snapshot()
 
-                # Retire old version
-                if parent_version:
-                    await self._db.execute(
-                        "UPDATE strategy_versions SET retired_at = datetime('now') WHERE version = ?",
-                        (parent_version,),
-                    )
+                # Get fund positions for cloning
+                fund_positions = await self._db.fetchall("SELECT * FROM positions")
+                initial_positions = [dict(p) for p in fund_positions]
 
-                # Deploy to active
-                version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                code_hash = deploy_strategy(approved_code, version)
+                await self._candidate_manager.create_candidate(
+                    slot=slot,
+                    code=approved_code,
+                    version=version,
+                    description=changes[:500],
+                    backtest_summary=backtest_summary[:2000] if backtest_summary else "",
+                    evaluation_duration_days=eval_days,
+                    portfolio_snapshot=snapshot,
+                    initial_positions=initial_positions,
+                )
 
-                # Record in strategy index with parent version lineage + source code (L4 fallback)
+                # Record in strategy_versions (not deployed — candidate only)
+                from src.strategy.loader import hash_code_string
+                code_hash = hash_code_string(approved_code)
                 await self._db.execute(
                     """INSERT INTO strategy_versions
-                       (version, parent_version, code_hash, risk_tier, description, backtest_result, market_conditions, deployed_at, code)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)""",
-                    (
-                        version,
-                        parent_version,
-                        code_hash,
-                        actual_tier,
-                        changes,
-                        backtest_summary,
-                        decision.get("market_observations", ""),
-                        approved_code,
-                    ),
+                       (version, code_hash, description, backtest_result, market_conditions, code)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (version, code_hash, f"Candidate slot {slot}: {changes[:200]}",
+                     backtest_summary, decision.get("market_observations", ""), approved_code),
                 )
-
-                # Create paper test entry
-                ends_at = (datetime.now(timezone.utc) + timedelta(days=paper_days)).strftime("%Y-%m-%d %H:%M:%S")
-                await self._db.execute(
-                    """INSERT INTO paper_tests
-                       (strategy_version, risk_tier, required_days, ends_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (version, actual_tier, paper_days, ends_at),
-                )
-
                 await self._db.commit()
 
-                log.info(
-                    "orchestrator.strategy_deployed",
-                    version=version,
-                    tier=actual_tier,
-                    paper_days=paper_days,
-                    parent=parent_version,
-                )
-
                 if self._notifier:
-                    await self._notifier.strategy_deployed(version, actual_tier, changes)
-                    await self._notifier.paper_test_started(version, paper_days)
+                    await self._notifier.candidate_created(slot, version, eval_days)
 
-                return (
-                    f"Strategy {version} deployed (tier {actual_tier}, {paper_days}d paper test).\n"
-                    f"Changes: {changes}"
-                )
+                eval_str = f"{eval_days}d" if eval_days else "indefinite"
+                return f"Candidate deployed to slot {slot} as {version} (evaluation: {eval_str})."
 
-            # Opus rejected — record history, use fresh direction
-            reasoning = bt_review.get("reasoning", "No reasoning provided")
-            concerns = bt_review.get("concerns", [])
+            # Rejected
+            reasoning = bt_review.get("reasoning", "No reasoning")
             revision = bt_review.get("revision_instructions", "")
-            attempt_history.append({
-                "attempt": outer + 1,
-                "outcome": "rejected",
-                "backtest_summary": backtest_summary,
-                "reasoning": reasoning,
-            })
+            attempt_history.append({"attempt": outer + 1, "outcome": "rejected",
+                                    "backtest_summary": backtest_summary, "reasoning": reasoning})
 
-            log.info(
-                "orchestrator.strategy_iteration",
-                outer=outer + 1,
-                reasoning=reasoning,
-            )
-
-            # Fresh direction from Opus replaces accumulated feedback
             if revision:
                 changes = f"Original goal: {original_changes}\n\nRevision from fund manager (attempt {outer + 1}): {revision}"
             else:
                 changes = f"{original_changes}\n\nPrevious backtest rejected: {reasoning}. Try a different approach."
 
-        return f"Strategy change aborted after {max_outer} strategy iterations."
+        return f"Candidate creation aborted after {max_outer} strategy iterations."
 
-    async def _terminate_running_paper_tests(self, reason: str = "superseded") -> int:
-        """Terminate all running paper tests. Called before deploying a new strategy."""
-        result = await self._db.execute(
-            "UPDATE paper_tests SET status = 'terminated' WHERE status = 'running'"
+    async def _cancel_candidate(self, decision: dict) -> str:
+        """Cancel a running candidate strategy."""
+        slot = decision.get("slot")
+        if not slot or not self._candidate_manager:
+            return "Cannot cancel: invalid slot or no candidate manager."
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            return f"Cannot cancel: invalid slot '{slot}'."
+        active = self._candidate_manager.get_active_slots()
+        if slot not in active:
+            return f"Cannot cancel: slot {slot} has no running candidate."
+        await self._candidate_manager.cancel_candidate(slot, decision.get("reasoning", ""))
+        if self._notifier:
+            await self._notifier.candidate_canceled(slot)
+        return f"Candidate in slot {slot} canceled."
+
+    async def _promote_candidate(self, decision: dict) -> str:
+        """Promote a candidate to become the active strategy."""
+        slot = decision.get("slot")
+        if not slot or not self._candidate_manager:
+            return "Cannot promote: invalid slot or no candidate manager."
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            return f"Cannot promote: invalid slot '{slot}'."
+        active = self._candidate_manager.get_active_slots()
+        if slot not in active:
+            return f"Cannot promote: slot {slot} has no running candidate."
+
+        position_handling = decision.get("position_handling", "keep")
+
+        # Close all fund positions if requested
+        if position_handling == "close_all" and self._close_all_callback:
+            await self._close_all_callback()
+
+        # Get code and promote (cancels all candidates)
+        code = await self._candidate_manager.promote_candidate(slot)
+
+        # Deploy to active strategy file
+        version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}_promoted"
+        code_hash = deploy_strategy(code, version)
+
+        # Record in strategy_versions as deployed
+        await self._db.execute(
+            """INSERT INTO strategy_versions
+               (version, code_hash, description, deployed_at, code)
+               VALUES (?, ?, ?, datetime('now'), ?)""",
+            (version, code_hash, f"Promoted from candidate slot {slot}", code),
         )
         await self._db.commit()
-        count = result.rowcount if hasattr(result, 'rowcount') else 0
-        if count:
-            log.info("orchestrator.paper_tests_terminated", count=count, reason=reason)
-        return count
 
-    async def _evaluate_paper_tests(self) -> list[dict]:
-        """Evaluate paper tests that have reached their end date.
-        Returns list of evaluation results for context."""
-        completed = await self._db.fetchall(
-            """SELECT id, strategy_version, risk_tier, started_at, ends_at
-               FROM paper_tests
-               WHERE status = 'running' AND ends_at <= datetime('now', 'utc')"""
+        # Signal main.py to reload strategy
+        if self._scan_state:
+            self._scan_state["strategy_reload_needed"] = True
+
+        if self._notifier:
+            await self._notifier.candidate_promoted(slot, version)
+            await self._notifier.strategy_deployed(version, 0, f"Promoted from slot {slot}")
+
+        return f"Candidate from slot {slot} promoted as {version}. Position handling: {position_handling}."
+
+    def _pick_candidate_slot(self, decision: dict) -> int | None:
+        """Find an available candidate slot."""
+        active = set(self._candidate_manager.get_active_slots())
+        max_slots = self._config.orchestrator.max_candidates
+        for i in range(1, max_slots + 1):
+            if i not in active:
+                return i
+        replace = decision.get("replace_slot")
+        if replace:
+            try:
+                replace = int(replace)
+            except (TypeError, ValueError):
+                return None
+            if 1 <= replace <= max_slots:
+                return replace
+        return None
+
+    async def _get_portfolio_snapshot(self) -> dict:
+        """Snapshot fund portfolio for candidate initialization."""
+        # Try to get cash from portfolio tracker state via scan_state
+        # Fall back to paper_balance from config
+        cash = self._config.paper_balance_usd
+
+        # Query current portfolio value from daily_performance or positions
+        positions = await self._db.fetchall("SELECT * FROM positions")
+        pos_value = sum(
+            (p.get("current_price") or p["avg_entry"]) * p["qty"]
+            for p in positions
         )
-        results = []
-        for test in completed:
-            version = test["strategy_version"]
-            # Get trades made during the paper test period (filter by time window)
-            trades = await self._db.fetchall(
-                "SELECT pnl FROM trades WHERE strategy_version = ? AND pnl IS NOT NULL AND datetime(opened_at) >= datetime(?) AND closed_at IS NOT NULL AND datetime(closed_at) <= datetime(?)",
-                (version, test["started_at"], test["ends_at"]),
-            )
-            total_pnl = sum(t["pnl"] for t in trades) if trades else 0.0
-            trade_count = len(trades)
-            wins = sum(1 for t in trades if t["pnl"] > 0)
 
-            # Pass/fail: must have enough trades and not lose money
-            min_trades = self._config.orchestrator.min_paper_test_trades
-            if trade_count < min_trades:
-                passed = False
-                status = "inconclusive"  # Not enough trades — don't deploy untested strategy
-            elif total_pnl >= 0:
-                passed = True
-                status = "passed"
-            else:
-                passed = False
-                status = "failed"
-
-            result_data = {"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins, "min_required": min_trades}
-            await self._db.execute(
-                "UPDATE paper_tests SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?",
-                (status, json.dumps(result_data), test["id"]),
-            )
-
-            results.append({
-                "version": version,
-                "status": status,
-                "trades": trade_count,
-                "pnl": total_pnl,
-                "min_required": min_trades,
-            })
-
-            if self._notifier:
-                await self._notifier.paper_test_completed(
-                    version, passed,
-                    {"trades": trade_count, "pnl": round(total_pnl, 4), "wins": wins},
+        # Try to get actual cash from system_meta
+        meta_row = await self._db.fetchone(
+            "SELECT value FROM system_meta WHERE key = 'paper_starting_capital'"
+        )
+        if meta_row:
+            try:
+                starting = float(meta_row["value"])
+                # Rough cash estimate: starting + trade PnL - position cost
+                pnl_row = await self._db.fetchone(
+                    "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE pnl IS NOT NULL"
                 )
+                total_pnl = pnl_row["total_pnl"] if pnl_row else 0
+                cash = starting + total_pnl - pos_value
+                cash = max(0, cash)
+            except (ValueError, TypeError):
+                pass
 
-            log.info(
-                "orchestrator.paper_test_evaluated",
-                version=version, status=status,
-                trades=trade_count, pnl=round(total_pnl, 4),
-            )
-
-        if results:
-            await self._db.commit()
-        return results
+        return {
+            "cash": round(cash, 2),
+            "positions": [dict(p) for p in positions],
+            "total_value": round(cash + pos_value, 2),
+        }
 
     async def _execute_analysis_change(self, decision: dict, context: dict) -> str:
         """Execute an analysis module update: generate -> review -> sandbox -> deploy.
@@ -1484,14 +1491,14 @@ The orchestrator wants to change this module because: {changes}"""
         self, result: BacktestResult | None, summary: str, decision: dict, diff: str,
         attempt_history: list[dict] | None = None,
     ) -> dict:
-        """Opus reviews backtest results and decides whether to deploy to paper test.
+        """Opus reviews backtest results and decides whether to deploy to candidate slot.
 
         Returns parsed JSON with 'deploy' bool, 'reasoning', 'concerns', and 'revision_instructions'.
         """
         if result is None:
             return {
                 "deploy": True,
-                "reasoning": "No historical data available — deploying to paper test for live evaluation.",
+                "reasoning": "No historical data available — deploying to candidate slot for live evaluation.",
                 "concerns": ["No backtest data to evaluate"],
                 "revision_instructions": "",
             }
@@ -1505,7 +1512,7 @@ The orchestrator wants to change this module because: {changes}"""
         else:
             history_text = "This is the first attempt."
 
-        review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to paper testing.
+        review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to a candidate slot.
 
 ## Backtest Results
 {summary}

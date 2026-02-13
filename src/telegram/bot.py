@@ -52,6 +52,7 @@ class TelegramBot:
             "thoughts": self._commands.cmd_thoughts,
             "thought": self._commands.cmd_thought,
             "orchestrate": self._commands.cmd_orchestrate,
+            "candidates": self._commands.cmd_candidates,
             "pause": self._commands.cmd_pause,
             "resume": self._commands.cmd_resume,
             "kill": self._commands.cmd_kill,

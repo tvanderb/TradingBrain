@@ -268,6 +268,63 @@ CREATE TABLE IF NOT EXISTS conditional_orders (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Candidate strategy slots (up to 3 simultaneous)
+CREATE TABLE IF NOT EXISTS candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot INTEGER NOT NULL UNIQUE CHECK(slot BETWEEN 1 AND 3),
+    strategy_version TEXT NOT NULL,
+    code TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    description TEXT,
+    backtest_summary TEXT,
+    portfolio_snapshot TEXT NOT NULL,
+    evaluation_duration_days INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    created_at TEXT DEFAULT (datetime('now', 'utc')),
+    resolved_at TEXT
+);
+
+-- Candidate positions (separate from fund positions)
+CREATE TABLE IF NOT EXISTS candidate_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'long',
+    qty REAL NOT NULL,
+    avg_entry REAL NOT NULL,
+    current_price REAL DEFAULT 0,
+    unrealized_pnl REAL DEFAULT 0,
+    entry_fee REAL DEFAULT 0,
+    stop_loss REAL,
+    take_profit REAL,
+    intent TEXT NOT NULL DEFAULT 'DAY',
+    strategy_version TEXT,
+    opened_at TEXT DEFAULT (datetime('now', 'utc')),
+    updated_at TEXT DEFAULT (datetime('now', 'utc')),
+    UNIQUE(candidate_slot, tag)
+);
+
+-- Candidate trades (separate from fund trades)
+CREATE TABLE IF NOT EXISTS candidate_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL,
+    pnl REAL,
+    pnl_pct REAL,
+    fees REAL DEFAULT 0,
+    intent TEXT NOT NULL DEFAULT 'DAY',
+    strategy_version TEXT,
+    tag TEXT,
+    close_reason TEXT,
+    opened_at TEXT DEFAULT (datetime('now', 'utc')),
+    closed_at TEXT
+);
+
 -- Indexes for common queries
 -- Note: idx_positions_tag and idx_positions_symbol created after special migrations
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
@@ -286,6 +343,9 @@ CREATE INDEX IF NOT EXISTS idx_conditional_orders_tag ON conditional_orders(tag)
 CREATE INDEX IF NOT EXISTS idx_conditional_orders_status ON conditional_orders(status);
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_activity_cat ON activity_log(category, timestamp);
+CREATE INDEX IF NOT EXISTS idx_candidates_slot ON candidates(slot);
+CREATE INDEX IF NOT EXISTS idx_cand_pos_slot ON candidate_positions(candidate_slot);
+CREATE INDEX IF NOT EXISTS idx_cand_trades_slot ON candidate_trades(candidate_slot, closed_at);
 """
 
 # Migrations for existing databases (columns added after initial schema)
