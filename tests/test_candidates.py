@@ -1,6 +1,7 @@
-"""Tests for the candidate strategy system (Session T).
+"""Tests for the candidate strategy system (Sessions T + U).
 
-Tests CandidateRunner paper simulation and CandidateManager lifecycle.
+Tests CandidateRunner paper simulation, CandidateManager lifecycle,
+and candidate observability (notifications, heartbeat, stats persistence).
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -504,6 +505,215 @@ async def test_manager_context_for_orchestrator():
         for c in context:
             if c.get("slot") != 1:
                 assert c["status"] == "empty"
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- Session U: Stats Bug + Observability ---
+
+
+def test_runner_stats_survive_persist():
+    """get_status() stays accurate after get_new_trades() clears persist buffer."""
+    from src.candidates.runner import CandidateRunner
+
+    runner = CandidateRunner(
+        slot=1, strategy=MagicMock(), version="v_test",
+        initial_cash=1000.0, initial_positions=[],
+        risk_limits=RISK_LIMITS, symbols=["BTC/USD"],
+        slippage_factor=0.0, maker_fee_pct=0.0, taker_fee_pct=0.0,
+    )
+
+    # Win trade
+    runner._execute_signal(Signal(
+        symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+        intent=Intent.DAY, confidence=0.8, reasoning="buy",
+    ), 50000.0)
+    runner._execute_signal(Signal(
+        symbol="BTC/USD", action=Action.SELL, size_pct=1.0,
+        intent=Intent.DAY, confidence=0.8, reasoning="sell",
+    ), 51000.0)
+
+    status_before = runner.get_status()
+    assert status_before["trade_count"] == 1
+    assert status_before["pnl"] > 0
+
+    # Simulate persist — clears _trades
+    new_trades = runner.get_new_trades()
+    assert len(new_trades) == 1
+    assert len(runner._trades) == 0  # persist buffer cleared
+
+    # Stats should still be intact
+    status_after = runner.get_status()
+    assert status_after["trade_count"] == 1
+    assert status_after["pnl"] == status_before["pnl"]
+    assert status_after["wins"] == 1
+
+    # Portfolio total_pnl should also survive
+    portfolio = runner._build_portfolio({"BTC/USD": 50000.0})
+    assert portfolio.total_pnl == status_before["pnl"]
+
+
+@pytest.mark.asyncio
+async def test_manager_notifies_on_trade():
+    """CandidateManager dispatches candidate_trade_executed on trades."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        runner = await mgr.create_candidate(
+            slot=1, code=SIGNAL_STRATEGY_CODE, version="v_sig",
+        )
+
+        # Wire mock notifier
+        mock_notifier = AsyncMock()
+        mgr.set_notifier(mock_notifier)
+
+        # Build minimal markets
+        import pandas as pd
+        import numpy as np
+        dates = pd.date_range("2024-01-01", periods=100, freq="5min")
+        prices = 50000 + np.cumsum(np.random.randn(100) * 10)
+        df = pd.DataFrame({
+            "open": prices, "high": prices + 20, "low": prices - 20,
+            "close": prices, "volume": np.random.uniform(10, 100, 100),
+        }, index=dates)
+
+        markets = {
+            "BTC/USD": SymbolData(
+                symbol="BTC/USD", current_price=50000.0,
+                candles_5m=df, candles_1h=df, candles_1d=df,
+                spread=10.0, volume_24h=1000.0,
+                maker_fee_pct=0.25, taker_fee_pct=0.40,
+            ),
+        }
+
+        await mgr.run_scans(markets, datetime.now(timezone.utc))
+
+        # Should have dispatched candidate_trade_executed
+        mock_notifier.candidate_trade_executed.assert_called()
+        call_args = mock_notifier.candidate_trade_executed.call_args
+        assert call_args[0][0] == 1  # slot
+        assert call_args[0][1]["action"] == "BUY"
+        assert call_args[0][1]["symbol"] == "BTC/USD"
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_manager_notifies_on_sl_tp():
+    """CandidateManager dispatches both stop_triggered and trade_executed on SL/TP."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        runner = await mgr.create_candidate(
+            slot=1, code=VALID_STRATEGY_CODE, version="v_sl",
+        )
+
+        # Manually add a position with stop loss
+        runner._positions["c1_test_001"] = {
+            "symbol": "BTC/USD",
+            "tag": "c1_test_001",
+            "side": "long",
+            "qty": 0.001,
+            "avg_entry": 50000.0,
+            "current_price": 50000.0,
+            "unrealized_pnl": 0.0,
+            "entry_fee": 0.2,
+            "stop_loss": 49000.0,
+            "take_profit": 55000.0,
+            "intent": "DAY",
+            "strategy_version": "v_sl",
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        mock_notifier = AsyncMock()
+        mgr.set_notifier(mock_notifier)
+
+        # Trigger stop loss
+        await mgr.check_sl_tp({"BTC/USD": 48500.0})
+
+        mock_notifier.candidate_stop_triggered.assert_called_once()
+        mock_notifier.candidate_trade_executed.assert_called_once()
+
+        stop_args = mock_notifier.candidate_stop_triggered.call_args
+        assert stop_args[0][0] == 1  # slot
+        assert stop_args[0][1]["close_reason"] == "stop_loss"
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_manager_heartbeat_logging():
+    """CandidateManager emits candidate.heartbeat structlog every 10 scans."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        await mgr.create_candidate(
+            slot=1, code=VALID_STRATEGY_CODE, version="v_hb",
+        )
+
+        # Build minimal markets
+        import pandas as pd
+        import numpy as np
+        dates = pd.date_range("2024-01-01", periods=50, freq="5min")
+        prices = 50000 + np.cumsum(np.random.randn(50) * 10)
+        df = pd.DataFrame({
+            "open": prices, "high": prices + 20, "low": prices - 20,
+            "close": prices, "volume": np.random.uniform(10, 100, 50),
+        }, index=dates)
+
+        markets = {
+            "BTC/USD": SymbolData(
+                symbol="BTC/USD", current_price=50000.0,
+                candles_5m=df, candles_1h=df, candles_1d=df,
+                spread=10.0, volume_24h=1000.0,
+                maker_fee_pct=0.25, taker_fee_pct=0.40,
+            ),
+        }
+
+        heartbeat_logged = False
+        with patch("src.candidates.manager.log") as mock_log:
+            for _ in range(10):
+                await mgr.run_scans(markets, datetime.now(timezone.utc))
+
+            # Check structlog calls for heartbeat
+            for call in mock_log.info.call_args_list:
+                if call[0][0] == "candidate.heartbeat":
+                    heartbeat_logged = True
+                    assert call[1]["slot"] == 1
+                    assert call[1]["scans"] == 10
+                    break
+
+        assert heartbeat_logged, "Expected candidate.heartbeat log after 10 scans"
 
         await db.close()
     finally:

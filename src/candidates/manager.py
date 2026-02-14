@@ -32,6 +32,11 @@ class CandidateManager:
         self._config = config
         self._db = db
         self._runners: dict[int, CandidateRunner] = {}  # slot -> runner
+        self._notifier = None
+        self._scan_counts: dict[int, int] = {}  # slot -> scan count since creation
+
+    def set_notifier(self, notifier) -> None:
+        self._notifier = notifier
 
     async def initialize(self) -> None:
         """Startup recovery — restore running candidates from DB."""
@@ -103,6 +108,7 @@ class CandidateManager:
 
                 # Restore completed trades for accurate status
                 runner._trades = [dict(t) for t in trade_rows]
+                runner._all_trades = [dict(t) for t in trade_rows]
 
                 # Recalculate cash from trades
                 # Cash = initial - sum(buys) + sum(sell proceeds)
@@ -205,6 +211,7 @@ class CandidateManager:
         """Cancel a running candidate. Position/trade data stays in DB."""
         if slot in self._runners:
             del self._runners[slot]
+        self._scan_counts.pop(slot, None)
 
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
@@ -250,8 +257,9 @@ class CandidateManager:
         )
         await self._db.commit()
 
-        # Clear all runners
+        # Clear all runners and scan counts
         self._runners.clear()
+        self._scan_counts.clear()
 
         log.info("candidate.promoted", slot=slot, version=runner.version)
         return code
@@ -266,6 +274,18 @@ class CandidateManager:
                 if results:
                     log.info("candidate.scan_complete", slot=slot,
                              signals=len(results))
+                    if self._notifier:
+                        for trade in results:
+                            await self._notifier.candidate_trade_executed(slot, trade)
+
+                # Heartbeat every 10 scans
+                self._scan_counts[slot] = self._scan_counts.get(slot, 0) + 1
+                if self._scan_counts[slot] % 10 == 0:
+                    status = runner.get_status()
+                    log.info("candidate.heartbeat", slot=slot,
+                             scans=self._scan_counts[slot],
+                             positions=status["position_count"],
+                             value=round(status["total_value"], 2))
             except Exception as e:
                 log.error("candidate.scan_error", slot=slot, error=str(e))
 
@@ -274,7 +294,10 @@ class CandidateManager:
         for slot, runner in list(self._runners.items()):
             try:
                 results = runner.check_sl_tp(prices)
-                # New trades from SL/TP need persisting
+                if results and self._notifier:
+                    for trade in results:
+                        await self._notifier.candidate_stop_triggered(slot, trade)
+                        await self._notifier.candidate_trade_executed(slot, trade)
             except Exception as e:
                 log.error("candidate.sl_tp_error", slot=slot, error=str(e))
 

@@ -63,6 +63,8 @@ class NotificationConfig:
     candidate_created: bool = True
     candidate_canceled: bool = True
     candidate_promoted: bool = True
+    candidate_trade_executed: bool = True
+    candidate_stop_triggered: bool = True
 
 
 @dataclass

@@ -29,1951 +29,52 @@
         "x": 0,
         "y": 0
       },
-      "id": 100,
+      "id": 1013,
       "panels": [],
-      "title": "Fund Overview",
+      "title": "Orchestrator Analysis",
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 1
       },
-      "id": 1,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+      "id": 1014,
+      "libraryPanel": {
+        "name": "Orchestrator: Market Outlook",
+        "uid": "tb-lib-orch-market-outlook"
       },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_portfolio_value_usd",
-          "legendFormat": "Portfolio Value",
-          "refId": "A"
-        },
-        {
-          "expr": "tb_portfolio_peak_usd",
-          "legendFormat": "Peak",
-          "refId": "B"
-        }
-      ],
-      "title": "Portfolio Value + Peak",
-      "type": "timeseries"
+      "title": "Orchestrator: Market Outlook"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
+        "h": 14,
+        "w": 16,
+        "x": 8,
         "y": 1
       },
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
+      "id": 1016,
+      "libraryPanel": {
+        "name": "Orchestrator: Strategy Assessment",
+        "uid": "tb-lib-orch-strategy-assessment"
       },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_cash_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "Cash",
-      "type": "stat"
+      "title": "Orchestrator: Strategy Assessment"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 1
-      },
-      "id": 3,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_total_return_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Total Return",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_net_pnl_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "Net P&L",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 5
-      },
-      "id": 5,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_position_count",
-          "refId": "A"
-        }
-      ],
-      "title": "Positions",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "max": 50,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10
-              },
-              {
-                "color": "orange",
-                "value": 20
-              },
-              {
-                "color": "red",
-                "value": 30
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 5
-      },
-      "id": 6,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_drawdown_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Drawdown %",
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "text": "OK"
-                },
-                "1": {
-                  "color": "red",
-                  "text": "HALTED"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 5
-      },
-      "id": 7,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_halted",
-          "refId": "A"
-        }
-      ],
-      "title": "Halted",
-      "type": "stat"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
+        "h": 6,
+        "w": 8,
         "x": 0,
         "y": 9
       },
-      "id": 200,
-      "panels": [],
-      "title": "Performance",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 40
-              },
-              {
-                "color": "green",
-                "value": 60
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 10
-      },
-      "id": 201,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_win_rate * 100",
-          "refId": "A"
-        }
-      ],
-      "title": "Win Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 10
-      },
-      "id": 202,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_trade_count",
-          "refId": "A"
-        }
-      ],
-      "title": "Trade Count",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 10
-      },
-      "id": 203,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_profit_factor",
-          "refId": "A"
-        }
-      ],
-      "title": "Profit Factor",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 10
-      },
-      "id": 204,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_sharpe_ratio",
-          "refId": "A"
-        }
-      ],
-      "title": "Sharpe Ratio",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 10
-      },
-      "id": 205,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_sortino_ratio",
-          "refId": "A"
-        }
-      ],
-      "title": "Sortino Ratio",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 4,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 10
-      },
-      "id": 206,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_expectancy_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "Expectancy",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 14
-      },
-      "id": 207,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_win_count",
-          "refId": "A"
-        }
-      ],
-      "title": "Wins",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 14
-      },
-      "id": 208,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_loss_count",
-          "refId": "A"
-        }
-      ],
-      "title": "Losses",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 14
-      },
-      "id": 209,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_best_trade_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Best Trade",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 14
-      },
-      "id": 210,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_worst_trade_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Worst Trade",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "h"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 14
-      },
-      "id": 211,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_avg_trade_duration_hours",
-          "refId": "A"
-        }
-      ],
-      "title": "Avg Duration",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "orange",
-                "value": null
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 14
-      },
-      "id": 212,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_total_fees_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "All-Time Fees",
-      "type": "stat"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 18
-      },
-      "id": 300,
-      "panels": [],
-      "title": "Risk & Daily",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 19
-      },
-      "id": 301,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_daily_pnl_usd",
-          "legendFormat": "Daily P&L",
-          "refId": "A"
-        }
-      ],
-      "title": "Daily P&L",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 19
-      },
-      "id": 302,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_daily_trades",
-          "refId": "A"
-        }
-      ],
-      "title": "Daily Trades",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 3
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 19
-      },
-      "id": 303,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_consecutive_losses",
-          "refId": "A"
-        }
-      ],
-      "title": "Consecutive Losses",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 4,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "orange",
-                "value": null
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 19
-      },
-      "id": 304,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_fees_today_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "Fees Today",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 10
-              },
-              {
-                "color": "red",
-                "value": 25
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 23
-      },
-      "id": 305,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_max_drawdown_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Max Drawdown",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 23
-      },
-      "id": 306,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_signal_act_rate * 100",
-          "refId": "A"
-        }
-      ],
-      "title": "Signal Act Rate",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 23
-      },
-      "id": 307,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_portfolio_allocation_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Allocation",
-      "type": "stat"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 27
-      },
-      "id": 400,
-      "panels": [],
-      "title": "AI & System",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 4,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 28
-      },
-      "id": 401,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_ai_daily_cost_usd",
-          "refId": "A"
-        }
-      ],
-      "title": "AI Cost Today",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 28
-      },
-      "id": 402,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_ai_daily_tokens",
-          "refId": "A"
-        }
-      ],
-      "title": "Tokens Used",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 60
-              },
-              {
-                "color": "orange",
-                "value": 80
-              },
-              {
-                "color": "red",
-                "value": 95
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 28
-      },
-      "id": 403,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_ai_token_budget_pct",
-          "refId": "A"
-        }
-      ],
-      "title": "Token Budget",
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 28
-      },
-      "id": 404,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_strategy_version_count",
-          "refId": "A"
-        }
-      ],
-      "title": "Strategy Versions",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 28
-      },
-      "id": 405,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_total_scans",
-          "refId": "A"
-        }
-      ],
-      "title": "Total Scans",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 300
-              },
-              {
-                "color": "orange",
-                "value": 450
-              },
-              {
-                "color": "red",
-                "value": 600
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 28
-      },
-      "id": 406,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.10",
-      "targets": [
-        {
-          "expr": "tb_scan_age_seconds",
-          "refId": "A"
-        }
-      ],
-      "title": "Scan Age",
-      "type": "stat"
+      "id": 1015,
+      "libraryPanel": {
+        "name": "Orchestrator: Cross-Reference Findings",
+        "uid": "tb-lib-orch-cross-ref"
+      },
+      "title": "Orchestrator: Cross-Reference Findings"
     },
     {
       "collapsed": true,
@@ -1981,911 +82,135 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 15
       },
-      "id": 900,
+      "id": 100,
       "panels": [
         {
-          "datasource": {
-            "type": "loki",
-            "uid": "P8E80F9AEF21F6940"
-          },
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 24,
-            "x": 0,
-            "y": 69
-          },
-          "id": 901,
-          "options": {
-            "dedupStrategy": "none",
-            "enableInfiniteScrolling": false,
-            "enableLogDetails": true,
-            "prettifyLogMessage": false,
-            "showCommonLabels": false,
-            "showLabels": false,
-            "showTime": true,
-            "sortOrder": "Descending",
-            "wrapLogMessage": true
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "{compose_service=\"trading-brain\"} |= \"portfolio.\" | json | event=~\"portfolio.(sell|buy|exchange_fill)\" | line_format \"{{.event}} {{.symbol}} [{{.tag}}] qty={{.qty}} @ ${{.price}} {{if .pnl}}P&L={{.pnl}}{{end}} fee={{.fee}} {{if .close_reason}}reason={{.close_reason}}{{end}}\"",
-              "refId": "A"
-            }
-          ],
-          "title": "Trade Event Log",
-          "type": "logs"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 79
-          },
-          "id": 902,
-          "options": {
-            "displayMode": "gradient",
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": false
-            },
-            "maxVizHeight": 300,
-            "minVizHeight": 16,
-            "minVizWidth": 8,
-            "namePlacement": "auto",
-            "orientation": "horizontal",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showUnfilled": true,
-            "sizing": "auto",
-            "valueMode": "text"
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_trades_by_reason",
-              "format": "table",
-              "instant": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Trades by Close Reason",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "instance": true,
-                  "job": true
-                },
-                "renameByName": {
-                  "Value": "Count",
-                  "reason": "Reason"
-                }
-              }
-            }
-          ],
-          "type": "bargauge"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 79
-          },
-          "id": 903,
-          "options": {
-            "displayMode": "gradient",
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": false
-            },
-            "maxVizHeight": 300,
-            "minVizHeight": 16,
-            "minVizWidth": 8,
-            "namePlacement": "auto",
-            "orientation": "horizontal",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showUnfilled": true,
-            "sizing": "auto",
-            "valueMode": "text"
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_trades_by_symbol",
-              "format": "table",
-              "instant": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Trades by Symbol",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "instance": true,
-                  "job": true
-                },
-                "renameByName": {
-                  "Value": "Count",
-                  "symbol": "Symbol"
-                }
-              }
-            }
-          ],
-          "type": "bargauge"
-        }
-      ],
-      "title": "Trade Log",
-      "type": "row"
-    },
-    {
-      "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 33
-      },
-      "id": 600,
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "custom": {
-                "align": "auto",
-                "cellOptions": {
-                  "type": "auto"
-                },
-                "inspect": false
-              },
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 88
-          },
-          "id": 601,
-          "options": {
-            "cellHeight": "sm",
-            "footer": {
-              "countRows": false,
-              "fields": "",
-              "reducer": ["sum"],
-              "show": false
-            },
-            "showHeader": true
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_position_value_usd",
-              "format": "table",
-              "instant": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Position Values",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "instance": true,
-                  "job": true
-                },
-                "renameByName": {
-                  "Value": "Value (USD)",
-                  "symbol": "Symbol",
-                  "tag": "Tag"
-                }
-              }
-            }
-          ],
-          "type": "table"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "continuous-GrYlRd"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "fillOpacity": 80,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "lineWidth": 1,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 88
-          },
-          "id": 602,
-          "options": {
-            "barRadius": 0,
-            "barWidth": 0.8,
-            "fullHighlight": false,
-            "groupWidth": 0.7,
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "orientation": "horizontal",
-            "showValue": "always",
-            "stacking": "none",
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            },
-            "xTickLabelRotation": 0,
-            "xTickLabelSpacing": 0
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_position_pnl_usd",
-              "format": "table",
-              "instant": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Position P&L",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "instance": true,
-                  "job": true
-                },
-                "renameByName": {
-                  "Value": "P&L (USD)",
-                  "symbol": "Symbol",
-                  "tag": "Tag"
-                }
-              }
-            }
-          ],
-          "type": "barchart"
-        }
-      ],
-      "title": "Positions",
-      "type": "row"
-    },
-    {
-      "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 34
-      },
-      "id": 500,
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 8,
             "x": 0,
-            "y": 43
+            "y": 1
           },
           "id": 501,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "BTC/USD",
+            "uid": "tb-lib-501"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"BTC/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "BTC/USD",
-          "type": "stat"
+          "title": "BTC/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 8,
             "x": 8,
-            "y": 43
+            "y": 1
           },
           "id": 502,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "ETH/USD",
+            "uid": "tb-lib-502"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"ETH/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "ETH/USD",
-          "type": "stat"
+          "title": "ETH/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 8,
             "x": 16,
-            "y": 43
+            "y": 1
           },
           "id": 503,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "SOL/USD",
+            "uid": "tb-lib-503"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"SOL/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "SOL/USD",
-          "type": "stat"
+          "title": "SOL/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 4,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 0,
-            "y": 46
+            "y": 4
           },
           "id": 504,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "XRP/USD",
+            "uid": "tb-lib-504"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"XRP/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "XRP/USD",
-          "type": "stat"
+          "title": "XRP/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 5,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 4,
-            "y": 46
+            "y": 4
           },
           "id": 505,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "DOGE/USD",
+            "uid": "tb-lib-505"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"DOGE/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "DOGE/USD",
-          "type": "stat"
+          "title": "DOGE/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 4,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 8,
-            "y": 46
+            "y": 4
           },
           "id": 506,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "ADA/USD",
+            "uid": "tb-lib-506"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"ADA/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "ADA/USD",
-          "type": "stat"
+          "title": "ADA/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 12,
-            "y": 46
+            "y": 4
           },
           "id": 507,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "LINK/USD",
+            "uid": "tb-lib-507"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"LINK/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "LINK/USD",
-          "type": "stat"
+          "title": "LINK/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 16,
-            "y": 46
+            "y": 4
           },
           "id": 508,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "AVAX/USD",
+            "uid": "tb-lib-508"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"AVAX/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "AVAX/USD",
-          "type": "stat"
+          "title": "AVAX/USD"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 3,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 3,
             "w": 4,
             "x": 20,
-            "y": 46
+            "y": 4
           },
           "id": 509,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "DOT/USD",
+            "uid": "tb-lib-509"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_symbol_price_usd{symbol=\"DOT/USD\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "DOT/USD",
-          "type": "stat"
+          "title": "DOT/USD"
         }
       ],
       "title": "Market Prices",
@@ -2897,787 +222,709 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 16
+      },
+      "id": 200,
+      "panels": [
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 0,
+            "y": 19
+          },
+          "id": 2,
+          "libraryPanel": {
+            "name": "Cash",
+            "uid": "tb-lib-2"
+          },
+          "title": "Cash"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 3,
+            "y": 19
+          },
+          "id": 4,
+          "libraryPanel": {
+            "name": "Net P&L",
+            "uid": "tb-lib-4"
+          },
+          "title": "Net P&L"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 6,
+            "y": 19
+          },
+          "id": 3,
+          "libraryPanel": {
+            "name": "Total Return",
+            "uid": "tb-lib-3"
+          },
+          "title": "Total Return"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 9,
+            "y": 19
+          },
+          "id": 206,
+          "libraryPanel": {
+            "name": "Expectancy",
+            "uid": "tb-lib-206"
+          },
+          "title": "Expectancy"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 12,
+            "y": 19
+          },
+          "id": 202,
+          "libraryPanel": {
+            "name": "Trade Count",
+            "uid": "tb-lib-202"
+          },
+          "title": "Trade Count"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 15,
+            "y": 19
+          },
+          "id": 211,
+          "libraryPanel": {
+            "name": "Avg Duration",
+            "uid": "tb-lib-211"
+          },
+          "title": "Avg Duration"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 18,
+            "y": 19
+          },
+          "id": 307,
+          "libraryPanel": {
+            "name": "Allocation",
+            "uid": "tb-lib-307"
+          },
+          "title": "Allocation"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 21,
+            "y": 19
+          },
+          "id": 406,
+          "libraryPanel": {
+            "name": "Scan Age",
+            "uid": "tb-lib-406"
+          },
+          "title": "Scan Age"
+        },
+        {
+          "gridPos": {
+            "h": 16,
+            "w": 8,
+            "x": 0,
+            "y": 22
+          },
+          "id": 901,
+          "libraryPanel": {
+            "name": "Trade Event Log",
+            "uid": "tb-lib-901"
+          },
+          "title": "Trade Event Log"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 8,
+            "y": 22
+          },
+          "id": 404,
+          "libraryPanel": {
+            "name": "Strategy Versions",
+            "uid": "tb-lib-404"
+          },
+          "title": "Strategy Versions"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 12,
+            "y": 22
+          },
+          "id": 5,
+          "libraryPanel": {
+            "name": "Positions",
+            "uid": "tb-lib-5"
+          },
+          "title": "Positions"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 15,
+            "y": 22
+          },
+          "id": 205,
+          "libraryPanel": {
+            "name": "Sortino Ratio",
+            "uid": "tb-lib-205"
+          },
+          "title": "Sortino Ratio"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 18,
+            "y": 22
+          },
+          "id": 204,
+          "libraryPanel": {
+            "name": "Sharpe Ratio",
+            "uid": "tb-lib-204"
+          },
+          "title": "Sharpe Ratio"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 3,
+            "x": 21,
+            "y": 22
+          },
+          "id": 7,
+          "libraryPanel": {
+            "name": "Halted",
+            "uid": "tb-lib-7"
+          },
+          "title": "Halted"
+        },
+        {
+          "gridPos": {
+            "h": 7,
+            "w": 4,
+            "x": 8,
+            "y": 24
+          },
+          "id": 201,
+          "libraryPanel": {
+            "name": "Win Rate",
+            "uid": "tb-lib-201"
+          },
+          "title": "Win Rate"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 2,
+            "x": 12,
+            "y": 25
+          },
+          "id": 207,
+          "libraryPanel": {
+            "name": "Wins",
+            "uid": "tb-lib-207"
+          },
+          "title": "Wins"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 2,
+            "x": 14,
+            "y": 25
+          },
+          "id": 208,
+          "libraryPanel": {
+            "name": "Losses",
+            "uid": "tb-lib-208"
+          },
+          "title": "Losses"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 4,
+            "x": 16,
+            "y": 25
+          },
+          "id": 405,
+          "libraryPanel": {
+            "name": "Total Scans",
+            "uid": "tb-lib-405"
+          },
+          "title": "Total Scans"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 4,
+            "x": 20,
+            "y": 25
+          },
+          "id": 305,
+          "libraryPanel": {
+            "name": "Max Drawdown",
+            "uid": "tb-lib-305"
+          },
+          "title": "Max Drawdown"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 12,
+            "y": 28
+          },
+          "id": 303,
+          "libraryPanel": {
+            "name": "Consecutive Losses",
+            "uid": "tb-lib-303"
+          },
+          "title": "Consecutive Losses"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 16,
+            "y": 28
+          },
+          "id": 302,
+          "libraryPanel": {
+            "name": "Daily Trades",
+            "uid": "tb-lib-302"
+          },
+          "title": "Daily Trades"
+        },
+        {
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 20,
+            "y": 28
+          },
+          "id": 6,
+          "libraryPanel": {
+            "name": "Drawdown %",
+            "uid": "tb-lib-6"
+          },
+          "title": "Drawdown %"
+        },
+        {
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 12,
+            "y": 30
+          },
+          "id": 601,
+          "libraryPanel": {
+            "name": "Position Values",
+            "uid": "tb-lib-601"
+          },
+          "title": "Position Values"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 8,
+            "y": 31
+          },
+          "id": 209,
+          "libraryPanel": {
+            "name": "Best Trade",
+            "uid": "tb-lib-209"
+          },
+          "title": "Best Trade"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 8,
+            "y": 33
+          },
+          "id": 210,
+          "libraryPanel": {
+            "name": "Worst Trade",
+            "uid": "tb-lib-210"
+          },
+          "title": "Worst Trade"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 4,
+            "x": 20,
+            "y": 33
+          },
+          "id": 306,
+          "libraryPanel": {
+            "name": "Signal Act Rate",
+            "uid": "tb-lib-306"
+          },
+          "title": "Signal Act Rate"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 4,
+            "x": 8,
+            "y": 35
+          },
+          "id": 203,
+          "libraryPanel": {
+            "name": "Profit Factor",
+            "uid": "tb-lib-203"
+          },
+          "title": "Profit Factor"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 20,
+            "y": 36
+          },
+          "id": 304,
+          "libraryPanel": {
+            "name": "Fees Today",
+            "uid": "tb-lib-304"
+          },
+          "title": "Fees Today"
+        },
+        {
+          "gridPos": {
+            "h": 11,
+            "w": 10,
+            "x": 0,
+            "y": 38
+          },
+          "id": 903,
+          "libraryPanel": {
+            "name": "Trades by Symbol",
+            "uid": "tb-lib-903"
+          },
+          "title": "Trades by Symbol"
+        },
+        {
+          "gridPos": {
+            "h": 11,
+            "w": 10,
+            "x": 10,
+            "y": 38
+          },
+          "id": 602,
+          "libraryPanel": {
+            "name": "Position P&L",
+            "uid": "tb-lib-602"
+          },
+          "title": "Position P&L"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 20,
+            "y": 38
+          },
+          "id": 212,
+          "libraryPanel": {
+            "name": "All-Time Fees",
+            "uid": "tb-lib-212"
+          },
+          "title": "All-Time Fees"
+        },
+        {
+          "gridPos": {
+            "h": 2,
+            "w": 4,
+            "x": 20,
+            "y": 40
+          },
+          "id": 401,
+          "libraryPanel": {
+            "name": "AI Cost Today",
+            "uid": "tb-lib-401"
+          },
+          "title": "AI Cost Today"
+        },
+        {
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 20,
+            "y": 42
+          },
+          "id": 403,
+          "libraryPanel": {
+            "name": "Token Budget",
+            "uid": "tb-lib-403"
+          },
+          "title": "Token Budget"
+        },
+        {
+          "gridPos": {
+            "h": 3,
+            "w": 4,
+            "x": 20,
+            "y": 46
+          },
+          "id": 402,
+          "libraryPanel": {
+            "name": "Tokens Used",
+            "uid": "tb-lib-402"
+          },
+          "title": "Tokens Used"
+        },
+        {
+          "gridPos": {
+            "h": 11,
+            "w": 10,
+            "x": 0,
+            "y": 49
+          },
+          "id": 301,
+          "libraryPanel": {
+            "name": "Daily P&L",
+            "uid": "tb-lib-301"
+          },
+          "title": "Daily P&L"
+        },
+        {
+          "gridPos": {
+            "h": 11,
+            "w": 14,
+            "x": 10,
+            "y": 49
+          },
+          "id": 1,
+          "libraryPanel": {
+            "name": "Portfolio Value + Peak",
+            "uid": "tb-lib-1"
+          },
+          "title": "Portfolio Value + Peak"
+        }
+      ],
+      "title": "Fund Overview",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
       },
       "id": 1000,
       "panels": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": true,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 4,
             "x": 0,
-            "y": 147
-          },
-          "id": 1001,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_value_usd{slot=\"1\"}",
-              "legendFormat": "Slot 1",
-              "refId": "A"
-            },
-            {
-              "expr": "tb_candidate_value_usd{slot=\"2\"}",
-              "legendFormat": "Slot 2",
-              "refId": "B"
-            },
-            {
-              "expr": "tb_candidate_value_usd{slot=\"3\"}",
-              "legendFormat": "Slot 3",
-              "refId": "C"
-            }
-          ],
-          "title": "Candidate Portfolio Values",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": true,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 147
-          },
-          "id": 1002,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_pnl_usd{slot=\"1\"}",
-              "legendFormat": "Slot 1",
-              "refId": "A"
-            },
-            {
-              "expr": "tb_candidate_pnl_usd{slot=\"2\"}",
-              "legendFormat": "Slot 2",
-              "refId": "B"
-            },
-            {
-              "expr": "tb_candidate_pnl_usd{slot=\"3\"}",
-              "legendFormat": "Slot 3",
-              "refId": "C"
-            }
-          ],
-          "title": "Candidate P&L",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 0,
-            "y": 155
+            "y": 20
           },
           "id": 1003,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "Active Candidates",
+            "uid": "tb-lib-1003"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "sum(tb_candidate_active)",
-              "refId": "A"
-            }
-          ],
-          "title": "Active Candidates",
-          "type": "stat"
+          "title": "Active Candidates"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 0.01
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 155
+            "h": 8,
+            "w": 10,
+            "x": 4,
+            "y": 20
           },
-          "id": 1004,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "id": 1001,
+          "libraryPanel": {
+            "name": "Candidate Portfolio Values",
+            "uid": "tb-lib-1001"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_value_usd{slot=\"1\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 1 Value",
-          "type": "stat"
+          "title": "Candidate Portfolio Values"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 0.01
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 12,
-            "y": 155
+            "h": 8,
+            "w": 10,
+            "x": 14,
+            "y": 20
           },
-          "id": 1005,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "id": 1002,
+          "libraryPanel": {
+            "name": "Candidate P&L",
+            "uid": "tb-lib-1002"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_value_usd{slot=\"2\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 2 Value",
-          "type": "stat"
+          "title": "Candidate P&L"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 2,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 0.01
-                  }
-                ]
-              },
-              "unit": "currencyUSD"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 155
-          },
-          "id": 1006,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
-          },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_value_usd{slot=\"3\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 3 Value",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 1,
-              "mappings": [],
-              "max": 100,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 40
-                  },
-                  {
-                    "color": "green",
-                    "value": 60
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 159
+            "w": 4,
+            "x": 0,
+            "y": 28
           },
           "id": 1007,
-          "options": {
-            "minVizHeight": 75,
-            "minVizWidth": 75,
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "sizing": "auto"
+          "libraryPanel": {
+            "name": "Slot 1 Win Rate",
+            "uid": "tb-lib-1007"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_win_rate{slot=\"1\"} * 100",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 1 Win Rate",
-          "type": "gauge"
+          "title": "Slot 1 Win Rate"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 1,
-              "mappings": [],
-              "max": 100,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 40
-                  },
-                  {
-                    "color": "green",
-                    "value": 60
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 12,
-            "y": 159
+            "w": 4,
+            "x": 4,
+            "y": 28
           },
           "id": 1008,
-          "options": {
-            "minVizHeight": 75,
-            "minVizWidth": 75,
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "sizing": "auto"
+          "libraryPanel": {
+            "name": "Slot 2 Win Rate",
+            "uid": "tb-lib-1008"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_win_rate{slot=\"2\"} * 100",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 2 Win Rate",
-          "type": "gauge"
+          "title": "Slot 2 Win Rate"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "decimals": 1,
-              "mappings": [],
-              "max": 100,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 40
-                  },
-                  {
-                    "color": "green",
-                    "value": 60
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 159
+            "w": 4,
+            "x": 8,
+            "y": 28
           },
           "id": 1012,
-          "options": {
-            "minVizHeight": 75,
-            "minVizWidth": 75,
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "sizing": "auto"
+          "libraryPanel": {
+            "name": "Slot 3 Win Rate",
+            "uid": "tb-lib-1012"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_win_rate{slot=\"3\"} * 100",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 3 Win Rate",
-          "type": "gauge"
+          "title": "Slot 3 Win Rate"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+          "gridPos": {
+            "h": 12,
+            "w": 12,
+            "x": 12,
+            "y": 28
           },
-          "fieldConfig": {
-            "defaults": {
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
+          "id": 910,
+          "libraryPanel": {
+            "name": "Candidate Log",
+            "uid": "tb-lib-910"
           },
+          "title": "Candidate Log"
+        },
+        {
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 163
+            "w": 4,
+            "x": 0,
+            "y": 32
+          },
+          "id": 1004,
+          "libraryPanel": {
+            "name": "Slot 1 Value",
+            "uid": "tb-lib-1004"
+          },
+          "title": "Slot 1 Value"
+        },
+        {
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 4,
+            "y": 32
+          },
+          "id": 1005,
+          "libraryPanel": {
+            "name": "Slot 2 Value",
+            "uid": "tb-lib-1005"
+          },
+          "title": "Slot 2 Value"
+        },
+        {
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 8,
+            "y": 32
+          },
+          "id": 1006,
+          "libraryPanel": {
+            "name": "Slot 3 Value",
+            "uid": "tb-lib-1006"
+          },
+          "title": "Slot 3 Value"
+        },
+        {
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 0,
+            "y": 36
           },
           "id": 1009,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "Slot 1 Trades",
+            "uid": "tb-lib-1009"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_trade_count{slot=\"1\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 1 Trades",
-          "type": "stat"
+          "title": "Slot 1 Trades"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 12,
-            "y": 163
+            "w": 4,
+            "x": 4,
+            "y": 36
           },
           "id": 1010,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "Slot 2 Trades",
+            "uid": "tb-lib-1010"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_trade_count{slot=\"2\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 2 Trades",
-          "type": "stat"
+          "title": "Slot 2 Trades"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
           "gridPos": {
             "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 163
+            "w": 4,
+            "x": 8,
+            "y": 36
           },
           "id": 1011,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
+          "libraryPanel": {
+            "name": "Slot 3 Trades",
+            "uid": "tb-lib-1011"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "tb_candidate_trade_count{slot=\"3\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Slot 3 Trades",
-          "type": "stat"
+          "title": "Slot 3 Trades"
         }
       ],
       "title": "Strategy Candidates",
@@ -3689,46 +936,23 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 18
       },
       "id": 800,
       "panels": [
         {
-          "datasource": {
-            "type": "loki",
-            "uid": "P8E80F9AEF21F6940"
-          },
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": []
-          },
           "gridPos": {
-            "h": 10,
+            "h": 17,
             "w": 24,
             "x": 0,
-            "y": 149
+            "y": 21
           },
           "id": 801,
-          "options": {
-            "dedupStrategy": "none",
-            "enableInfiniteScrolling": false,
-            "enableLogDetails": true,
-            "prettifyLogMessage": true,
-            "showCommonLabels": false,
-            "showLabels": false,
-            "showTime": true,
-            "sortOrder": "Descending",
-            "wrapLogMessage": true
+          "libraryPanel": {
+            "name": "Application Logs",
+            "uid": "tb-lib-801"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "{compose_service=\"trading-brain\"} | json | line_format \"{{.level | ToUpper}} [{{.event}}]{{if .summary}} {{.summary}}{{end}}{{if .portfolio}} portfolio={{.portfolio}}{{end}}{{if .symbols}} symbols={{.symbols}}{{end}}{{if .signals}} signals={{.signals}}{{end}}{{if .pairs}} pairs={{.pairs}}{{end}}{{if .mode}} mode={{.mode}}{{end}}{{if .error}} error={{.error}}{{end}}\"",
-              "refId": "A"
-            }
-          ],
-          "title": "Application Logs",
-          "type": "logs"
+          "title": "Application Logs"
         }
       ],
       "title": "Application Logs",
@@ -3740,46 +964,23 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 19
       },
       "id": 700,
       "panels": [
         {
-          "datasource": {
-            "type": "loki",
-            "uid": "P8E80F9AEF21F6940"
-          },
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": []
-          },
           "gridPos": {
-            "h": 8,
+            "h": 15,
             "w": 24,
             "x": 0,
-            "y": 148
+            "y": 22
           },
           "id": 701,
-          "options": {
-            "dedupStrategy": "none",
-            "enableInfiniteScrolling": false,
-            "enableLogDetails": true,
-            "prettifyLogMessage": false,
-            "showCommonLabels": false,
-            "showLabels": false,
-            "showTime": true,
-            "sortOrder": "Descending",
-            "wrapLogMessage": true
+          "libraryPanel": {
+            "name": "Orchestrator Thoughts & Observations",
+            "uid": "tb-lib-701"
           },
-          "pluginVersion": "11.5.10",
-          "targets": [
-            {
-              "expr": "{compose_service=\"trading-brain\"} |= \"orchestrator.\" | json | line_format \"{{.level | ToUpper}} [{{.event}}] {{if .step}}step={{.step}} model={{.model}}{{end}} {{if .display}}{{.display}}{{end}} {{if .market}}market={{.market}}{{end}} {{if .assessment}}assessment={{.assessment}}{{end}} {{if .cycle_id}}cycle={{.cycle_id}}{{end}}\"",
-              "refId": "A"
-            }
-          ],
-          "title": "Orchestrator Thoughts & Observations",
-          "type": "logs"
+          "title": "Orchestrator Thoughts & Observations"
         }
       ],
       "title": "Orchestrator Spool",
@@ -3801,6 +1002,6 @@
   "timezone": "browser",
   "title": "Trading Brain",
   "uid": "trading-brain-main",
-  "version": 2,
+  "version": 7,
   "weekStart": ""
 }

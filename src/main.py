@@ -209,6 +209,7 @@ class TradingBrain:
         # 7. Candidate Manager
         self._candidate_manager = CandidateManager(self._config, self._db)
         await self._candidate_manager.initialize()
+        self._candidate_manager.set_notifier(self._notifier)
 
         # 7b. Orchestrator (after notifier and candidate manager)
         self._orchestrator = Orchestrator(

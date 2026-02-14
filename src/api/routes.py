@@ -325,7 +325,7 @@ async def benchmarks_handler(request: web.Request) -> web.Response:
     return web.json_response(_envelope(benchmarks, config.mode))
 
 
-_VALID_ACTIVITY_CATEGORIES = {"TRADE", "RISK", "SYSTEM", "SCAN", "ORCH", "STRATEGY"}
+_VALID_ACTIVITY_CATEGORIES = {"TRADE", "RISK", "SYSTEM", "SCAN", "ORCH", "STRATEGY", "CANDIDATE"}
 _VALID_ACTIVITY_SEVERITIES = {"info", "warning", "error"}
 
 

@@ -43,6 +43,8 @@ _EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
     "candidate_created":           ("STRATEGY", "info"),
     "candidate_canceled":          ("STRATEGY", "info"),
     "candidate_promoted":          ("STRATEGY", "info"),
+    "candidate_trade_executed":    ("CANDIDATE", "info"),
+    "candidate_stop_triggered":    ("CANDIDATE", "warning"),
 }
 
 
@@ -157,6 +159,27 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         slot = data.get("slot", "?")
         version = data.get("version", "?")
         return f"Candidate promoted: slot {slot} → {version}"
+
+    if event_name == "candidate_trade_executed":
+        slot = data.get("slot", "?")
+        action = data.get("action", "?")
+        qty = data.get("qty", 0)
+        symbol = data.get("symbol", "?")
+        tag = data.get("tag", "")
+        price = data.get("price", 0)
+        tag_str = f" [{tag}]" if tag else ""
+        parts = [f"[C{slot}] {action} {qty:.8f} {symbol}{tag_str} @ ${price:,.2f}"]
+        pnl = data.get("pnl")
+        if pnl is not None:
+            parts.append(f"P&L ${pnl:+.2f}")
+        return " ".join(parts)
+
+    if event_name == "candidate_stop_triggered":
+        slot = data.get("slot", "?")
+        symbol = data.get("symbol", "?")
+        reason = data.get("close_reason", "stop_loss")
+        price = data.get("price", 0)
+        return f"[C{slot}] {reason.upper()} triggered on {symbol} @ ${price:,.2f}"
 
     return None
 
@@ -411,4 +434,39 @@ class Notifier:
             "candidate_promoted",
             {"slot": slot, "version": version},
             f"Candidate Promoted: slot {slot} → {version}",
+        )
+
+    async def candidate_trade_executed(self, slot: int, trade: dict) -> None:
+        action = trade.get("action", "?")
+        symbol = trade.get("symbol", "?")
+        qty = trade.get("qty", 0)
+        price = trade.get("price", 0)
+        fee = trade.get("fee", 0)
+        intent = trade.get("intent", "DAY")
+        tag = trade.get("tag", "")
+
+        tag_str = f" [{tag}]" if tag else ""
+        lines = [
+            f"[C{slot}] Trade: {action} {symbol}{tag_str}",
+            f"Qty: {qty:.6f} @ ${price:,.2f}",
+            f"Fee: ${fee:.4f}",
+            f"Intent: {intent}",
+        ]
+        pnl = trade.get("pnl")
+        if pnl is not None:
+            lines.append(f"P&L: ${pnl:+.2f} ({trade.get('pnl_pct', 0)*100:+.1f}%)")
+
+        data = {**trade, "slot": slot}
+        await self._dispatch("candidate_trade_executed", data, "\n".join(lines))
+
+    async def candidate_stop_triggered(self, slot: int, trade: dict) -> None:
+        symbol = trade.get("symbol", "?")
+        reason = trade.get("close_reason", "stop_loss")
+        price = trade.get("price", 0)
+        tag = trade.get("tag", "")
+        tag_str = f" [{tag}]" if tag else ""
+        data = {**trade, "slot": slot}
+        await self._dispatch(
+            "candidate_stop_triggered", data,
+            f"[C{slot}] Stop Triggered: {symbol}{tag_str}\nReason: {reason}\nPrice: ${price:,.2f}",
         )

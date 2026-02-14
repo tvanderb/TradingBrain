@@ -2625,3 +2625,49 @@ Replace paper-test-on-active-strategy model with a **candidate strategy system**
 - 7 CandidateManager tests: create, cancel, promote, recover, replace_slot, persist_state, context_for_orchestrator
 
 **Tests: 194/194 passing** (186 - 5 removed + 13 new)
+
+## Session U (2026-02-13) — Candidate Observability + Bug Fixes
+
+### Context
+First live orchestrator cycle deployed a candidate to slot 1. Running for hours but producing zero logs — no way to know it's alive except querying DB or `/candidates`. Two bugs discovered: stats zeroing after persist, and silent scanning.
+
+### Bug Fix: Stats Zeroing After Persist
+**Root cause**: `_trades` served double duty — persist buffer AND stats source. `get_new_trades()` clears it, destroying stats for `get_status()` and `_build_portfolio()`.
+
+**Fix**: Added `_all_trades` list that accumulates ALL trades and is never cleared during normal operation. `get_status()` and `_build_portfolio()` now read from `_all_trades`. `_trades` becomes persist-only buffer. Recovery path in `manager.py` also sets `_all_trades`.
+
+### Scan Heartbeat
+Added `_scan_counts` dict to CandidateManager. Every 10 scans, emits `candidate.heartbeat` structlog with slot, scan count, positions, and total value. Counts reset on cancel/promote.
+
+### Candidate Trade Notifications
+- 2 new Notifier methods: `candidate_trade_executed(slot, trade)`, `candidate_stop_triggered(slot, trade)`
+- 2 new `_EVENT_ACTIVITY` entries mapping to `("CANDIDATE", "info")` / `("CANDIDATE", "warning")`
+- 2 new `_format_activity` handlers with `[C{slot}]` prefix
+- 2 new `NotificationConfig` fields (both default True)
+- `CANDIDATE` added to valid activity categories in `routes.py`
+- `candidate()` convenience method on ActivityLogger
+
+### Wiring
+- `CandidateManager.set_notifier()` setter, called in `main.py` after manager init
+- `run_scans()`: dispatches `candidate_trade_executed` for each trade
+- `check_sl_tp()`: dispatches both `candidate_stop_triggered` and `candidate_trade_executed`
+
+### Files Modified
+- `src/candidates/runner.py` — `_all_trades` list, stats read from it
+- `src/candidates/manager.py` — `_notifier`, `_scan_counts`, heartbeat, trade dispatch, SL/TP dispatch
+- `src/telegram/notifications.py` — 2 methods, 2 event entries, 2 format handlers
+- `src/shell/config.py` — 2 NotificationConfig fields
+- `src/shell/activity.py` — `candidate()` convenience method
+- `src/api/routes.py` — `CANDIDATE` in valid categories
+- `src/main.py` — 1 line: `set_notifier()`
+
+### Tests Added (7 new)
+- `test_runner_stats_survive_persist` — stats intact after get_new_trades()
+- `test_manager_notifies_on_trade` — candidate_trade_executed dispatched
+- `test_manager_notifies_on_sl_tp` — both stop_triggered and trade_executed dispatched
+- `test_manager_heartbeat_logging` — structlog heartbeat after 10 scans
+- `test_candidate_trade_dispatch` — notifier activity log with [C1] prefix
+- `test_candidate_stop_dispatch` — notifier stop event with CANDIDATE category
+- `test_candidate_activity_format` — _format_activity for candidate events
+
+**Tests: 201/201 passing** (194 + 7 new)

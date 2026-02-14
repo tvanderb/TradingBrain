@@ -48,6 +48,7 @@ class CandidateRunner:
         self._cash = initial_cash
         self._positions: dict[str, dict] = {}  # tag -> position dict
         self._trades: list[dict] = []  # completed trades (not yet persisted)
+        self._all_trades: list[dict] = []  # ALL trades — never cleared, used for stats
         self._risk_limits = risk_limits
         self._symbols = symbols
         self._slippage = slippage_factor
@@ -120,8 +121,8 @@ class CandidateRunner:
             for pos in self._positions.values()
         )
 
-        # Compute total PnL from completed trades
-        total_pnl = sum(t.get("pnl", 0) or 0 for t in self._trades if t.get("pnl") is not None)
+        # Compute total PnL from completed trades (use _all_trades for accuracy after persist)
+        total_pnl = sum(t.get("pnl", 0) or 0 for t in self._all_trades if t.get("pnl") is not None)
 
         return Portfolio(
             cash=self._cash,
@@ -398,6 +399,7 @@ class CandidateRunner:
             "closed_at": datetime.now(timezone.utc).isoformat(),
         }
         self._trades.append(trade)
+        self._all_trades.append(trade)
 
         log.info("candidate.trade", slot=self.slot, symbol=pos["symbol"],
                  action="SELL", pnl=round(net_pnl, 4), reason=close_reason)
@@ -405,10 +407,10 @@ class CandidateRunner:
 
     def get_status(self) -> dict:
         """Summary status for orchestrator context and API."""
-        wins = sum(1 for t in self._trades if (t.get("pnl") or 0) > 0)
-        losses = sum(1 for t in self._trades if (t.get("pnl") or 0) <= 0 and t.get("pnl") is not None)
-        total_pnl = sum(t.get("pnl", 0) or 0 for t in self._trades)
-        trade_count = len(self._trades)
+        wins = sum(1 for t in self._all_trades if (t.get("pnl") or 0) > 0)
+        losses = sum(1 for t in self._all_trades if (t.get("pnl") or 0) <= 0 and t.get("pnl") is not None)
+        total_pnl = sum(t.get("pnl", 0) or 0 for t in self._all_trades)
+        trade_count = len(self._all_trades)
 
         return {
             "slot": self.slot,

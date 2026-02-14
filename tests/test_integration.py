@@ -6822,6 +6822,114 @@ def test_backtester_result_date_metadata():
 
 
 @pytest.mark.asyncio
+async def test_candidate_trade_dispatch():
+    """Notifier: candidate_trade_executed() dispatches to WS + activity with [C1] prefix."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        trade = {
+            "action": "BUY", "symbol": "BTC/USD", "qty": 0.001,
+            "price": 50000.0, "fee": 0.2, "tag": "c1_BTCUSD_001",
+            "intent": "SWING",
+        }
+
+        await notifier.candidate_trade_executed(1, trade)
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["category"] == "CANDIDATE"
+        assert "[C1]" in rows[0]["summary"]
+        assert "BUY" in rows[0]["summary"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_candidate_stop_dispatch():
+    """Notifier: candidate_stop_triggered() dispatches with CANDIDATE category."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        trade = {
+            "symbol": "ETH/USD", "close_reason": "stop_loss",
+            "price": 2900.0, "tag": "c2_ETHUSD_001",
+        }
+
+        await notifier.candidate_stop_triggered(2, trade)
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["category"] == "CANDIDATE"
+        assert rows[0]["severity"] == "warning"
+        assert "[C2]" in rows[0]["summary"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+def test_candidate_activity_format():
+    """_format_activity correctly formats candidate events with [C{slot}] prefix."""
+    from src.telegram.notifications import _format_activity
+
+    # candidate_trade_executed
+    data = {
+        "slot": 1, "action": "BUY", "qty": 0.001, "symbol": "BTC/USD",
+        "tag": "c1_BTCUSD_001", "price": 50000.0,
+    }
+    result = _format_activity("candidate_trade_executed", data)
+    assert result is not None
+    assert "[C1]" in result
+    assert "BUY" in result
+    assert "BTC/USD" in result
+
+    # candidate_trade_executed with pnl (SELL)
+    sell_data = {
+        "slot": 2, "action": "SELL", "qty": 0.002, "symbol": "ETH/USD",
+        "tag": "", "price": 3100.0, "pnl": 5.50,
+    }
+    result_sell = _format_activity("candidate_trade_executed", sell_data)
+    assert "[C2]" in result_sell
+    assert "P&L" in result_sell
+
+    # candidate_stop_triggered
+    stop_data = {
+        "slot": 1, "symbol": "SOL/USD",
+        "close_reason": "take_profit", "price": 180.0,
+    }
+    result_stop = _format_activity("candidate_stop_triggered", stop_data)
+    assert result_stop is not None
+    assert "[C1]" in result_stop
+    assert "TAKE_PROFIT" in result_stop
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_outer_loop_iterates():
     """Outer loop: Opus rejects backtest on first iteration with revision_instructions,
     approves on second iteration. Verifies nested loop structure with candidate system."""
