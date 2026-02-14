@@ -2671,3 +2671,49 @@ Added `_scan_counts` dict to CandidateManager. Every 10 scans, emits `candidate.
 - `test_candidate_activity_format` — _format_activity for candidate events
 
 **Tests: 201/201 passing** (194 + 7 new)
+
+## Session V (2026-02-13) — Grafana Library Panels + Orchestrator Text Panels
+
+### Context
+Dashboard needed orchestrator analysis visibility. User wanted to experiment with layouts and convert all panels to reusable library components.
+
+### Library Panel Conversion
+- Converted all 60 existing dashboard panels to Grafana library panels via `POST /api/library-elements`
+- Each panel gets a stable UID: `tb-lib-{panel_id}`
+- Dashboard JSON rewritten to reference library panels with `libraryPanel: {uid, name}` instead of inline definitions
+- Script created on VPS to automate creation and dashboard rewrite
+
+### Orchestrator Analysis Library Panels (8 new)
+Created 8 Loki-backed text panels for orchestrator data, all with `showTime: false` for clean text display:
+
+| Panel | LogQL Source | Data Field |
+|-------|-------------|------------|
+| Market Outlook | `orchestrator.observation_stored` | `market` |
+| Strategy Assessment | `orchestrator.observation_stored` | `assessment` |
+| Cross-Reference Findings | `orchestrator.thought_stored` (step=analysis) | `detail.cross_reference_findings` |
+| Latest Decision | `orchestrator.cycle_complete` | `decision` |
+| Specific Changes | `orchestrator.thought_stored` (step=analysis) | `detail.specific_changes` |
+| Backtest Summary | `orchestrator.backtest_complete` | `summary` |
+| Code Review | `orchestrator.thought_stored` (step=candidate_review) | `detail.approved/feedback/issues` |
+| Backtest Review | `orchestrator.thought_stored` (step=backtest_review) | `detail.deploy/reasoning/concerns` |
+
+**Double JSON parsing technique**: For nested fields inside `detail` (which is a JSON string), LogQL chains two `| json` operators: `| line_format "{{.detail}}" | json | line_format "{{.cross_reference_findings}}"`
+
+### Dashboard Layout Evolution
+- v5: User's redesign — Market Prices at top, 3w×3h stats, everything inline
+- v6: Library panel references replace inline definitions
+- v7: User's final layout — 3 orchestrator text panels at top (Market Outlook 8w×8h, Strategy Assessment 16w×14h, Cross-Reference Findings 8w×6h), everything else in collapsed rows
+
+### Three Dashboard Variations (built, then deleted by user request)
+Built "Data Wall" (Bloomberg-style), "Story Flow" (narrative), and "Three Column" layouts — all 60+ panels each. User rejected all three in favor of their own iteration.
+
+### Key Lessons
+- **Provisioned dashboards**: Cannot be updated via Grafana API — must restart Grafana to re-provision from disk
+- **VPS deployment**: SCP to `/tmp/` then `sudo cp` to `/srv/trading-brain/` (permission issue)
+- **Grafana port**: 3001 on host, mapped to 3000 in container
+- **Always verify syncs**: MD5 checksums caught a stale file copy
+
+### Files Modified
+- `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` — Library panel references + orchestrator panels at top
+
+**Tests: 201/201 passing** (unchanged — Grafana JSON only)
