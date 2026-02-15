@@ -925,6 +925,33 @@
             "uid": "tb-lib-1011"
           },
           "title": "Slot 3 Trades"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": false},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+            },
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "Value #Value"}, "properties": [{"id": "displayName", "value": "Value ($)"}, {"id": "unit", "value": "currencyUSD"}, {"id": "decimals", "value": 2}]},
+              {"matcher": {"id": "byName", "options": "Value #PnL"}, "properties": [{"id": "displayName", "value": "P&L ($)"}, {"id": "unit", "value": "currencyUSD"}, {"id": "decimals", "value": 2}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}, {"id": "color", "value": {"mode": "thresholds"}}]}
+            ]
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+          "id": 1108,
+          "options": {"cellHeight": "sm", "footer": {"enablePagination": false, "show": false}, "showHeader": true, "sortBy": [{"desc": true, "displayName": "Value ($)"}]},
+          "targets": [
+            {"expr": "tb_candidate_position_value_usd", "refId": "Value", "format": "table", "instant": true},
+            {"expr": "tb_candidate_position_pnl_usd", "refId": "PnL", "format": "table", "instant": true}
+          ],
+          "title": "Candidate Positions",
+          "transformations": [
+            {"id": "merge", "options": {}},
+            {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "instance": true, "job": true}, "renameByName": {"slot": "Slot", "symbol": "Symbol", "tag": "Tag"}}}
+          ],
+          "type": "table"
         }
       ],
       "title": "Strategy Candidates",
@@ -938,6 +965,133 @@
         "x": 0,
         "y": 18
       },
+      "id": 1100,
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]},
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 0, "y": 1},
+          "id": 1101,
+          "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+          "targets": [{"expr": "tb_predictions_total", "refId": "A", "instant": true}],
+          "title": "Total Predictions",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}]},
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 4, "y": 1},
+          "id": 1102,
+          "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+          "targets": [{"expr": "tb_predictions_ungraded", "refId": "A", "instant": true}],
+          "title": "Ungraded",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]},
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 8, "y": 1},
+          "id": 1103,
+          "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+          "targets": [{"expr": "tb_predictions_graded", "refId": "A", "instant": true}],
+          "title": "Graded",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "min": 0,
+              "max": 1,
+              "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.3}, {"color": "green", "value": 0.6}]},
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 12, "y": 1},
+          "id": 1104,
+          "options": {"minVizHeight": 75, "minVizWidth": 75, "reduceOptions": {"calcs": ["lastNotNull"]}, "showThresholdLabels": false, "showThresholdMarkers": true},
+          "targets": [{"expr": "tb_prediction_accuracy", "refId": "A", "instant": true}],
+          "title": "Prediction Accuracy",
+          "type": "gauge"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 16, "y": 1},
+          "id": 1105,
+          "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+          "targets": [{"expr": "tb_strategy_doc_version", "refId": "A", "instant": true}],
+          "title": "Strategy Doc Version",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "orange", "value": 14}]},
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {"h": 3, "w": 4, "x": 20, "y": 1},
+          "id": 1106,
+          "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+          "targets": [{"expr": "tb_days_since_reflection", "refId": "A", "instant": true}],
+          "title": "Days Since Reflection",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "loki", "uid": "loki"},
+          "gridPos": {"h": 10, "w": 24, "x": 0, "y": 4},
+          "id": 1107,
+          "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true},
+          "targets": [{"expr": "{container=\"trading-brain\"} |~ \"orchestrator\\\\.(reflection_start|reflection_complete|strategy_doc_archived|predictions_stored)\"", "refId": "A"}],
+          "title": "Reflection Events",
+          "type": "logs"
+        }
+      ],
+      "title": "Institutional Learning",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
       "id": 800,
       "panels": [
         {
@@ -945,7 +1099,7 @@
             "h": 17,
             "w": 24,
             "x": 0,
-            "y": 21
+            "y": 22
           },
           "id": 801,
           "libraryPanel": {
@@ -964,7 +1118,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 19
+        "y": 20
       },
       "id": 700,
       "panels": [
@@ -973,7 +1127,7 @@
             "h": 15,
             "w": 24,
             "x": 0,
-            "y": 22
+            "y": 23
           },
           "id": 701,
           "libraryPanel": {
@@ -1002,6 +1156,6 @@
   "timezone": "browser",
   "title": "Trading Brain",
   "uid": "trading-brain-main",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }

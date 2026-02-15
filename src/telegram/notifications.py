@@ -45,6 +45,7 @@ _EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
     "candidate_promoted":          ("STRATEGY", "info"),
     "candidate_trade_executed":    ("CANDIDATE", "info"),
     "candidate_stop_triggered":    ("CANDIDATE", "warning"),
+    "reflection_completed":        ("ORCH",      "info"),
 }
 
 
@@ -180,6 +181,11 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         reason = data.get("close_reason", "stop_loss")
         price = data.get("price", 0)
         return f"[C{slot}] {reason.upper()} triggered on {symbol} @ ${price:,.2f}"
+
+    if event_name == "reflection_completed":
+        graded = data.get("predictions_graded", 0)
+        new = data.get("new_predictions", 0)
+        return f"Reflection: {graded} predictions graded, {new} new predictions"
 
     return None
 
@@ -458,6 +464,13 @@ class Notifier:
 
         data = {**trade, "slot": slot}
         await self._dispatch("candidate_trade_executed", data, "\n".join(lines))
+
+    async def reflection_completed(self, predictions_graded: int, new_predictions: int, summary: str) -> None:
+        await self._dispatch(
+            "reflection_completed",
+            {"predictions_graded": predictions_graded, "new_predictions": new_predictions, "summary": summary[:500]},
+            f"Reflection Complete\nPredictions graded: {predictions_graded}\nNew predictions: {new_predictions}\n{summary[:300]}",
+        )
 
     async def candidate_stop_triggered(self, slot: int, trade: dict) -> None:
         symbol = trade.get("symbol", "?")

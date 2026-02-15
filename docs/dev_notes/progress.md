@@ -2717,3 +2717,133 @@ Built "Data Wall" (Bloomberg-style), "Story Flow" (narrative), and "Three Column
 - `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` — Library panel references + orchestrator panels at top
 
 **Tests: 201/201 passing** (unchanged — Grafana JSON only)
+
+## Session W (2026-02-14) — Institutional Learning System
+
+### Context
+The strategy document (Layer 3 — Institutional Memory) was read every nightly cycle but never written to. Daily observations went to DB on a rolling window but nothing graduated to durable institutional knowledge. The orchestrator's judgment didn't compound over time. Full design in `docs/dev_notes/strategy_document_design.md`.
+
+### What Was Built
+
+**Phase 1 — Database Schema**
+- 4 new tables: `predictions`, `strategy_doc_versions`, `candidate_signals`, `candidate_daily_performance`
+- 5 new indexes
+- 7 migrations: 3 columns on `orchestrator_observations` (strategy_version, doc_flag, flag_reason), `max_adverse_excursion` on positions, candidate_positions, trades, candidate_trades
+
+**Phase 2 — MAE (Max Adverse Excursion) Tracking**
+- Tracks worst drawdown from entry while position is open
+- Fund positions: `update_prices()`, `refresh_prices()`, `_execute_buy()`, `_close_qty()`, `record_exchange_fill()`, `snapshot_daily()`
+- Candidate positions: `check_sl_tp()`, `_build_portfolio()`, `_execute_buy()`, `_close_position()`
+- Persistence: `persist_state()` (positions + trades), `initialize()` (recovery)
+
+**Phase 3 — Candidate Data Parity**
+- Signal capture in `CandidateRunner.run_scan()` — builds signal records with acted_on/rejected_reason
+- `get_new_signals()` returns and clears pending signals
+- `CandidateManager.persist_state()` writes signals to `candidate_signals` and daily snapshots to `candidate_daily_performance`
+- Fixed `strategy_regime=None` across `main.py` signal processing (4 SQL tuples + 1 keyword arg)
+
+**Phase 4 — Prediction Storage**
+- Added prediction guidance to `LAYER_2_SYSTEM` prompt + `doc_flag`/`flag_reason`/`predictions` fields to JSON schema
+- `_store_predictions()` method extracts and validates predictions from decision JSON
+- `_get_current_strategy_version()` helper for observation context
+- `_store_observation()` now includes strategy_version, doc_flag, flag_reason; pruning changed from 30d to 14d
+
+**Phase 5 — Reflection System**
+- `REFLECTION_USER_TEMPLATE` constant: 14-section template with full Layer A + Layer B evidence
+- `_should_reflect()`: True if >=14 days since last reflection OR never reflected with >=7 observations
+- `_gather_reflection_context()`: Queries all narrative + evidence data from DB
+- `_archive_strategy_doc()`: Archives current doc to `strategy_doc_versions` with incrementing version
+- `_reflect()`: Full flow — gather context, Opus call, archive old doc, write new doc, grade predictions by ID, store new predictions, update system_meta, notify
+- Reflection runs BEFORE nightly analysis so freshly updated strategy doc informs that night's decisions
+
+**Phase 6 — Strategy Document Template**
+- Replaced `strategy/strategy_document.md` with new 6-section structure: Strategy Design Principles, Strategy Lineage, Known Failure Modes, Market Regime Understanding, Prediction Scorecard, Active Predictions
+
+**Phase 7 — Observability**
+- Telegram: `reflection_completed` event + notification method
+- Config: `reflection_completed: bool = True` in NotificationConfig
+- Prometheus: 6 new gauges (predictions_total, predictions_ungraded, predictions_graded, prediction_accuracy, strategy_doc_version, days_since_reflection)
+- REST: `GET /v1/predictions` (with graded filter) + `GET /v1/strategy-doc/versions`
+
+**Phase 8 — Pruning**
+- `predictions`: 30 days after grading
+- `candidate_signals`: 30 days after candidate resolved
+- `candidate_daily_performance`: same lifecycle
+- `strategy_doc_versions`: explicitly NOT pruned (permanent archive)
+
+**Phase 9 — Tests**
+- 20 new tests in `tests/test_institutional_learning.py`
+- Updated `test_integration.py` schema check to include 4 new tables
+
+### Files Modified
+| File | Summary |
+|------|---------|
+| `src/shell/database.py` | 4 new tables, 5 indexes, 7 migrations |
+| `src/shell/portfolio.py` | MAE tracking throughout position lifecycle |
+| `src/candidates/runner.py` | Signal capture, MAE tracking, strategy_regime |
+| `src/candidates/manager.py` | Signal persistence, daily snapshots, MAE in persist/recovery |
+| `src/main.py` | Fixed strategy_regime=None (4 SQL tuples + 1 kwarg) |
+| `src/orchestrator/orchestrator.py` | Predictions, reflection system, prompt changes |
+| `strategy/strategy_document.md` | New 6-section template |
+| `src/telegram/notifications.py` | reflection_completed event |
+| `src/shell/config.py` | reflection_completed notification flag |
+| `src/shell/data_store.py` | Pruning for 3 new tables |
+| `src/api/routes.py` | 2 new REST endpoints |
+| `src/api/metrics.py` | 6 new Prometheus gauges |
+| `tests/test_institutional_learning.py` | 20 new tests |
+| `tests/test_integration.py` | Schema check updated |
+
+### Key Design Decisions
+- **Prediction grading by ID**: Reflection data includes prediction `id`, Opus returns `prediction_id` — avoids fragile claim-text matching
+- **Reflection before analysis**: Strategy doc updated first, then used in that night's analysis context
+- **Strategy doc rewrite (not append)**: Each reflection produces a complete rewrite, old versions permanently archived
+- **First reflection gating**: Won't reflect until >=7 observations exist (about 1 week of nightly cycles)
+
+**Tests: 221/221 passing** (201 existing + 20 new)
+
+### Post-Implementation Additions (Session W continued)
+
+**Grafana Dashboard — Institutional Learning Row**
+- Added datasource UIDs (`uid: prometheus`, `uid: loki`) to `datasources.yml`
+- New collapsed row "Institutional Learning" (id 1100) at y=18 with 7 inline panels:
+  - ID 1101-1103: Total Predictions, Ungraded, Graded (stat panels)
+  - ID 1104: Prediction Accuracy (gauge, percentunit, red/yellow/green thresholds)
+  - ID 1105: Strategy Doc Version (stat, blue)
+  - ID 1106: Days Since Reflection (stat, color thresholds at 10/14)
+  - ID 1107: Reflection Events (Loki logs panel)
+- New "Candidate Positions" table panel (id 1108) in Strategy Candidates row
+- Dashboard version bumped from 7 to 8
+
+**Configurable Reflection Period**
+- `orchestrator.reflection_interval_days` config option (default 7, was hardcoded 14)
+- Added to `OrchestratorConfig`, `load_config()`, `settings.example.toml`
+- Updated `_should_reflect()`, `_gather_reflection_context()` (10 SQL queries), `_gather_context()`, `_store_observation()` pruning, `REFLECTION_USER_TEMPLATE`, `_reflect()`
+
+**Manual Reflection Trigger — `/reflect_tonight`**
+- New Telegram command sets `reflect_tonight=1` in `system_meta`
+- Registered in `bot.py`, added to help text
+- Orchestrator checks flag in `_should_reflect()`, clears after reflection
+
+**Candidate Position Gauges**
+- 2 new Prometheus gauges: `tb_candidate_position_value_usd`, `tb_candidate_position_pnl_usd` (labels: slot, symbol, tag)
+- Populated in `metrics_handler()` from `runner.get_positions()`
+
+**Test Fixes**
+- `test_should_reflect_14_days` → renamed `test_should_reflect_interval` (5-day/8-day thresholds for new 7-day default)
+- Added `test_should_reflect_manual_trigger`
+- Updated `test_integration.py` schema check for 4 new tables
+
+### Files Modified (Additions)
+| File | Summary |
+|------|---------|
+| `monitoring/grafana/provisioning/datasources/datasources.yml` | Added explicit UIDs |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | 8 new panels, version 8 |
+| `src/shell/config.py` | `reflection_interval_days` in OrchestratorConfig |
+| `config/settings.example.toml` | `reflection_interval_days = 7` |
+| `src/orchestrator/orchestrator.py` | Configurable interval throughout, reflect_tonight flag |
+| `src/telegram/commands.py` | `/reflect_tonight` command |
+| `src/telegram/bot.py` | Handler registration |
+| `src/api/metrics.py` | 2 new candidate position gauges |
+| `tests/test_institutional_learning.py` | Fixed interval test, added manual trigger test |
+
+**Tests: 222/222 passing** (221 + 1 new manual trigger test)

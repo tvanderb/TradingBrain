@@ -125,12 +125,12 @@ trading-brain/
 │   ├── telegram/                  # User interface
 │   │   ├── __init__.py
 │   │   ├── bot.py                 # Bot setup + lifecycle
-│   │   ├── commands.py            # 16 command handlers
+│   │   ├── commands.py            # 17 command handlers
 │   │   └── notifications.py       # Dual dispatch (Telegram + WebSocket)
 │   ├── api/                       # Data API
 │   │   ├── __init__.py
 │   │   ├── server.py              # aiohttp app with auth + error middleware
-│   │   ├── routes.py              # 10 REST endpoints
+│   │   ├── routes.py              # 13 REST endpoints
 │   │   └── websocket.py           # WebSocket event stream
 │   └── utils/
 │       ├── __init__.py
@@ -218,7 +218,7 @@ trading-brain/
 | Position monitor | Every 30 sec | Check SL/TP (paper: price check, live: exchange orders) |
 | Fee check | Every 24h | Update fee schedule from Kraken API |
 | Daily P&L snapshot | 23:55 local | Record daily performance |
-| Orchestration cycle | 3:30-6:00 AM EST | AI review + strategy modification |
+| Orchestration cycle | 3:30-6:00 AM EST | Reflection (if due) → AI review + strategy modification |
 | Data aggregation | During orchestration | Tier old candles (5m→1h→daily) |
 | Data pruning | During orchestration | Delete candles beyond retention period |
 | Conditional order monitor | Every 30 sec (live only) | Check exchange SL/TP fills |
@@ -422,6 +422,51 @@ OUTER LOOP (max_strategy_iterations=3): Opus directs strategy
 
 Key: Opus's `revision_instructions` replace (not append to) the accumulated changes, giving Sonnet a fresh starting point. `attempt_history` shows Opus what's been tried.
 
+### Candidate Strategy System
+
+Up to 3 candidate strategies run paper simulations alongside the active strategy. Replaces the old paper-test-on-active-strategy model.
+
+- **CandidateRunner** (`src/candidates/runner.py`): Per-slot paper simulation engine — tracks positions, trades, SL/TP, risk limits, MAE, signals
+- **CandidateManager** (`src/candidates/manager.py`): Lifecycle management — create, cancel, promote, recover, persist
+- **DB tables**: `candidates`, `candidate_positions`, `candidate_trades`, `candidate_signals`, `candidate_daily_performance`
+- **Decision types**: CREATE_CANDIDATE, CANCEL_CANDIDATE, PROMOTE_CANDIDATE
+- **On promotion**: Opus chooses "keep" (inherit fund positions) or "close_all" (clean slate)
+- **Observability**: `/candidates` Telegram, `GET /v1/candidates` REST, 7 Prometheus gauges per slot (including per-position)
+
+### Institutional Learning System
+
+The orchestrator builds institutional memory through falsifiable predictions and periodic reflection cycles. Strategy document (Layer 3) evolves through earned experience.
+
+**Predictions** (nightly, optional):
+- Emerge naturally from the orchestrator's decision context
+- Schema: claim, evidence, falsification criteria, confidence, evaluation timeframe
+- Stored in `predictions` table with grading fields
+- Orchestrator receives its own ungraded predictions as context each night
+
+**Reflection** (periodic, configurable interval — default 7 days):
+- Trigger: `>= reflection_interval_days` since last reflection OR manual `/reflect_tonight` command
+- First-time trigger: never reflected AND `>= max(3, interval/2)` observations exist
+- Full Opus call with 14-section evidence template covering predictions, strategy performance, market analysis, candidate outcomes, and observation patterns
+- Grades predictions by ID (confirmed/denied/partial/inconclusive)
+- Rewrites strategy document completely — old versions archived permanently in `strategy_doc_versions`
+- Stores new predictions and updates `system_meta.last_reflection_date`
+- Runs BEFORE nightly analysis so fresh strategy doc informs that night's decisions
+
+**MAE Tracking** (max adverse excursion):
+- Tracks worst drawdown from entry price while position is open
+- Fund positions: updated on every price refresh and persisted to DB
+- Candidate positions: updated on every SL/TP check
+- Carried to trades table on close for post-mortem analysis
+
+**Configuration** (`config/settings.toml`):
+- `orchestrator.reflection_interval_days = 7` — controls reflection trigger, observation window, and pruning
+
+**Pruning**:
+- Predictions: 30 days after grading
+- Candidate signals/daily_performance: 30 days after candidate resolved
+- Strategy doc versions: NEVER pruned (permanent archive)
+- Observations: rolling window matching reflection interval
+
 ### Database Schema (Key Tables)
 
 ```sql
@@ -480,9 +525,58 @@ CREATE TABLE capital_events (
 );
 ```
 
+-- Predictions: falsifiable claims from nightly orchestrator decisions
+CREATE TABLE predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim TEXT NOT NULL,
+    evidence TEXT,
+    falsification TEXT,
+    confidence TEXT,
+    evaluation_timeframe TEXT,
+    strategy_version TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    graded_at TEXT,
+    grade TEXT,  -- confirmed, denied, partial, inconclusive
+    grade_reasoning TEXT
+);
+
+-- Strategy document versions: permanent archive of every reflection rewrite
+CREATE TABLE strategy_doc_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Candidate signals: signal history for candidate strategies
+CREATE TABLE candidate_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    symbol TEXT NOT NULL, action TEXT NOT NULL,
+    confidence REAL, intent TEXT, reasoning TEXT,
+    acted_on INTEGER DEFAULT 0, rejected_reason TEXT,
+    strategy_version TEXT, strategy_regime TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Candidate daily performance: daily snapshots for candidate strategies
+CREATE TABLE candidate_daily_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    portfolio_value REAL NOT NULL, cash REAL NOT NULL,
+    position_count INTEGER DEFAULT 0,
+    daily_pnl REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+```
+
 Key columns on existing tables:
-- `positions`: `tag TEXT NOT NULL` (globally unique identifier), `intent TEXT`, `strategy_version TEXT`
-- `trades`: `close_reason TEXT`, `tag TEXT`
+- `positions`: `tag TEXT NOT NULL`, `intent TEXT`, `strategy_version TEXT`, `max_adverse_excursion REAL`
+- `trades`: `close_reason TEXT`, `tag TEXT`, `max_adverse_excursion REAL`
+- `candidate_positions`: `max_adverse_excursion REAL`
+- `candidate_trades`: `max_adverse_excursion REAL`
+- `orchestrator_observations`: `strategy_version TEXT`, `doc_flag TEXT`, `flag_reason TEXT`
 - `strategy_versions`: `code TEXT` (source code for DB fallback)
 
 ### File Structure

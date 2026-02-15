@@ -200,6 +200,17 @@ All timeframes are bootstrapped from Kraken on cold start — the strategy has r
 - Scan results: raw indicator values stored every scan
 - Trades and signals: tagged with strategy version, strategy regime, position tag, and close reason
 
+### Predictions (Optional)
+You may include predictions — falsifiable claims about future outcomes. Especially
+valuable when taking action (CREATE_CANDIDATE, PROMOTE_CANDIDATE, CANCEL_CANDIDATE)
+but welcome any time you have a hypothesis worth testing.
+
+Each prediction: claim, evidence, falsification (how you'd know you're wrong),
+confidence (low/medium/high), evaluation_timeframe (when to check).
+
+You may also flag tonight's observation as significant for reflection by setting
+doc_flag to 1 with a brief flag_reason.
+
 ### Response Format
 Respond in JSON:
 {{
@@ -211,7 +222,10 @@ Respond in JSON:
     "evaluation_duration_days": null,
     "position_handling": null,
     "cross_reference_findings": "Findings from comparing market conditions to trade outcomes",
-    "market_observations": "Notable market observations from this cycle"
+    "market_observations": "Notable market observations from this cycle",
+    "doc_flag": null,
+    "flag_reason": null,
+    "predictions": []
 }}"""
 
 CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading strategy.
@@ -376,6 +390,74 @@ Respond in JSON:
     "concerns": ["Any concerns worth noting even if deploying"],
     "revision_instructions": "If rejecting: specific new direction for the next attempt. If deploying: empty string."
 }"""
+
+REFLECTION_USER_TEMPLATE = """You are conducting your periodic reflection — reviewing the past {reflection_days} days of decisions, grading your predictions, evaluating your principles, and rewriting the strategy document.
+
+---
+
+## CURRENT STRATEGY DOCUMENT
+{strategy_doc}
+
+---
+
+## OBSERVATIONS (Last {reflection_days} Days)
+{observations}
+
+## FLAGGED OBSERVATIONS
+{flagged_observations}
+
+---
+
+## PREDICTIONS TO GRADE
+{predictions_to_grade}
+
+---
+
+## EVIDENCE: Closed Trades (Fund)
+{fund_trades}
+
+## EVIDENCE: Closed Trades (Candidates)
+{candidate_trades}
+
+## EVIDENCE: Open Positions (Fund)
+{fund_positions}
+
+## EVIDENCE: Open Positions (Candidates)
+{candidate_positions}
+
+## EVIDENCE: Daily Performance (Fund)
+{daily_performance}
+
+## EVIDENCE: Candidate Daily Performance
+{candidate_daily_performance}
+
+## EVIDENCE: Candidate Lifecycle
+{candidate_lifecycle}
+
+## EVIDENCE: Strategy Versions Deployed
+{strategy_versions}
+
+## EVIDENCE: Signals (Fund)
+{fund_signals}
+
+## EVIDENCE: Signals (Candidates)
+{candidate_signals}
+
+---
+
+Respond in JSON:
+{{
+    "graded_predictions": [
+        {{"prediction_id": 42, "grade": "confirmed|refuted|partially_confirmed|inconclusive",
+         "grade_evidence": "...", "grade_learning": "..."}}
+    ],
+    "strategy_document": "Complete rewritten strategy document (markdown, ~2000 words)",
+    "reflection_summary": "Brief summary of key learnings",
+    "predictions": [
+        {{"claim": "...", "evidence": "...", "falsification": "...",
+         "confidence": "low|medium|high", "evaluation_timeframe": "{reflection_days} days"}}
+    ]
+}}"""
 
 ANALYSIS_CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading analysis module.
 
@@ -597,6 +679,16 @@ class Orchestrator:
                     await self._notifier.orchestrator_cycle_completed("SKIPPED_BUDGET")
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
+            # 0b. Check if reflection is due
+            if await self._should_reflect():
+                log.info("orchestrator.reflection_due")
+                await self._reflect()
+                # Clear manual trigger if set
+                await self._db.execute(
+                    "DELETE FROM system_meta WHERE key = 'reflect_tonight'"
+                )
+                await self._db.commit()
+
             # 1. Gather context
             context = await self._gather_context()
 
@@ -626,8 +718,9 @@ class Orchestrator:
                 log.warning("orchestrator.unknown_decision_type", decision_type=decision_type)
                 report = f"Orchestrator: Unknown decision '{decision_type}' — treated as NO_CHANGE."
 
-            # 4. Store daily observations
+            # 4. Store daily observations and predictions
             await self._store_observation(decision)
+            await self._store_predictions(decision)
 
             # 5. Log orchestration
             await self._log_orchestration(decision, deployed_version=deployed_version)
@@ -802,10 +895,11 @@ class Orchestrator:
             drought_info = {"last_signal_at": None, "signals_last_7d": 0, "signals_last_30d": 0, "scans_last_24h": 0}
 
         try:
+            interval = self._config.orchestrator.reflection_interval_days
             recent_observations = await self._db.fetchall(
-                """SELECT date, market_summary, strategy_assessment, notable_findings
+                f"""SELECT date, market_summary, strategy_assessment, notable_findings
                    FROM orchestrator_observations
-                   WHERE date >= date('now', '-14 days')
+                   WHERE date >= date('now', '-{interval} days')
                    ORDER BY date DESC"""
             )
         except Exception as e:
@@ -918,7 +1012,7 @@ class Orchestrator:
 ### Signal Drought Detection:
 {json.dumps(context["signal_drought"], indent=2, default=str)}
 
-### Recent Observations (last 14 days):
+### Recent Observations (last {self._config.orchestrator.reflection_interval_days} days):
 {json.dumps(context["recent_observations"], indent=2, default=str) if context["recent_observations"] else "No prior observations."}
 
 ---
@@ -1541,28 +1635,320 @@ The orchestrator wants to change this module because: {changes}"""
         await self._store_thought("backtest_review", "opus", review_prompt, response, parsed)
         return parsed
 
+    async def _should_reflect(self) -> bool:
+        """Check if it's time for a reflection cycle."""
+        # Manual trigger via /reflect_tonight command
+        manual = await self._db.fetchone(
+            "SELECT value FROM system_meta WHERE key = 'reflect_tonight'"
+        )
+        if manual and manual["value"] == "1":
+            return True
+
+        interval = self._config.orchestrator.reflection_interval_days
+        row = await self._db.fetchone(
+            "SELECT value FROM system_meta WHERE key = 'last_reflection_date'"
+        )
+        if row:
+            from datetime import date
+            last = date.fromisoformat(row["value"])
+            today = date.today()
+            return (today - last).days >= interval
+        else:
+            # Never reflected — check if we have enough observations to reflect on
+            obs_count = await self._db.fetchone(
+                "SELECT COUNT(*) as count FROM orchestrator_observations"
+            )
+            min_obs = max(3, interval // 2)  # Need at least half a cycle of data
+            return (obs_count["count"] if obs_count else 0) >= min_obs
+
+    async def _gather_reflection_context(self) -> dict:
+        """Gather all data needed for the reflection Opus call."""
+        interval = self._config.orchestrator.reflection_interval_days
+        window = f"-{interval} days"
+
+        # Layer A: Narrative — what the orchestrator was thinking
+        observations = await self._db.fetchall(
+            f"""SELECT date, cycle_id, market_summary, strategy_assessment, notable_findings,
+                      strategy_version, doc_flag, flag_reason
+               FROM orchestrator_observations
+               WHERE date >= date('now', '{window}')
+               ORDER BY date ASC"""
+        )
+
+        flagged = [o for o in observations if o.get("doc_flag")]
+
+        predictions = await self._db.fetchall(
+            """SELECT id, cycle_id, claim, evidence, falsification, confidence,
+                      evaluation_timeframe, category, created_at
+               FROM predictions
+               WHERE graded_at IS NULL
+               ORDER BY created_at ASC"""
+        )
+
+        # Layer B: Evidence — what actually happened
+        fund_trades = await self._db.fetchall(
+            f"""SELECT symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct,
+                      fees, intent, strategy_version, strategy_regime, close_reason,
+                      max_adverse_excursion, opened_at, closed_at
+               FROM trades
+               WHERE closed_at IS NOT NULL AND closed_at >= datetime('now', '{window}')
+               ORDER BY closed_at ASC"""
+        )
+
+        candidate_trades = await self._db.fetchall(
+            f"""SELECT candidate_slot, symbol, tag, side, qty, entry_price, exit_price,
+                      pnl, pnl_pct, fees, intent, strategy_version, close_reason,
+                      max_adverse_excursion, opened_at, closed_at
+               FROM candidate_trades
+               WHERE closed_at IS NOT NULL AND closed_at >= datetime('now', '{window}')
+               ORDER BY closed_at ASC"""
+        )
+
+        fund_positions = await self._db.fetchall(
+            "SELECT * FROM positions"
+        )
+
+        candidate_positions = await self._db.fetchall(
+            "SELECT * FROM candidate_positions"
+        )
+
+        daily_perf = await self._db.fetchall(
+            f"""SELECT * FROM daily_performance
+               WHERE date >= date('now', '{window}')
+               ORDER BY date ASC"""
+        )
+
+        candidate_daily = await self._db.fetchall(
+            f"""SELECT * FROM candidate_daily_performance
+               WHERE date >= date('now', '{window}')
+               ORDER BY candidate_slot, date ASC"""
+        )
+
+        candidate_lifecycle = await self._db.fetchall(
+            f"""SELECT slot, strategy_version, description, status, created_at, resolved_at
+               FROM candidates
+               WHERE created_at >= datetime('now', '{window}')
+                  OR resolved_at >= datetime('now', '{window}')
+               ORDER BY created_at ASC"""
+        )
+
+        strategy_versions = await self._db.fetchall(
+            f"""SELECT version, description, deployed_at, retired_at, backtest_result
+               FROM strategy_versions
+               WHERE created_at >= datetime('now', '{window}')
+               ORDER BY created_at ASC"""
+        )
+
+        fund_signals = await self._db.fetchall(
+            f"""SELECT symbol, action, size_pct, confidence, strategy_regime,
+                      acted_on, rejected_reason, tag, created_at
+               FROM signals
+               WHERE created_at >= datetime('now', '{window}')
+               ORDER BY created_at ASC"""
+        )
+
+        candidate_signals = await self._db.fetchall(
+            f"""SELECT candidate_slot, symbol, action, size_pct, confidence,
+                      strategy_regime, acted_on, rejected_reason, tag, created_at
+               FROM candidate_signals
+               WHERE created_at >= datetime('now', '{window}')
+               ORDER BY created_at ASC"""
+        )
+
+        return {
+            "observations": [dict(o) for o in observations],
+            "flagged_observations": [dict(o) for o in flagged],
+            "predictions": [dict(p) for p in predictions],
+            "fund_trades": [dict(t) for t in fund_trades],
+            "candidate_trades": [dict(t) for t in candidate_trades],
+            "fund_positions": [dict(p) for p in fund_positions],
+            "candidate_positions": [dict(p) for p in candidate_positions],
+            "daily_performance": [dict(d) for d in daily_perf],
+            "candidate_daily_performance": [dict(d) for d in candidate_daily],
+            "candidate_lifecycle": [dict(c) for c in candidate_lifecycle],
+            "strategy_versions": [dict(v) for v in strategy_versions],
+            "fund_signals": [dict(s) for s in fund_signals],
+            "candidate_signals": [dict(s) for s in candidate_signals],
+        }
+
+    async def _archive_strategy_doc(self) -> None:
+        """Archive current strategy document to strategy_doc_versions before rewriting."""
+        if not STRATEGY_DOC_PATH.exists():
+            return
+        content = STRATEGY_DOC_PATH.read_text()
+        if not content.strip():
+            return
+
+        row = await self._db.fetchone(
+            "SELECT COALESCE(MAX(version), 0) as max_ver FROM strategy_doc_versions"
+        )
+        next_version = (row["max_ver"] if row else 0) + 1
+
+        await self._db.execute(
+            """INSERT INTO strategy_doc_versions (version, content, reflection_cycle_id)
+               VALUES (?, ?, ?)""",
+            (next_version, content, self._cycle_id),
+        )
+        await self._db.commit()
+        log.info("orchestrator.strategy_doc_archived", version=next_version)
+
+    async def _reflect(self) -> None:
+        """Run the bi-weekly reflection: grade predictions, rewrite strategy doc."""
+        log.info("orchestrator.reflection_start", cycle_id=self._cycle_id)
+
+        # 1. Gather all reflection data
+        ctx = await self._gather_reflection_context()
+
+        # 2. Read current strategy document
+        strategy_doc = (
+            STRATEGY_DOC_PATH.read_text()
+            if STRATEGY_DOC_PATH.exists()
+            else "No strategy document exists yet."
+        )
+
+        # 3. Format the reflection prompt
+        prompt = REFLECTION_USER_TEMPLATE.format(
+            reflection_days=self._config.orchestrator.reflection_interval_days,
+            strategy_doc=strategy_doc,
+            observations=json.dumps(ctx["observations"], indent=2, default=str) if ctx["observations"] else "No observations in this period.",
+            flagged_observations=json.dumps(ctx["flagged_observations"], indent=2, default=str) if ctx["flagged_observations"] else "No flagged observations.",
+            predictions_to_grade=json.dumps(ctx["predictions"], indent=2, default=str) if ctx["predictions"] else "No predictions to grade.",
+            fund_trades=json.dumps(ctx["fund_trades"], indent=2, default=str) if ctx["fund_trades"] else "No closed fund trades.",
+            candidate_trades=json.dumps(ctx["candidate_trades"], indent=2, default=str) if ctx["candidate_trades"] else "No closed candidate trades.",
+            fund_positions=json.dumps(ctx["fund_positions"], indent=2, default=str) if ctx["fund_positions"] else "No open fund positions.",
+            candidate_positions=json.dumps(ctx["candidate_positions"], indent=2, default=str) if ctx["candidate_positions"] else "No open candidate positions.",
+            daily_performance=json.dumps(ctx["daily_performance"], indent=2, default=str) if ctx["daily_performance"] else "No daily performance data.",
+            candidate_daily_performance=json.dumps(ctx["candidate_daily_performance"], indent=2, default=str) if ctx["candidate_daily_performance"] else "No candidate daily performance data.",
+            candidate_lifecycle=json.dumps(ctx["candidate_lifecycle"], indent=2, default=str) if ctx["candidate_lifecycle"] else "No candidate lifecycle events.",
+            strategy_versions=json.dumps(ctx["strategy_versions"], indent=2, default=str) if ctx["strategy_versions"] else "No strategy versions deployed.",
+            fund_signals=json.dumps(ctx["fund_signals"], indent=2, default=str) if ctx["fund_signals"] else "No fund signals.",
+            candidate_signals=json.dumps(ctx["candidate_signals"], indent=2, default=str) if ctx["candidate_signals"] else "No candidate signals.",
+        )
+
+        # 4. Opus reflection call (same identity as analysis)
+        system_prompt = (
+            f"{LAYER_1_IDENTITY}\n\n---\n\n{FUND_MANDATE}\n\n---\n\n{LAYER_2_SYSTEM}"
+        )
+
+        response = await self._ai.ask_opus(
+            prompt, system=system_prompt, purpose="reflection"
+        )
+
+        parsed = self._extract_json(response)
+        if parsed is None:
+            log.warning("orchestrator.reflection_parse_failed")
+            await self._store_thought("reflection", "opus", prompt, response)
+            return
+
+        await self._store_thought("reflection", "opus", prompt, response, parsed)
+
+        # 5. Archive current strategy doc
+        await self._archive_strategy_doc()
+
+        # 6. Write new strategy document
+        new_doc = parsed.get("strategy_document", "")
+        if new_doc and len(new_doc.strip()) > 50:
+            STRATEGY_DOC_PATH.write_text(new_doc)
+            log.info("orchestrator.strategy_doc_updated",
+                     length=len(new_doc))
+
+        # 7. Grade predictions by ID
+        graded = parsed.get("graded_predictions", [])
+        graded_count = 0
+        for gp in graded:
+            if not isinstance(gp, dict):
+                continue
+            pred_id = gp.get("prediction_id")
+            grade = gp.get("grade", "")
+            if pred_id is None or not grade:
+                continue
+            await self._db.execute(
+                """UPDATE predictions
+                   SET graded_at = datetime('now', 'utc'), grade = ?,
+                       grade_evidence = ?, grade_learning = ?
+                   WHERE id = ?""",
+                (
+                    grade[:100],
+                    (gp.get("grade_evidence") or "")[:2000],
+                    (gp.get("grade_learning") or "")[:2000],
+                    pred_id,
+                ),
+            )
+            graded_count += 1
+
+        # 8. Store new predictions from reflection
+        new_preds = parsed.get("predictions", [])
+        new_pred_count = 0
+        for pred in new_preds:
+            if not isinstance(pred, dict):
+                continue
+            claim = pred.get("claim", "")
+            falsification = pred.get("falsification", "")
+            if not claim or not falsification:
+                continue
+            await self._db.execute(
+                """INSERT INTO predictions
+                   (cycle_id, claim, evidence, falsification, confidence,
+                    evaluation_timeframe, category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self._cycle_id or "unknown",
+                    claim[:2000],
+                    (pred.get("evidence") or "")[:2000],
+                    falsification[:2000],
+                    (pred.get("confidence") or "")[:50],
+                    (pred.get("evaluation_timeframe") or "")[:100],
+                    "reflection",
+                ),
+            )
+            new_pred_count += 1
+
+        # 9. Update last_reflection_date
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await self._db.execute(
+            "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('last_reflection_date', ?)",
+            (today,),
+        )
+        await self._db.commit()
+
+        # 10. Notify
+        summary = parsed.get("reflection_summary", "Reflection complete")
+        if self._notifier:
+            await self._notifier.reflection_completed(graded_count, new_pred_count, summary)
+
+        log.info("orchestrator.reflection_complete",
+                 graded=graded_count, new_predictions=new_pred_count)
+
     async def _store_observation(self, decision: dict) -> None:
         """Store daily observations in DB table (replaces strategy doc appends).
 
-        Observations are the orchestrator's daily findings — rolling 30-day window.
-        Strategy document updates are separate and rare (meaningful discoveries only).
+        Observations are the orchestrator's daily findings — rolling window
+        (lockstep with the reflection cycle interval).
         """
         try:
+            # Get current strategy version for attribution
+            strategy_version = await self._get_current_strategy_version()
+
             # REPLACE: if cycle re-runs for same date, latest observation wins
             await self._db.execute(
                 """INSERT OR REPLACE INTO orchestrator_observations
-                   (date, cycle_id, market_summary, strategy_assessment, notable_findings)
-                   VALUES (date('now', 'utc'), ?, ?, ?, ?)""",
+                   (date, cycle_id, market_summary, strategy_assessment, notable_findings,
+                    strategy_version, doc_flag, flag_reason)
+                   VALUES (date('now', 'utc'), ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self._cycle_id or "unknown",
                     decision.get("market_observations", "")[:5000],
                     decision.get("reasoning", "")[:5000],
                     decision.get("cross_reference_findings", "")[:5000],
+                    strategy_version,
+                    1 if decision.get("doc_flag") else 0,
+                    (decision.get("flag_reason") or "")[:1000] if decision.get("doc_flag") else None,
                 ),
             )
-            # Prune observations older than 30 days
+            # Prune observations older than reflection interval (lockstep with reflection cycle)
+            interval = self._config.orchestrator.reflection_interval_days
             await self._db.execute(
-                "DELETE FROM orchestrator_observations WHERE date < date('now', '-30 days')"
+                f"DELETE FROM orchestrator_observations WHERE date < date('now', '-{interval} days')"
             )
             # Prune thoughts older than 30 days
             await self._db.execute(
@@ -1577,6 +1963,51 @@ The orchestrator wants to change this module because: {changes}"""
                      assessment=strategy_assessment or "")
         except Exception as e:
             log.warning("orchestrator.observation_store_failed", error=str(e))
+
+    async def _get_current_strategy_version(self) -> str | None:
+        """Get the currently deployed strategy version."""
+        row = await self._db.fetchone(
+            "SELECT version FROM strategy_versions WHERE retired_at IS NULL ORDER BY deployed_at DESC LIMIT 1"
+        )
+        return row["version"] if row else None
+
+    async def _store_predictions(self, decision: dict) -> None:
+        """Extract and store predictions from the orchestrator's decision."""
+        predictions = decision.get("predictions")
+        if not predictions or not isinstance(predictions, list):
+            return
+
+        count = 0
+        for pred in predictions:
+            if not isinstance(pred, dict):
+                continue
+            claim = pred.get("claim", "")
+            evidence = pred.get("evidence", "")
+            falsification = pred.get("falsification", "")
+            confidence = pred.get("confidence", "")
+            if not claim or not falsification:
+                continue  # Skip incomplete predictions
+
+            await self._db.execute(
+                """INSERT INTO predictions
+                   (cycle_id, claim, evidence, falsification, confidence,
+                    evaluation_timeframe, category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self._cycle_id or "unknown",
+                    claim[:2000],
+                    evidence[:2000],
+                    falsification[:2000],
+                    confidence[:50],
+                    (pred.get("evaluation_timeframe") or "")[:100],
+                    (pred.get("category") or "")[:100],
+                ),
+            )
+            count += 1
+
+        if count > 0:
+            await self._db.commit()
+            log.info("orchestrator.predictions_stored", count=count)
 
     async def _log_orchestration(
         self, decision: dict, deployed_version: str | None = None

@@ -55,6 +55,8 @@ class CandidateRunner:
         self._maker_fee = maker_fee_pct
         self._taker_fee = taker_fee_pct
         self._next_tag_counter: dict[str, int] = {}  # symbol -> counter
+        self._pending_signals: list[dict] = []
+        self._current_regime: str | None = None
 
         # Clone initial positions with candidate tag prefix
         for pos in initial_positions:
@@ -88,8 +90,14 @@ class CandidateRunner:
         for tag, pos in self._positions.items():
             sym = pos["symbol"]
             if sym in prices:
-                pos["current_price"] = prices[sym]
-                pos["unrealized_pnl"] = (prices[sym] - pos["avg_entry"]) * pos["qty"]
+                price = prices[sym]
+                pos["current_price"] = price
+                pos["unrealized_pnl"] = (price - pos["avg_entry"]) * pos["qty"]
+                # MAE tracking: worst drawdown from entry
+                if price < pos["avg_entry"]:
+                    dd = (pos["avg_entry"] - price) / pos["avg_entry"]
+                    if dd > pos.get("max_adverse_excursion", 0.0):
+                        pos["max_adverse_excursion"] = dd
 
         open_positions = []
         for tag, pos in self._positions.items():
@@ -163,31 +171,68 @@ class CandidateRunner:
         if not signals:
             return []
 
+        # Extract regime from strategy (if it exposes one)
+        self._current_regime = getattr(self._strategy, 'regime', None)
+
         results = []
         for signal in signals:
             if not isinstance(signal, Signal):
                 continue
 
+            # Build signal record for persistence
+            signal_record = {
+                "symbol": signal.symbol,
+                "action": signal.action.value,
+                "size_pct": signal.size_pct,
+                "confidence": signal.confidence,
+                "intent": signal.intent.value if signal.intent else None,
+                "reasoning": signal.reasoning,
+                "strategy_regime": self._current_regime,
+                "acted_on": 0,
+                "rejected_reason": None,
+                "tag": signal.tag,
+            }
+
             # Validate: no SHORT
             if signal.action not in (Action.BUY, Action.SELL, Action.CLOSE, Action.MODIFY):
+                signal_record["rejected_reason"] = "invalid_action"
+                self._pending_signals.append(signal_record)
                 continue
 
             # Valid symbol check
             if signal.symbol not in markets:
+                signal_record["rejected_reason"] = "invalid_symbol"
+                self._pending_signals.append(signal_record)
                 continue
 
             price = prices.get(signal.symbol, 0)
             if price <= 0:
+                signal_record["rejected_reason"] = "invalid_price"
+                self._pending_signals.append(signal_record)
                 continue
 
             result = self._execute_signal(signal, price)
             if result:
+                signal_record["acted_on"] = 1
                 if isinstance(result, list):
                     results.extend(result)
+                    if result:
+                        signal_record["tag"] = result[0].get("tag")
                 else:
                     results.append(result)
+                    signal_record["tag"] = result.get("tag")
+            else:
+                signal_record["rejected_reason"] = "execution_failed"
+
+            self._pending_signals.append(signal_record)
 
         return results
+
+    def get_new_signals(self) -> list[dict]:
+        """Return signals accumulated since last persist, then clear."""
+        signals = list(self._pending_signals)
+        self._pending_signals.clear()
+        return signals
 
     def check_sl_tp(self, prices: dict[str, float]) -> list[dict]:
         """Check stop-loss and take-profit on candidate positions.
@@ -210,6 +255,12 @@ class CandidateRunner:
             # Update current price
             pos["current_price"] = current_price
             pos["unrealized_pnl"] = (current_price - pos["avg_entry"]) * pos["qty"]
+
+            # MAE tracking: worst drawdown from entry
+            if current_price < pos["avg_entry"]:
+                dd = (pos["avg_entry"] - current_price) / pos["avg_entry"]
+                if dd > pos.get("max_adverse_excursion", 0.0):
+                    pos["max_adverse_excursion"] = dd
 
             triggered_reason = None
             if pos.get("stop_loss") and current_price <= pos["stop_loss"]:
@@ -293,6 +344,7 @@ class CandidateRunner:
                 "intent": signal.intent.value,
                 "strategy_version": self.version,
                 "opened_at": datetime.now(timezone.utc).isoformat(),
+                "max_adverse_excursion": 0.0,
             }
 
         result = {
@@ -394,9 +446,11 @@ class CandidateRunner:
             "fee": exit_fee,
             "intent": pos.get("intent", "DAY"),
             "strategy_version": self.version,
+            "strategy_regime": getattr(self, '_current_regime', None),
             "close_reason": close_reason,
             "opened_at": pos.get("opened_at"),
             "closed_at": datetime.now(timezone.utc).isoformat(),
+            "max_adverse_excursion": pos.get("max_adverse_excursion", 0.0),
         }
         self._trades.append(trade)
         self._all_trades.append(trade)

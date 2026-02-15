@@ -65,6 +65,7 @@ class NotificationConfig:
     candidate_promoted: bool = True
     candidate_trade_executed: bool = True
     candidate_stop_triggered: bool = True
+    reflection_completed: bool = True
 
 
 @dataclass
@@ -91,6 +92,7 @@ class OrchestratorConfig:
     max_revisions: int = 12             # inner loop: code quality iterations
     max_strategy_iterations: int = 9    # outer loop: Opus strategy direction
     max_candidates: int = 3             # max simultaneous candidate strategy slots
+    reflection_interval_days: int = 7   # days between reflection cycles
 
 
 @dataclass
@@ -194,6 +196,7 @@ def load_config() -> Config:
         config.orchestrator.max_revisions = orch.get("max_revisions", config.orchestrator.max_revisions)
         config.orchestrator.max_strategy_iterations = orch.get("max_strategy_iterations", config.orchestrator.max_strategy_iterations)
         config.orchestrator.max_candidates = orch.get("max_candidates", config.orchestrator.max_candidates)
+        config.orchestrator.reflection_interval_days = orch.get("reflection_interval_days", config.orchestrator.reflection_interval_days)
 
         tg = settings.get("telegram", {})
         config.telegram.enabled = tg.get("enabled", config.telegram.enabled)

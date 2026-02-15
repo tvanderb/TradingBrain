@@ -36,6 +36,8 @@ max_revisions = 12
 max_strategy_iterations = 9
 # Max simultaneous candidate strategies running in paper simulation
 max_candidates = 3
+# Days between reflection cycles (strategy doc rewrite + prediction grading)
+reflection_interval_days = 7
 
 [telegram]
 enabled = true

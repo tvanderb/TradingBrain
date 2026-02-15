@@ -398,6 +398,62 @@ async def candidates_handler(request: web.Request) -> web.Response:
     return web.json_response(_envelope(slots, config.mode))
 
 
+async def predictions_handler(request: web.Request) -> web.Response:
+    ctx = request.app[ctx_key]
+    config = ctx["config"]
+    db = ctx["db"]
+
+    limit = max(1, min(_safe_int(request.query.get("limit", "50"), 50), 500))
+    graded_param = request.query.get("graded")
+
+    try:
+        if graded_param == "true":
+            rows = await db.fetchall(
+                "SELECT * FROM predictions WHERE graded_at IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        elif graded_param == "false":
+            rows = await db.fetchall(
+                "SELECT * FROM predictions WHERE graded_at IS NULL ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        else:
+            rows = await db.fetchall(
+                "SELECT * FROM predictions ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+    except Exception as e:
+        log.error("api.predictions_error", error=str(e))
+        return web.json_response(
+            _error_envelope("internal_error", "Failed to fetch predictions", config.mode),
+            status=500,
+        )
+    return web.json_response(_envelope([dict(r) for r in rows], config.mode))
+
+
+async def strategy_doc_versions_handler(request: web.Request) -> web.Response:
+    ctx = request.app[ctx_key]
+    config = ctx["config"]
+    db = ctx["db"]
+
+    limit = max(1, min(_safe_int(request.query.get("limit", "20"), 20), 100))
+
+    try:
+        rows = await db.fetchall(
+            """SELECT id, version, reflection_cycle_id, created_at, LENGTH(content) as content_length
+               FROM strategy_doc_versions
+               ORDER BY version DESC LIMIT ?""",
+            (limit,),
+        )
+    except Exception as e:
+        log.error("api.strategy_doc_versions_error", error=str(e))
+        return web.json_response(
+            _error_envelope("internal_error", "Failed to fetch strategy doc versions", config.mode),
+            status=500,
+        )
+    return web.json_response(_envelope([dict(r) for r in rows], config.mode))
+
+
 def setup_routes(app: web.Application) -> None:
     """Register all REST API routes."""
     app.router.add_get("/v1/system", system_handler)
@@ -412,3 +468,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/v1/benchmarks", benchmarks_handler)
     app.router.add_get("/v1/activity", activity_handler)
     app.router.add_get("/v1/candidates", candidates_handler)
+    app.router.add_get("/v1/predictions", predictions_handler)
+    app.router.add_get("/v1/strategy-doc/versions", strategy_doc_versions_handler)

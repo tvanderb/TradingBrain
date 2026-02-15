@@ -104,6 +104,7 @@ class CandidateManager:
                         "intent": pos.get("intent", "DAY"),
                         "strategy_version": version,
                         "opened_at": pos.get("opened_at", ""),
+                        "max_adverse_excursion": pos.get("max_adverse_excursion", 0.0),
                     }
 
                 # Restore completed trades for accurate status
@@ -314,14 +315,14 @@ class CandidateManager:
                         """INSERT INTO candidate_positions
                            (candidate_slot, symbol, tag, side, qty, avg_entry, current_price,
                             unrealized_pnl, entry_fee, stop_loss, take_profit, intent,
-                            strategy_version, opened_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'utc'))""",
+                            strategy_version, opened_at, updated_at, max_adverse_excursion)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'utc'), ?)""",
                         (slot, pos["symbol"], tag, pos.get("side", "long"), pos["qty"],
                          pos["avg_entry"], pos.get("current_price", 0),
                          pos.get("unrealized_pnl", 0), pos.get("entry_fee", 0),
                          pos.get("stop_loss"), pos.get("take_profit"),
                          pos.get("intent", "DAY"), runner.version,
-                         pos.get("opened_at")),
+                         pos.get("opened_at"), pos.get("max_adverse_excursion", 0.0)),
                     )
 
                 # Insert new trades
@@ -331,15 +332,43 @@ class CandidateManager:
                         """INSERT INTO candidate_trades
                            (candidate_slot, symbol, side, qty, entry_price, exit_price,
                             pnl, pnl_pct, fees, intent, strategy_version, tag,
-                            close_reason, opened_at, closed_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            close_reason, opened_at, closed_at, max_adverse_excursion)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (slot, trade["symbol"], trade.get("side", "long"), trade["qty"],
                          trade.get("entry_price", 0), trade.get("exit_price"),
                          trade.get("pnl"), trade.get("pnl_pct"), trade.get("fees", 0),
                          trade.get("intent", "DAY"), runner.version, trade.get("tag"),
                          trade.get("close_reason"), trade.get("opened_at"),
-                         trade.get("closed_at")),
+                         trade.get("closed_at"), trade.get("max_adverse_excursion")),
                     )
+
+                # Persist new signals
+                new_signals = runner.get_new_signals()
+                for sig in new_signals:
+                    await self._db.execute(
+                        """INSERT INTO candidate_signals
+                           (candidate_slot, symbol, action, size_pct, confidence, intent,
+                            reasoning, strategy_regime, acted_on, rejected_reason, tag)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (slot, sig["symbol"], sig["action"], sig["size_pct"],
+                         sig.get("confidence"), sig.get("intent"), sig.get("reasoning"),
+                         sig.get("strategy_regime"), sig.get("acted_on", 0),
+                         sig.get("rejected_reason"), sig.get("tag")),
+                    )
+
+                # Daily performance snapshot
+                status = runner.get_status()
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                await self._db.execute(
+                    """INSERT OR REPLACE INTO candidate_daily_performance
+                       (candidate_slot, date, portfolio_value, cash, total_trades, wins,
+                        losses, gross_pnl, net_pnl, fees_total, win_rate, strategy_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (slot, today, status["total_value"], status["cash"],
+                     status["trade_count"], status["wins"], status["losses"],
+                     status.get("pnl", 0), status.get("pnl", 0), 0,
+                     status["win_rate"], runner.version),
+                )
 
                 await self._db.commit()
             except Exception as e:

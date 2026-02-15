@@ -325,6 +325,68 @@ CREATE TABLE IF NOT EXISTS candidate_trades (
     closed_at TEXT
 );
 
+-- Orchestrator predictions (falsifiable claims)
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    falsification TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    evaluation_timeframe TEXT,
+    category TEXT,
+    graded_at TEXT,
+    grade TEXT,
+    grade_evidence TEXT,
+    grade_learning TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'utc'))
+);
+
+-- Strategy document version archive (permanent)
+CREATE TABLE IF NOT EXISTS strategy_doc_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    reflection_cycle_id TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'utc'))
+);
+
+-- Candidate signals (parity with fund signals table)
+CREATE TABLE IF NOT EXISTS candidate_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    action TEXT NOT NULL,
+    size_pct REAL NOT NULL,
+    confidence REAL,
+    intent TEXT,
+    reasoning TEXT,
+    strategy_regime TEXT,
+    acted_on INTEGER DEFAULT 0,
+    rejected_reason TEXT,
+    tag TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'utc'))
+);
+
+-- Candidate daily performance snapshots
+CREATE TABLE IF NOT EXISTS candidate_daily_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_slot INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    portfolio_value REAL,
+    cash REAL,
+    total_trades INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    gross_pnl REAL DEFAULT 0,
+    net_pnl REAL DEFAULT 0,
+    fees_total REAL DEFAULT 0,
+    max_drawdown_pct REAL DEFAULT 0,
+    win_rate REAL DEFAULT 0,
+    strategy_version TEXT,
+    UNIQUE(candidate_slot, date)
+);
+
 -- Indexes for common queries
 -- Note: idx_positions_tag and idx_positions_symbol created after special migrations
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
@@ -346,6 +408,11 @@ CREATE INDEX IF NOT EXISTS idx_activity_cat ON activity_log(category, timestamp)
 CREATE INDEX IF NOT EXISTS idx_candidates_slot ON candidates(slot);
 CREATE INDEX IF NOT EXISTS idx_cand_pos_slot ON candidate_positions(candidate_slot);
 CREATE INDEX IF NOT EXISTS idx_cand_trades_slot ON candidate_trades(candidate_slot, closed_at);
+CREATE INDEX IF NOT EXISTS idx_predictions_cycle ON predictions(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_predictions_graded ON predictions(graded_at);
+CREATE INDEX IF NOT EXISTS idx_sdv_version ON strategy_doc_versions(version);
+CREATE INDEX IF NOT EXISTS idx_cand_signals_slot ON candidate_signals(candidate_slot, created_at);
+CREATE INDEX IF NOT EXISTS idx_cand_daily_perf ON candidate_daily_performance(candidate_slot, date);
 """
 
 # Migrations for existing databases (columns added after initial schema)
@@ -367,6 +434,21 @@ MIGRATIONS = [
     ("trades", "close_reason", "ALTER TABLE trades ADD COLUMN close_reason TEXT"),
     # Store strategy source code for DB-based fallback recovery
     ("strategy_versions", "code", "ALTER TABLE strategy_versions ADD COLUMN code TEXT"),
+    # Session W: Institutional Learning System
+    ("orchestrator_observations", "strategy_version",
+     "ALTER TABLE orchestrator_observations ADD COLUMN strategy_version TEXT"),
+    ("orchestrator_observations", "doc_flag",
+     "ALTER TABLE orchestrator_observations ADD COLUMN doc_flag INTEGER DEFAULT 0"),
+    ("orchestrator_observations", "flag_reason",
+     "ALTER TABLE orchestrator_observations ADD COLUMN flag_reason TEXT"),
+    ("positions", "max_adverse_excursion",
+     "ALTER TABLE positions ADD COLUMN max_adverse_excursion REAL DEFAULT 0"),
+    ("candidate_positions", "max_adverse_excursion",
+     "ALTER TABLE candidate_positions ADD COLUMN max_adverse_excursion REAL DEFAULT 0"),
+    ("trades", "max_adverse_excursion",
+     "ALTER TABLE trades ADD COLUMN max_adverse_excursion REAL"),
+    ("candidate_trades", "max_adverse_excursion",
+     "ALTER TABLE candidate_trades ADD COLUMN max_adverse_excursion REAL"),
 ]
 
 

@@ -300,3 +300,31 @@
 - **What**: `candidates` table has `UNIQUE(slot)` constraint. `INSERT OR REPLACE` overwrites slot rows.
 - **Why**: Only one candidate per slot at a time. Historical candidate metadata (version, description) is overwritten, but the important historical data (trades, positions in `candidate_trades`/`candidate_positions`) is preserved in separate tables linked by `candidate_slot`.
 - **Trade-off accepted**: We lose the `candidates` row history when a slot is reused. This is acceptable because the trade/position data is what matters for analysis.
+
+### Decision: Institutional Learning System — Predictions + Reflection (Session W)
+- **What**: The orchestrator makes falsifiable predictions during nightly decisions and periodically reflects on them, grading predictions and rewriting the strategy document.
+- **Why**: Observation-and-summarize is journaling, not learning. True learning requires committing to falsifiable claims and then rigorously grading them against evidence. Without this, the orchestrator's judgment doesn't compound — it just journals.
+- **Inspiration**: Ray Dalio's "Pain + Reflection = Progress" — principles created from experience, refined over time.
+- **Design**: Predictions stored with claim/evidence/falsification/confidence/timeframe. Reflection cycle gathers 14 sections of evidence, Opus grades predictions by ID (avoiding fragile text matching), rewrites strategy doc, stores new predictions.
+- **Key trade-off**: Full strategy doc rewrite each reflection (not append). Previous versions permanently archived. This ensures the document stays coherent rather than accumulating layers.
+- **See**: `docs/dev_notes/strategy_document_design.md` for full design spec.
+
+### Decision: Configurable Reflection Period (Session W)
+- **What**: `orchestrator.reflection_interval_days` config option (default 7 days). Controls reflection trigger, observation window, and pruning.
+- **Why**: Originally hardcoded at 14 days (bi-weekly). User wanted weekly reflections for faster learning during early operation. Made configurable to allow tuning based on experience.
+- **Design**: Single config value propagates to all interval-dependent logic: `_should_reflect()` threshold, `_gather_reflection_context()` SQL windows (10 queries), `_gather_context()` observation window, `_store_observation()` pruning window, nightly prompt text.
+
+### Decision: Manual Reflection Trigger — /reflect_tonight (Session W)
+- **What**: Telegram command `/reflect_tonight` sets a `system_meta` flag. Orchestrator checks this flag before checking the time-based trigger. Flag is cleared after reflection runs.
+- **Why**: The user (as fund investor) should be able to request an ad-hoc reflection — e.g., after a market event, a manual deposit, or just to test the system. The flag approach is simple and idempotent.
+- **Alternative considered**: Immediate reflection on command. Rejected because reflection should happen within the orchestration window, not mid-trading-day.
+
+### Decision: MAE Tracking on All Positions (Session W)
+- **What**: Track max adverse excursion (worst drawdown from entry) on every position, both fund and candidate. Carried to trades table on close.
+- **Why**: Tells the orchestrator how much pain a position experienced before reaching its outcome. A trade that made 5% but was down 15% at one point reveals different strategy characteristics than one that went straight up. Critical for reflection-quality feedback.
+- **Design**: Updated on every price refresh (fund) and every SL/TP check (candidate). Persisted to DB. Column added to positions, candidate_positions, trades, candidate_trades.
+
+### Decision: Candidate Data Parity (Session W)
+- **What**: Added `candidate_signals` and `candidate_daily_performance` tables, mirroring fund-level signal and daily snapshot tracking.
+- **Why**: Without signal and daily performance data, candidate strategies can only be evaluated on trade outcomes. The orchestrator needs the full picture — what signals were generated, which were acted on, how the portfolio evolved daily — to make informed promotion decisions.
+- **Design**: Signals captured in `CandidateRunner.run_scan()`, daily snapshots in `CandidateManager.persist_state()`. Both tables pruned 30 days after candidate resolved.

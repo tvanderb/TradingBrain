@@ -120,6 +120,7 @@ class BotCommands:
             "/thoughts - Browse orchestrator AI reasoning\n"
             "/thought <cycle> <step> - Full AI response\n"
             "/orchestrate - Trigger orchestration cycle\n"
+            "/reflect_tonight - Add reflection to next cycle\n"
             "/pause - Pause trading\n"
             "/resume - Resume trading\n"
             "/kill - Emergency stop"
@@ -665,6 +666,25 @@ class BotCommands:
         self._scan_state["orchestrate_requested"] = True
         await update.message.reply_text(
             "Orchestration cycle triggered. You'll be notified when it completes."
+        )
+
+    async def cmd_reflect_tonight(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Flag the next orchestration cycle to include a reflection."""
+        if not self._authorized(update):
+            return
+        # Check if already flagged
+        row = await self._db.fetchone(
+            "SELECT value FROM system_meta WHERE key = 'reflect_tonight'"
+        )
+        if row and row["value"] == "1":
+            await update.message.reply_text("Reflection already scheduled for tonight.")
+            return
+        await self._db.execute(
+            "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('reflect_tonight', '1')"
+        )
+        await self._db.commit()
+        await update.message.reply_text(
+            "Reflection will run at the start of tonight's orchestration cycle."
         )
 
     async def cmd_candidates(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

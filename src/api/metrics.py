@@ -82,6 +82,16 @@ cand_pnl = Gauge("tb_candidate_pnl_usd", "Candidate total P&L", ["slot"], regist
 cand_trades = Gauge("tb_candidate_trade_count", "Candidate trade count", ["slot"], registry=registry)
 cand_win_rate = Gauge("tb_candidate_win_rate", "Candidate win rate", ["slot"], registry=registry)
 cand_active = Gauge("tb_candidate_active", "Candidate slot active (1/0)", ["slot"], registry=registry)
+cand_position_value = Gauge("tb_candidate_position_value_usd", "Candidate position value", ["slot", "symbol", "tag"], registry=registry)
+cand_position_pnl = Gauge("tb_candidate_position_pnl_usd", "Candidate position P&L", ["slot", "symbol", "tag"], registry=registry)
+
+# --- Prediction & reflection gauges ---
+tb_predictions_total = Gauge("tb_predictions_total", "Total predictions stored", registry=registry)
+tb_predictions_ungraded = Gauge("tb_predictions_ungraded", "Pending ungraded predictions", registry=registry)
+tb_predictions_graded = Gauge("tb_predictions_graded", "Graded predictions", registry=registry)
+tb_prediction_accuracy = Gauge("tb_prediction_accuracy", "Confirmed rate (0.0-1.0)", registry=registry)
+tb_strategy_doc_version = Gauge("tb_strategy_doc_version", "Current strategy doc version", registry=registry)
+tb_days_since_reflection = Gauge("tb_days_since_reflection", "Days since last reflection", registry=registry)
 
 # --- Truth benchmark cache ---
 _truth_cache: dict = {"data": None, "expires_at": 0.0}
@@ -217,6 +227,8 @@ async def metrics_handler(request: web.Request) -> web.Response:
         cand_trades._metrics.clear()
         cand_win_rate._metrics.clear()
         cand_active._metrics.clear()
+        cand_position_value._metrics.clear()
+        cand_position_pnl._metrics.clear()
         candidate_manager = ctx.get("candidate_manager")
         if candidate_manager:
             max_slots = config.orchestrator.max_candidates
@@ -230,12 +242,47 @@ async def metrics_handler(request: web.Request) -> web.Response:
                     cand_pnl.labels(slot=slot_str).set(status.get("pnl", 0))
                     cand_trades.labels(slot=slot_str).set(status.get("trade_count", 0))
                     cand_win_rate.labels(slot=slot_str).set(status.get("win_rate", 0))
+                    # Per-position gauges
+                    for tag, pos in runner.get_positions().items():
+                        symbol = pos["symbol"]
+                        entry = pos["avg_entry"]
+                        current = pos.get("current_price", entry)
+                        qty = pos["qty"]
+                        cand_position_value.labels(slot=slot_str, symbol=symbol, tag=tag).set(current * qty)
+                        cand_position_pnl.labels(slot=slot_str, symbol=symbol, tag=tag).set((current - entry) * qty)
                 else:
                     cand_active.labels(slot=slot_str).set(0)
                     cand_value.labels(slot=slot_str).set(0)
                     cand_pnl.labels(slot=slot_str).set(0)
                     cand_trades.labels(slot=slot_str).set(0)
                     cand_win_rate.labels(slot=slot_str).set(0)
+
+        # --- Predictions & reflection ---
+        try:
+            pred_total = await db.fetchone("SELECT COUNT(*) as c FROM predictions")
+            pred_ungraded = await db.fetchone("SELECT COUNT(*) as c FROM predictions WHERE graded_at IS NULL")
+            pred_graded = await db.fetchone("SELECT COUNT(*) as c FROM predictions WHERE graded_at IS NOT NULL")
+            pred_confirmed = await db.fetchone("SELECT COUNT(*) as c FROM predictions WHERE grade = 'confirmed'")
+
+            tb_predictions_total.set(pred_total["c"] if pred_total else 0)
+            tb_predictions_ungraded.set(pred_ungraded["c"] if pred_ungraded else 0)
+            graded_n = pred_graded["c"] if pred_graded else 0
+            tb_predictions_graded.set(graded_n)
+            confirmed_n = pred_confirmed["c"] if pred_confirmed else 0
+            tb_prediction_accuracy.set(confirmed_n / graded_n if graded_n > 0 else 0)
+
+            doc_ver = await db.fetchone("SELECT COALESCE(MAX(version), 0) as v FROM strategy_doc_versions")
+            tb_strategy_doc_version.set(doc_ver["v"] if doc_ver else 0)
+
+            last_ref = await db.fetchone("SELECT value FROM system_meta WHERE key = 'last_reflection_date'")
+            if last_ref:
+                from datetime import date
+                days = (date.today() - date.fromisoformat(last_ref["value"])).days
+                tb_days_since_reflection.set(days)
+            else:
+                tb_days_since_reflection.set(-1)
+        except Exception:
+            pass
 
     except Exception as e:
         log.error("metrics.collect_error", error=str(e), error_type=type(e).__name__)

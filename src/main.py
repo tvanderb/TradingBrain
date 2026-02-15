@@ -674,6 +674,9 @@ class TradingBrain:
                 if executor_future is not None and executor_future.done():
                     self._analyzing = False
 
+            # Extract regime from strategy (if it exposes one)
+            strategy_regime = getattr(self._strategy, 'regime', None) if self._strategy else None
+
             # Process signals
             executed_symbols = set()
             halt_notified = False
@@ -698,7 +701,7 @@ class TradingBrain:
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None, signal.tag, check.reason),
+                         signal.intent.value, signal.reasoning, strategy_regime, signal.tag, check.reason),
                     )
                     continue
 
@@ -712,7 +715,7 @@ class TradingBrain:
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'invalid_price')",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None, signal.tag),
+                         signal.intent.value, signal.reasoning, strategy_regime, signal.tag),
                     )
                     continue
                 sym_fees = self._pair_fees.get(signal.symbol)
@@ -721,7 +724,7 @@ class TradingBrain:
                         signal, price,
                         sym_fees[0] if sym_fees else self._config.kraken.maker_fee_pct,
                         sym_fees[1] if sym_fees else self._config.kraken.taker_fee_pct,
-                        strategy_regime=None,
+                        strategy_regime=strategy_regime,
                         strategy_version=self._scan_state.get("strategy_version"),
                     )
 
@@ -738,7 +741,7 @@ class TradingBrain:
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'execution_failed')",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None, signal.tag),
+                         signal.intent.value, signal.reasoning, strategy_regime, signal.tag),
                     )
 
                 if results:
@@ -752,7 +755,7 @@ class TradingBrain:
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, acted_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
-                         signal.intent.value, signal.reasoning, None, result_tag),
+                         signal.intent.value, signal.reasoning, strategy_regime, result_tag),
                     )
 
                     for result in results:

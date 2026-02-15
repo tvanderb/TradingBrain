@@ -247,6 +247,27 @@ class DataStore:
             (activity_cutoff,),
         )
 
+        # Predictions: 30 days after grading
+        await self._db.execute(
+            "DELETE FROM predictions WHERE graded_at IS NOT NULL AND graded_at < datetime('now', '-30 days')"
+        )
+
+        # Candidate signals: 30 days after candidate resolved
+        await self._db.execute(
+            """DELETE FROM candidate_signals WHERE candidate_slot IN (
+                SELECT slot FROM candidates WHERE status != 'running'
+                  AND resolved_at < datetime('now', '-30 days')
+            )"""
+        )
+
+        # Candidate daily performance: same lifecycle as candidate signals
+        await self._db.execute(
+            """DELETE FROM candidate_daily_performance WHERE candidate_slot IN (
+                SELECT slot FROM candidates WHERE status != 'running'
+                  AND resolved_at < datetime('now', '-30 days')
+            )"""
+        )
+
         await self._db.commit()
 
     async def run_nightly_maintenance(self) -> None:

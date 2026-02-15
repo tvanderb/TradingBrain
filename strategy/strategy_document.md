@@ -1,34 +1,35 @@
-# Trading Strategy Document
+# Strategy Document — Institutional Memory
 
-> This document is the AI orchestrator's institutional memory.
-> It contains hard-won lessons validated through actual trading results.
-> Updated only when meaningful discoveries are made — not nightly.
-> Keep under ~2,000 words. Distill quarterly.
+> This document is rewritten every 14 days through the reflection process.
+> It contains earned knowledge validated through actual trading results.
+> Target: ~2,000 words. Synthesis, not accumulation.
 
-## 1. Current Market Thesis
-*No thesis established yet. To be developed through observation and experience.*
+## 1. Strategy Design Principles
 
-## 2. Core Principles
-*To be discovered through trading experience. This section starts empty.*
+*No principles established yet. This section is populated through experience —
+each principle will carry a confidence level and supporting evidence from actual trades.*
 
-## 3. Active Strategy Summary
-**Version**: v001 — EMA Crossover + RSI + Volume
-**Approach**: Day trading on 5-minute candles
-**Entry**: EMA 9 crosses above EMA 21, RSI 30-70, volume > 1.2x average
-**Exit**: EMA bearish crossover or stop-loss (2%) / take-profit (4%)
-**Symbols**: BTC/USD, ETH/USD, SOL/USD
+## 2. Strategy Lineage
 
-**Why this strategy**: Simple, well-understood baseline. Starting point to iterate from.
+*No strategy history yet. This section tracks what strategies have been tried,
+what worked, what didn't, and the design lessons learned.*
 
-## 4. Performance History
-*No data yet.*
+## 3. Known Failure Modes
 
-| Version | Period | Trades | Win Rate | Net P&L | Expectancy | Notes |
-|---------|--------|--------|----------|---------|------------|-------|
-| v001    | -      | -      | -        | -       | -          | -     |
+*No failure modes documented yet. This section records things that broke
+at the code or design level, with root causes and context.*
 
-## 5. Lessons Learned
-*To be filled as the system gains experience. Every entry here should be backed by data.*
+## 4. Market Regime Understanding
 
-## 6. Market Condition Playbook
-*To be built from experience, not theory.*
+*No regime understanding yet. This section captures how different market
+conditions affect the strategies — non-directional, no thesis.*
+
+## 5. Prediction Scorecard
+
+*No predictions graded yet. This section shows the last period's predictions
+with their grades, providing an accountability record.*
+
+## 6. Active Predictions
+
+*No active predictions. Predictions from nightly cycles will appear here,
+carrying forward until the next reflection.*

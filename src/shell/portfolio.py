@@ -214,7 +214,13 @@ class PortfolioTracker:
         for tag, pos in self._positions.items():
             symbol = pos["symbol"]
             if symbol in prices:
-                pos["current_price"] = prices[symbol]
+                price = prices[symbol]
+                pos["current_price"] = price
+                # MAE tracking: worst drawdown from entry
+                if price < pos["avg_entry"]:
+                    dd = (pos["avg_entry"] - price) / pos["avg_entry"]
+                    if dd > pos.get("max_adverse_excursion", 0.0):
+                        pos["max_adverse_excursion"] = dd
 
     async def get_portfolio(self, prices: dict[str, float]) -> Portfolio:
         """Build a Portfolio snapshot for the Strategy Module."""
@@ -578,18 +584,19 @@ class PortfolioTracker:
                 "strategy_version": strategy_version,
                 "opened_at": now,
                 "updated_at": now,
+                "max_adverse_excursion": 0.0,
             }
             self._positions[tag] = pos
 
             # Insert into DB
             await self._db.execute(
                 """INSERT INTO positions
-                   (symbol, tag, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (symbol, tag, side, qty, avg_entry, current_price, entry_fee, stop_loss, take_profit, intent, strategy_version, opened_at, updated_at, max_adverse_excursion)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (pos["symbol"], tag, pos["side"], pos["qty"], pos["avg_entry"],
                  pos["current_price"], pos["entry_fee"], pos["stop_loss"],
                  pos["take_profit"], pos["intent"], pos["strategy_version"],
-                 pos["opened_at"], pos["updated_at"]),
+                 pos["opened_at"], pos["updated_at"], 0.0),
             )
 
         await self._db.commit()
@@ -742,10 +749,10 @@ class PortfolioTracker:
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO trades
-               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason, max_adverse_excursion)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, tag, pos.get("side", "long"), qty, entry, fill_price, pnl, pnl_pct,
-             total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now, close_reason),
+             total_fee, pos.get("intent", "DAY"), strategy_version, strategy_regime, pos.get("opened_at", now), now, close_reason, pos.get("max_adverse_excursion", 0.0)),
         )
 
         # Update or remove position
@@ -975,11 +982,11 @@ class PortfolioTracker:
         await self._db.execute(
             """INSERT INTO trades
                (symbol, tag, side, qty, entry_price, exit_price, pnl, pnl_pct, fees,
-                intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                intent, strategy_version, strategy_regime, opened_at, closed_at, close_reason, max_adverse_excursion)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (symbol, tag, pos.get("side", "long"), filled_volume, entry,
              fill_price, pnl, pnl_pct, total_fee, pos.get("intent", "DAY"),
-             pos.get("strategy_version"), None, pos.get("opened_at", now), now, close_reason),
+             pos.get("strategy_version"), None, pos.get("opened_at", now), now, close_reason, pos.get("max_adverse_excursion", 0.0)),
         )
 
         # Update cash
@@ -1031,6 +1038,12 @@ class PortfolioTracker:
             price = prices[symbol]
             pos["current_price"] = price
 
+            # MAE tracking: worst drawdown from entry
+            if price < pos["avg_entry"]:
+                dd = (pos["avg_entry"] - price) / pos["avg_entry"]
+                if dd > pos.get("max_adverse_excursion", 0.0):
+                    pos["max_adverse_excursion"] = dd
+
             # Check stop-loss (takes priority over take-profit)
             if pos.get("stop_loss") and price <= pos["stop_loss"]:
                 triggered.append({"symbol": symbol, "tag": tag, "reason": "stop_loss", "price": price})
@@ -1055,8 +1068,8 @@ class PortfolioTracker:
         # Flush current prices to DB before snapshot query
         for tag, pos in self._positions.items():
             await self._db.execute(
-                "UPDATE positions SET current_price = ?, updated_at = ? WHERE tag = ?",
-                (pos.get("current_price", pos["avg_entry"]), datetime.now(timezone.utc).isoformat(), tag),
+                "UPDATE positions SET current_price = ?, max_adverse_excursion = ?, updated_at = ? WHERE tag = ?",
+                (pos.get("current_price", pos["avg_entry"]), pos.get("max_adverse_excursion", 0.0), datetime.now(timezone.utc).isoformat(), tag),
             )
 
         tv = await self.total_value()

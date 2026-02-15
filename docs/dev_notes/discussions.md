@@ -1381,3 +1381,75 @@ After the first live orchestration cycle (Session R), two structural issues:
 - Backtest crash feeds into outer loop (Opus can redirect around the crash)
 - `original_changes` preserved so Opus's revision always references the original goal
 - Bootstrap thresholds aligned with retention windows and backtester request sizes
+
+---
+
+## Session W: Strategy Document & Institutional Learning System
+
+> Full design document: `docs/dev_notes/strategy_document_design.md`
+
+### Problem Statement
+The strategy document (Layer 3 — Institutional Memory) is read every nightly cycle but never
+written to. Daily observations go to the DB (rolling window) but nothing graduates to durable
+institutional knowledge. The orchestrator's judgment doesn't compound over time.
+
+### Design Direction (Agreed)
+- **Two-part model**: Predictions (nightly, integrated into decisions) + Reflection (bi-weekly,
+  grades predictions and rewrites strategy doc)
+- **Predictions as decision outputs**: Optional on all nights, encouraged on action nights
+  through prompt phrasing. Structured schema (claim, evidence, falsification, confidence,
+  timeframe) ensures consistent grading without constraining content.
+- **14-day lockstep**: Observations pruned at 14 days. Reflection runs every 14 days as the
+  preamble to that night's cycle. Every observation gets exactly one reflection pass.
+- **Full rewrite, not append**: Each reflection produces a complete fresh strategy document.
+  Principles that hold get strengthened. Refuted ones get removed. No unbounded growth.
+- **Candidate data parity**: Candidates get the same data richness as fund activity (signals,
+  daily snapshots, regime tracking, drawdown tracking) — clearly labeled and pruned on lifecycle.
+- **Strategy doc versioning**: Each version archived in DB before overwriting.
+- **No directives in reflection prompt**: Same Layer 1 + Layer 2 system prompt. Full awareness
+  of data and structure, zero direction on what conclusions to draw.
+
+### Key Decisions
+- Predictions are freeform (orchestrator decides what to predict), consistently gradeable
+  through the falsification field in the prediction schema
+- Reflection is NOT a separate process — it's the opening step of the nightly cycle on day 14
+- Strategy doc sections: Design Principles, Strategy Lineage, Known Failure Modes, Market
+  Regime Understanding (non-directional, no thesis), Prediction Scorecard, Active Predictions
+- Thoughts spool stays at 30 days (observability), observations tighten to 14 days (lockstep)
+- New tables: predictions, strategy_doc_versions, candidate_signals, candidate_daily_performance
+- Modified tables: observations (+strategy_version, +doc_flag, +flag_reason),
+  positions/trades (+max_adverse_excursion), fix strategy_regime=None bug
+
+### Inspiration
+- Ray Dalio's Principles: Pain + Reflection = Progress. Earned knowledge, not pre-loaded wisdom.
+- BlackRock: "The insights don't go down in the elevator — they stay in the model."
+- Tetlock's Superforecasters: Calibration improves through prediction-evaluation feedback loops.
+
+### Post-Design Implementation Additions (Session W continued)
+
+After the core 9-phase implementation, three additional features were added:
+
+**1. Configurable Reflection Period**
+- Default changed from 14 days (bi-weekly) to 7 days (weekly) for faster early learning
+- `orchestrator.reflection_interval_days` config option propagates to all interval-dependent logic
+- Affects: `_should_reflect()`, `_gather_reflection_context()` (10 SQL queries), `_gather_context()`, `_store_observation()` pruning, nightly prompt text
+- User rationale: weekly reflections during early operation, tunable later based on experience
+
+**2. Manual Reflection Trigger — `/reflect_tonight`**
+- Telegram command sets `reflect_tonight=1` in `system_meta`
+- Orchestrator checks this flag BEFORE the time-based trigger in `_should_reflect()`
+- Flag cleared after reflection runs (in `_run_nightly_cycle_locked`)
+- User rationale: fund investor should be able to request ad-hoc reflections after market events or system changes
+
+**3. Grafana Dashboard — Institutional Learning Row**
+- New collapsed row "Institutional Learning" (id 1100) with 7 inline panels:
+  - Total Predictions, Ungraded, Graded (stat panels)
+  - Prediction Accuracy (gauge, 0-1 as %)
+  - Strategy Doc Version (stat)
+  - Days Since Reflection (stat with color thresholds)
+  - Reflection Events (Loki logs panel)
+- New "Candidate Positions" table panel (id 1108) in Strategy Candidates row
+- Dashboard version bumped to 8
+- Datasource UIDs added for portability
+
+**Tests: 222/222 passing** (201 existing + 20 institutional learning + 1 updated reflection interval)
