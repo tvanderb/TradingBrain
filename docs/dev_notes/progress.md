@@ -2847,3 +2847,35 @@ The strategy document (Layer 3 — Institutional Memory) was read every nightly 
 | `tests/test_institutional_learning.py` | Fixed interval test, added manual trigger test |
 
 **Tests: 222/222 passing** (221 + 1 new manual trigger test)
+
+## Session X (2026-02-14) — Library Panel De-conversion
+
+### Context
+After wiping the Grafana volume for a fresh deploy, all 63 library panels were lost — they're stored in Grafana's internal database, not on disk. Dashboard showed "Unable to load library panel" errors for every panel.
+
+### Root Cause
+Session V converted 60 inline panels → library panels via `POST /api/library-elements`, then replaced inline definitions in the JSON with `libraryPanel: {uid, name}` references. This made the dashboard dependent on Grafana's internal state.
+
+### Fix
+Created `monitoring/build_dashboard.py` — a Python script that:
+1. Extracts the pre-Session-V dashboard from git (`a5b8007^`) with all 53 panels inline
+2. Loads the current dashboard (63 library refs + 8 Session W inline panels)
+3. Builds a `panel_id → full_definition` mapping from the old file
+4. Builds 4 panels from scratch (3 orchestrator text panels + 1 candidate log — new in Session V, not in old file)
+5. Walks the current dashboard, replacing every `libraryPanel` reference with the full inline definition
+6. Normalizes datasource UIDs: `PBFA97CFB590B2093` → `prometheus`, `P8E80F9AEF21F6940` → `loki`
+7. Normalizes Loki labels: `container=` → `compose_service=` (from Docker logging config)
+8. Writes version 9 to `trading-brain.json`
+
+### Result
+- 71 total inline panels, 0 library refs
+- Dashboard is fully self-contained — survives volume resets, Grafana reinstalls, VPS migrations
+- Script is rerunnable from repo root: `python3 monitoring/build_dashboard.py`
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `monitoring/build_dashboard.py` | **NEW** — dashboard generator script |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | Regenerated — all panels inline, version 9 |
+
+**Tests: 222/222 passing** (unchanged — Grafana JSON only)

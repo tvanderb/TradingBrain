@@ -169,3 +169,7 @@ while running:
 ## Trade quantity display too few decimals (O4)
 **Problem**: Activity log formatted qty with `:.4f` — BTC trades with small capital (e.g., $5 at $67K = 0.0000743 BTC) displayed as `0.0000`.
 **Fix**: Changed to `:.8f` (satoshi-level precision) in `_format_activity()` in `notifications.py`.
+
+## Grafana library panels lost on volume wipe (Session X)
+**Problem**: Library panels are stored in Grafana's **internal database**, not on disk. Converting inline panels to library panel references (Session V) made the dashboard dependent on Grafana's state. Wiping the volume (fresh deploy) lost all 63 library panels — dashboard showed "Unable to load library panel" for every panel.
+**Fix**: `monitoring/build_dashboard.py` script converts all library panel references back to inline definitions. Dashboard is now fully self-contained. Run `python3 monitoring/build_dashboard.py` to regenerate.
