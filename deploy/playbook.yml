@@ -162,8 +162,7 @@
         recurse: true
       loop:
         - "{{ deploy_dir }}/data"
-        - "{{ deploy_dir }}/strategy/active"
-        - "{{ deploy_dir }}/strategy/archive"
+        - "{{ deploy_dir }}/strategy"
         - "{{ deploy_dir }}/statistics/active"
         - "{{ deploy_dir }}/statistics/archive"
       tags: [sync]

@@ -1010,9 +1010,48 @@ class Orchestrator:
             "signal_drought": drought_info,
         }
 
+    async def _build_time_context(self) -> str:
+        """Build a timestamp header for Opus prompts."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(self._config.timezone)
+        now_utc = datetime.now(timezone.utc)
+        now_local = now_utc.astimezone(tz)
+        tz_abbrev = now_local.strftime("%Z")
+
+        # Last orchestration cycle
+        row = await self._db.fetchone(
+            "SELECT date, cycle_id FROM orchestrator_observations ORDER BY id DESC LIMIT 1"
+        )
+        if row:
+            # cycle_id format: YYYYMMDD_HHMMSS (local time)
+            cid = row["cycle_id"]
+            last_local = datetime.strptime(cid, "%Y%m%d_%H%M%S").replace(tzinfo=tz)
+            last_utc = last_local.astimezone(timezone.utc)
+            delta = now_utc - last_utc
+            hours, remainder = divmod(int(delta.total_seconds()), 3600)
+            minutes = remainder // 60
+            last_line = (
+                f"Last orchestration: {last_local.strftime('%Y-%m-%d %H:%M')} {tz_abbrev}"
+                f" ({last_utc.strftime('%Y-%m-%d %H:%M')} UTC)"
+                f" — {hours}h {minutes}m ago"
+            )
+        else:
+            last_line = "Last orchestration: none (first cycle)"
+
+        return (
+            f"## CURRENT TIME\n"
+            f"Local ({self._config.timezone}): {now_local.strftime('%Y-%m-%d %H:%M')} {tz_abbrev}\n"
+            f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC\n"
+            f"{last_line}"
+        )
+
     async def _analyze(self, context: dict) -> dict:
         """Opus analyzes performance and decides on action."""
-        prompt = f"""Current fund state for nightly review.
+        time_context = await self._build_time_context()
+        prompt = f"""{time_context}
+
+Current fund state for nightly review.
 
 ---
 
@@ -1920,7 +1959,8 @@ The orchestrator wants to change this module because: {changes}"""
         )
 
         # 3. Format the reflection prompt
-        prompt = REFLECTION_USER_TEMPLATE.format(
+        time_context = await self._build_time_context()
+        prompt = time_context + "\n\n" + REFLECTION_USER_TEMPLATE.format(
             reflection_days=self._config.orchestrator.reflection_interval_days,
             strategy_doc=strategy_doc,
             observations=json.dumps(ctx["observations"], indent=2, default=str) if ctx["observations"] else "No observations in this period.",

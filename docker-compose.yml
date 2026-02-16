@@ -10,8 +10,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
-      - ./strategy/active:/app/strategy/active
-      - ./strategy/archive:/app/strategy/archive
+      - ./strategy:/app/strategy
       - ./statistics/active:/app/statistics/active
       - ./statistics/archive:/app/statistics/archive
       - ./keys:/app/keys:ro
