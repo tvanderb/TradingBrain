@@ -2942,3 +2942,73 @@ Created `monitoring/build_dashboard.py` — a Python script that:
 | `tests/test_integration.py` | Updated 3 existing tests + 8 new tests |
 
 **Tests: 230/230 passing** (222 existing + 8 new)
+
+## Session Y-fix (2026-02-16) — Orchestrator Feedback Loop Fix
+
+### Context
+First two live orchestrator cycles failed. Investigation revealed two bugs.
+
+### Bug 1: Stale Decision Context in Feedback Loop (Critical)
+- Code review prompt passed original `decision` dict even after backtest reviewer gave `revision_instructions`
+- Sonnet followed revised instructions, Opus code reviewer compared against stale original → rejected valid code
+- **Fix**: Code review now receives `inner_changes` (current instructions). Backtest review receives `current_changes` kwarg.
+
+### Bug 2: orchestrator_cycle_completed Default (Config)
+- `orchestrator_cycle_completed` defaulted to `False` in NotificationConfig (grouped with high-frequency events)
+- Runs once per day — should default True
+- **Fix**: Moved to True defaults group
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `src/orchestrator/orchestrator.py` | Code review uses `inner_changes`, backtest review accepts `current_changes` kwarg |
+| `src/shell/config.py` | `orchestrator_cycle_completed: bool = True` |
+
+## Session Z (2026-02-16) — System Prompt Audit & Backtest Window Clarification
+
+### Context
+Second manual orchestrator cycle failed across all 3 outer iterations. Backtest reviewer hallucinated wrong IO contract names (`reason=` instead of `reasoning=`, `.hourly` instead of `.candles_1h`, `Intent.SCALP` which doesn't exist) in revision_instructions, poisoning subsequent code generation.
+
+### Full Audit
+Cross-referenced every system prompt against actual implementation: `contract.py`, `sandbox.py`, `backtester.py`, `portfolio.py`, `risk.py`, `runner.py`, `manager.py`, `main.py`, `truth.py`.
+
+**Results**: 2 critical, 10 medium, 3 low — all 15 fixed. Details in `docs/dev_notes/session_z_prompt_audit.md`.
+
+### Fixes Applied
+**Critical (C1, C2)** — applied in Y-fix session:
+- BACKTEST_REVIEW_SYSTEM: Added IO contract reference (field names, Signal kwargs, enum values)
+- CODE_REVIEW_SYSTEM: Added Signal constructor params, Action/Intent enum values
+
+**CODE_GEN_SYSTEM (M1, M2, M3, M4, L1, L3)**:
+- M1: Added `.side` ("long"), `.opened_at` (datetime) to OpenPosition description
+- M2: Added `.side`, `.qty`, `.opened_at`, `.closed_at` to ClosedTrade description
+- M3: Added "Optional StrategyBase methods" section: `on_fill()`, `on_position_closed()`, `get_state()`/`load_state()`, `scan_interval_minutes`
+- M4: Added full RiskLimits field list with defaults
+- L1: Added "Execution timeout" section (30-second limit in production)
+- L3: Clarified MODIFY size_pct: "size_pct is ignored for MODIFY"
+
+**CODE_REVIEW_SYSTEM (M5, M6, M7)**:
+- M5: Added ClosedTrade attributes (11 fields)
+- M6: Added RiskLimits attributes with defaults
+- M7: Added optional method signatures with fallback note
+
+**LAYER_2_SYSTEM (M8, M9, M10, L2)**:
+- M8: Fixed scan_results: "price and spread per symbol per scan" (was "raw indicator values")
+- M9: Added `promotion` to close_reason list
+- M10: Clarified candidate execution: "max_positions, max_trade_pct clamping enforced per candidate" + "no halt states"
+- L2: Rewrote backtester section to explicitly state practical window (up to 1 year of 1h data bootstrapped from Kraken, 30 days of 5m for SL/TP precision)
+
+### Backtest Window: 30 Days with Full 5m Precision
+Original design doc proposed expanding to 90 days. Investigation revealed code already fetched 365 days of 1h data. However, 5m data (critical for SL/TP trigger ordering) only covers 30 days — running backtests beyond 30 days means degraded SL/TP precision.
+- **Decision**: Lock backtest to 30 days, aligned with 5m availability. Full precision throughout.
+- `_run_backtest()` limits: 1h `8760→720`, 1d `2555→30`
+- LAYER_2_SYSTEM updated to state 30-day window with full 5m precision
+
+### Strategy Characterization at Archive Time
+- New `strategy_characterization` field in CREATE_CANDIDATE response format
+- Orchestrator writes brief description of approach + target conditions
+- Stored in `strategy_versions.description`, visible in version history context
+- On PROMOTE_CANDIDATE: characterization carried forward from candidate's original version record
+- Future: may expand to multi-step research pipeline when sufficient history exists
+
+### Tests: 230/230 passing

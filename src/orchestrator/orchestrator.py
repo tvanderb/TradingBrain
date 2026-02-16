@@ -111,7 +111,7 @@ You operate within a rigid shell (Kraken exchange client, risk manager, portfoli
 - On promotion, you decide what happens to fund positions: "keep" (new strategy inherits them) or "close_all" (clean slate).
 
 **Candidate execution:**
-Candidates participate in every scan cycle. Same market data, same risk limits for signal sizing. Paper fills with slippage. Candidates never halt — risk halts only affect the fund.
+Candidates participate in every scan cycle. Same market data, same risk limits for signal sizing (max_positions, max_trade_pct clamping enforced per candidate). Paper fills with slippage. Candidates have no halt states — daily loss halts and drawdown halts only affect the fund.
 
 **Decision types:**
 - **NO_CHANGE**: Data keeps accumulating. Active candidates continue running.
@@ -142,13 +142,13 @@ Positions are identified by **tags** (globally unique identifiers). Multiple pos
 - **BUY with existing tag**: Averages into that position. BUY without tag creates a new position.
 
 ### Close-Reason Tracking
-Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_loss` (SL triggered), `take_profit` (TP triggered), `emergency` (emergency stop), or `reconciliation` (filled while system was down). The close_reason_breakdown in ground truth shows the distribution. High emergency or reconciliation counts indicate operational instability.
+Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_loss` (SL triggered), `take_profit` (TP triggered), `emergency` (emergency stop), `reconciliation` (filled while system was down), or `promotion` (positions closed when a candidate was promoted with "close_all"). The close_reason_breakdown in ground truth shows the distribution. High emergency or reconciliation counts indicate operational instability.
 
 ### Paper vs Live Execution
 - **Paper mode**: Instant simulated fills with configurable slippage (default 0.05%). SL/TP checked client-side every 30 seconds. No exchange API calls.
 - **Live mode**: Orders placed on Kraken with 30-second fill timeout. Partial fills are supported. Exchange-native SL/TP orders placed on Kraken after each BUY fill (3 retry attempts each). Startup reconciliation checks for orders that filled while the system was down.
 ### Backtester Capabilities and Limitations
-The backtester runs against all available historical data: 5m (30 days), 1h (up to 1 year), 1d (up to 7 years). It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5m resolution where available for intra-hour precision.
+The backtester covers the most recent 30 days of trading history using all three timeframes: 5-minute, 1-hour, and daily candles. It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5-minute precision throughout the entire window — every hour has 5m candles available for accurate intra-hour trigger ordering.
 
 What the backtester does:
 - Simulates MARKET orders with configurable slippage and taker fees.
@@ -200,7 +200,7 @@ All timeframes are bootstrapped from Kraken on cold start — the strategy has r
 - 5-minute candles: last 30 days per symbol
 - 1-hour candles: last 1 year per symbol
 - Daily candles: up to 7 years per symbol
-- Scan results: raw indicator values stored every scan
+- Scan results: price and spread per symbol per scan
 - Trades and signals: tagged with strategy version, strategy regime, position tag, and close reason
 
 ### Predictions (Optional)
@@ -220,6 +220,7 @@ Respond in JSON:
     "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
     "reasoning": "Your analysis and the basis for your decision",
     "specific_changes": "What to build (CREATE_CANDIDATE only)",
+    "strategy_characterization": "Brief characterization of the strategy's approach and target conditions (CREATE_CANDIDATE only). Stored in the version archive for future reference — e.g. 'Multi-timeframe momentum strategy targeting trending markets with ATR-based position sizing'",
     "slot": null,
     "replace_slot": null,
     "evaluation_duration_days": null,
@@ -293,8 +294,8 @@ scipy.optimize: minimize (position sizing optimization)
   class Portfolio:
       cash: float
       total_value: float
-      positions: list[OpenPosition]   # OpenPosition has: symbol, qty, avg_entry, current_price, unrealized_pnl, unrealized_pnl_pct, intent, stop_loss, take_profit, tag
-      recent_trades: list[ClosedTrade]  # Last 100 — ClosedTrade has: symbol, entry_price, exit_price, pnl, pnl_pct, fees, intent
+      positions: list[OpenPosition]   # OpenPosition has: symbol, side ("long"), qty, avg_entry, current_price, unrealized_pnl, unrealized_pnl_pct, intent, stop_loss, take_profit, opened_at (datetime), tag
+      recent_trades: list[ClosedTrade]  # Last 100 — ClosedTrade has: symbol, side, qty, entry_price, exit_price, pnl, pnl_pct, fees, intent, opened_at, closed_at
       daily_pnl: float
       total_pnl: float
       fees_today: float
@@ -311,7 +312,37 @@ Position tags:
 - Each position has a unique tag. Access via position.tag in portfolio.positions.
 - BUY without tag creates a new position. BUY with an existing tag averages in.
 - SELL/CLOSE without tag targets the oldest position for that symbol.
-- MODIFY requires a tag — updates SL/TP/intent without closing. Use size_pct=0.
+- MODIFY requires a tag — updates SL/TP/intent without closing. size_pct is ignored for MODIFY (the shell logs a warning but takes no sizing action).
+
+### RiskLimits (passed to initialize())
+  max_trade_pct: float       # Max single trade as fraction of portfolio
+  default_trade_pct: float   # Default trade size when strategy doesn't specify
+  max_positions: int          # Max simultaneous open positions
+  max_daily_loss_pct: float  # Daily loss halt threshold
+  max_drawdown_pct: float    # Drawdown halt threshold from portfolio peak
+  max_position_pct: float    # Max size of any single position (default 0.25)
+  max_daily_trades: int      # Max trades per day (default 20)
+  rollback_consecutive_losses: int  # Consecutive losses before strategy rollback (default 15)
+
+### Optional StrategyBase methods
+Beyond the required `initialize()` and `analyze()`, these methods are called if defined:
+
+  def on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent, tag: str = "") -> None
+      Called after each order fill. Use to update internal state.
+
+  def on_position_closed(self, symbol: str, pnl: float, pnl_pct: float, tag: str = "") -> None
+      Called when a position is fully closed. Use to record outcomes.
+
+  def get_state(self) -> dict
+  def load_state(self, state: dict) -> None
+      Persist and restore internal state across system restarts. Without these, any instance variables reset to defaults on restart.
+
+  @property
+  def scan_interval_minutes(self) -> int
+      Override the default 5-minute scan interval.
+
+### Execution timeout
+The `analyze()` method has a 30-second timeout in production. Strategies with heavy computation (large loops, many indicators across all symbols) may silently fail. Prefer vectorized operations and early returns.
 
 ### Performance rules (prevent backtest timeout)
 - Do NOT call .copy() on large DataFrames — compute indicators on originals.
@@ -337,7 +368,7 @@ SymbolData attributes:
   .candles_5m (DataFrame), .candles_1h (DataFrame), .candles_1d (DataFrame)
   .maker_fee_pct (float), .taker_fee_pct (float)
 
-  THERE IS NO .candles, .data, .ohlcv, or .df attribute. Only candles_5m, candles_1h, candles_1d.
+  THERE IS NO .candles, .data, .ohlcv, .hourly, .daily, or .df attribute. Only candles_5m, candles_1h, candles_1d.
   Each DataFrame columns: open, high, low, close, volume (DatetimeIndex).
 
 Portfolio attributes:
@@ -345,12 +376,33 @@ Portfolio attributes:
   .daily_pnl, .total_pnl, .fees_today
 
 OpenPosition attributes:
-  .symbol, .qty, .avg_entry, .current_price, .unrealized_pnl, .unrealized_pnl_pct
-  .intent, .stop_loss, .take_profit, .tag, .side, .opened_at
+  .symbol, .side ("long"), .qty, .avg_entry, .current_price, .unrealized_pnl, .unrealized_pnl_pct
+  .intent, .stop_loss, .take_profit, .opened_at (datetime), .tag
 
-Method signatures:
+ClosedTrade attributes:
+  .symbol, .side, .qty, .entry_price, .exit_price, .pnl, .pnl_pct, .fees, .intent, .opened_at, .closed_at
+
+RiskLimits attributes:
+  .max_trade_pct, .default_trade_pct, .max_positions, .max_daily_loss_pct, .max_drawdown_pct
+  .max_position_pct (default 0.25), .max_daily_trades (default 20), .rollback_consecutive_losses (default 15)
+
+Signal constructor (ALL valid kwargs — any other kwarg will crash):
+  Signal(symbol, action, size_pct, order_type, limit_price, stop_loss, take_profit,
+         intent, confidence, reasoning, slippage_tolerance, tag)
+  - action: Action.BUY | Action.SELL | Action.CLOSE | Action.MODIFY (NO Action.SHORT)
+  - intent: Intent.DAY | Intent.SWING | Intent.POSITION (NO Intent.SCALP or others)
+  - reasoning: str (NOT 'reason' — that kwarg does not exist)
+
+Required method signatures:
   initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None
   analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime) -> list[Signal]
+
+Optional method signatures (called by runner/backtester if defined, fallback to no-op):
+  on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent, tag: str = "") -> None
+  on_position_closed(self, symbol: str, pnl: float, pnl_pct: float, tag: str = "") -> None
+  get_state(self) -> dict                    # Persist state across restarts
+  load_state(self, state: dict) -> None      # Restore state after restart
+  scan_interval_minutes: int (property)      # Override default 5-min scan interval
 
 Respond in JSON:
 {
@@ -385,6 +437,14 @@ These are simulation results — deterministic computation on a simplified marke
 say what to try differently. You are the fund manager directing a developer.
 Examples: "Switch from momentum to mean reversion", "Add a volatility filter to reduce false signals",
 "The entry criteria are too loose — require confirmation from multiple timeframes."
+
+**CRITICAL — IO Contract reference (for accurate revision instructions):**
+When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
+- SymbolData: .candles_5m, .candles_1h, .candles_1d (NOT .hourly, .daily, .data, .candles)
+- Signal kwargs: symbol, action, size_pct, order_type, limit_price, stop_loss, take_profit, intent, confidence, reasoning, slippage_tolerance, tag
+- Signal.reasoning (NOT 'reason'). Signal.intent: Intent.DAY | Intent.SWING | Intent.POSITION (NOT SCALP).
+- Action: BUY, SELL, CLOSE, MODIFY (NOT SHORT — system is long-only)
+- Available imports: pandas, numpy, ta, scipy, stdlib (math, statistics, collections, etc.), src.shell.contract
 
 Respond in JSON:
 {
@@ -1240,11 +1300,13 @@ This is a candidate strategy that will run in paper simulation alongside the act
                 # Record in strategy_versions (not deployed — candidate only)
                 from src.strategy.loader import hash_code_string
                 code_hash = hash_code_string(approved_code)
+                characterization = decision.get("strategy_characterization", "")
+                desc = characterization if characterization else f"Candidate slot {slot}: {changes[:200]}"
                 await self._db.execute(
                     """INSERT INTO strategy_versions
                        (version, code_hash, description, backtest_result, market_conditions, code)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (version, code_hash, f"Candidate slot {slot}: {changes[:200]}",
+                    (version, code_hash, desc,
                      backtest_summary, decision.get("market_observations", ""), approved_code),
                 )
                 await self._db.commit()
@@ -1304,6 +1366,17 @@ This is a candidate strategy that will run in paper simulation alongside the act
         if position_handling == "close_all" and self._close_all_callback:
             await self._close_all_callback()
 
+        # Retrieve candidate's characterization before promotion clears runners
+        candidate_version = self._candidate_manager._runners[slot].version if slot in self._candidate_manager._runners else None
+        candidate_desc = None
+        if candidate_version:
+            row = await self._db.fetchone(
+                "SELECT description FROM strategy_versions WHERE version = ?",
+                (candidate_version,),
+            )
+            if row:
+                candidate_desc = row["description"]
+
         # Get code and promote (cancels all candidates)
         code = await self._candidate_manager.promote_candidate(slot)
 
@@ -1311,12 +1384,13 @@ This is a candidate strategy that will run in paper simulation alongside the act
         version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}_promoted"
         code_hash = deploy_strategy(code, version)
 
-        # Record in strategy_versions as deployed
+        # Record in strategy_versions as deployed — carry characterization from candidate
+        desc = candidate_desc or f"Promoted from candidate slot {slot}"
         await self._db.execute(
             """INSERT INTO strategy_versions
                (version, code_hash, description, deployed_at, code)
                VALUES (?, ?, ?, datetime('now'), ?)""",
-            (version, code_hash, f"Promoted from candidate slot {slot}", code),
+            (version, code_hash, desc, code),
         )
         await self._db.commit()
 
@@ -1542,9 +1616,9 @@ The orchestrator wants to change this module because: {changes}"""
             # Get multi-timeframe candle data for backtest
             candle_data = {}
             for symbol in self._config.symbols:
-                df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)
-                df_1h = await self._data_store.get_candles(symbol, "1h", limit=8760)
-                df_1d = await self._data_store.get_candles(symbol, "1d", limit=2555)
+                df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)   # 30 days
+                df_1h = await self._data_store.get_candles(symbol, "1h", limit=720)    # 30 days
+                df_1d = await self._data_store.get_candles(symbol, "1d", limit=30)     # 30 days
                 if not df_1h.empty:
                     candle_data[symbol] = (df_5m, df_1h, df_1d)
 
