@@ -352,9 +352,10 @@ class Backtester:
                     else:
                         fill_price = price * (1 + self._slippage)
                         fee_pct = self._get_taker_fee(signal.symbol) / 100
-                    if signal.size_pct > self._risk_limits.max_trade_pct:
+                    size_pct = signal.size_pct if signal.size_pct is not None else self._risk_limits.default_trade_pct
+                    if size_pct > self._risk_limits.max_trade_pct:
                         continue
-                    trade_value = total_value * signal.size_pct
+                    trade_value = total_value * size_pct
                     existing_value = sum(
                         p["qty"] * prices.get(p["symbol"], p["avg_entry"])
                         for p in positions.values() if p["symbol"] == signal.symbol
@@ -431,7 +432,7 @@ class Backtester:
                         else:
                             fill_price = price * (1 - self._slippage)
                             exit_fee_pct = self._get_taker_fee(signal.symbol) / 100
-                        if signal.action == Action.SELL and signal.size_pct > 0 and signal.size_pct < 1.0:
+                        if signal.action == Action.SELL and signal.size_pct is not None and signal.size_pct > 0 and signal.size_pct < 1.0:
                             sell_value = total_value * signal.size_pct
                             qty = min(sell_value / fill_price, pos["qty"])
                         else:
@@ -812,9 +813,10 @@ class Backtester:
                         fill_price = price * (1 + self._slippage)  # slippage: buy higher
                         fee_pct = self._get_taker_fee(signal.symbol) / 100
                     # Reject oversized signals (matches live risk manager behavior)
-                    if signal.size_pct > self._risk_limits.max_trade_pct:
+                    size_pct = signal.size_pct if signal.size_pct is not None else self._risk_limits.default_trade_pct
+                    if size_pct > self._risk_limits.max_trade_pct:
                         continue
-                    trade_value = total_value * signal.size_pct
+                    trade_value = total_value * size_pct
                     # Enforce max_position_pct per symbol
                     existing_value = sum(
                         p["qty"] * prices.get(p["symbol"], p["avg_entry"])
@@ -896,7 +898,7 @@ class Backtester:
                             fill_price = price * (1 - self._slippage)  # slippage: sell lower
                             exit_fee_pct = self._get_taker_fee(signal.symbol) / 100
                         # SELL respects size_pct for partial sells (matches live _execute_sell)
-                        if signal.action == Action.SELL and signal.size_pct > 0 and signal.size_pct < 1.0:
+                        if signal.action == Action.SELL and signal.size_pct is not None and signal.size_pct > 0 and signal.size_pct < 1.0:
                             sell_value = total_value * signal.size_pct
                             qty = min(sell_value / fill_price, pos["qty"])
                         else:
