@@ -148,7 +148,11 @@ Every trade close is tagged with a reason: `signal` (strategy-initiated), `stop_
 - **Paper mode**: Instant simulated fills with configurable slippage (default 0.05%). SL/TP checked client-side every 30 seconds. No exchange API calls.
 - **Live mode**: Orders placed on Kraken with 30-second fill timeout. Partial fills are supported. Exchange-native SL/TP orders placed on Kraken after each BUY fill (3 retry attempts each). Startup reconciliation checks for orders that filled while the system was down.
 ### Backtester Capabilities and Limitations
-The backtester covers the most recent 30 days of trading history using all three timeframes: 5-minute, 1-hour, and daily candles. It iterates at 1h resolution using native multi-timeframe data. SL/TP checks use 5-minute precision throughout the entire window — every hour has 5m candles available for accurate intra-hour trigger ordering.
+The backtester simulates the most recent 30 days of trading at 1h resolution. SL/TP checks use 5-minute precision throughout — every hour has 5m candles for accurate intra-hour trigger ordering.
+
+**Data context**: At every simulation timestamp, the strategy sees up to 365 days of daily candles and 365 days of hourly candles as lookback for indicator warmup (e.g., 50-period or 200-period daily EMAs work fine). The 30-day limit applies only to 5m candles (Kraken API constraint) and the simulation window itself.
+
+**Purpose**: The backtest is a sanity gate, not a performance proof. 30 days produces too few trades for statistical significance on swing strategies. Its job is to verify: (1) the strategy code runs without errors, (2) it actually generates signals and trades, (3) it doesn't produce catastrophic drawdowns. The real performance evaluation happens during the candidate's forward paper test on live market data.
 
 What the backtester does:
 - Simulates MARKET orders with configurable slippage and taker fees.
@@ -413,30 +417,24 @@ Respond in JSON:
 
 BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trading strategy before it enters a candidate slot for forward testing.
 
-These are simulation results — deterministic computation on a simplified market model.
+**What this backtest tells you:**
+The backtest simulates 30 days of trading. At each timestamp, the strategy sees up to 365 days of daily and hourly candles for indicator context — long-lookback indicators (50 EMA, 200 SMA, etc.) work fine. The 30-day simulation window is too short for statistically significant performance evaluation on swing strategies. Treat this as a sanity check, not a performance proof.
 
-**Known backtester limitations (do NOT penalize the strategy for these):**
-- No order book depth, queue priority, or realistic fill latency
-- No market impact modeling — large orders fill at the same slippage as small ones
-- No overnight gaps or exchange outage simulation
-- Historical data may not capture future market conditions
+**Your job as reviewer — approve if the strategy:**
+1. Actually generates trades (zero trades = automatic reject, the strategy is broken or too restrictive)
+2. Runs without errors or obvious implementation bugs
+3. Doesn't produce catastrophic drawdowns (e.g., 50%+ loss)
+4. Shows reasonable trade mechanics (stops fire, exits work, position sizing correct)
 
-**Deployment context:**
-- Approving means the strategy enters a candidate slot for forward paper testing alongside the active strategy
-- Candidates trade with paper fills using live market data — no real money at risk
-- Rejecting sends the strategy back for revision with your new direction
+**Do NOT reject for:**
+- Low trade count (expected in 30 days for swing strategies — even 3-5 trades is enough to pass)
+- Mediocre win rate or Sharpe ratio (30-day sample is too small to judge edge)
+- Modest losses (a strategy that trades and loses modestly is more informative than one that never trades)
+- Known backtester limitations: no order book depth, no market impact, no realistic fill latency
 
-**Consider:**
-- Trade count vs statistical significance (few trades = unreliable metrics)
-- Drawdown severity and recovery patterns
-- Win rate combined with risk/reward ratio
-- Fee drag relative to gross P&L
-- Whether the results suggest a real edge or noise
+**The real evaluation happens next:** Approved strategies enter a candidate slot for forward paper testing with live market data. That's where you judge actual performance over 7-14+ days. The backtest just confirms the code works and the strategy is viable.
 
-**If rejecting:** Provide specific, actionable revision instructions. Don't just say what's wrong —
-say what to try differently. You are the fund manager directing a developer.
-Examples: "Switch from momentum to mean reversion", "Add a volatility filter to reduce false signals",
-"The entry criteria are too loose — require confirmation from multiple timeframes."
+**If rejecting:** Provide specific, actionable revision instructions. You are the fund manager directing a developer. Focus on WHY zero trades occurred (which filter is too restrictive? data access issue?) and what concrete change to make.
 
 **CRITICAL — IO Contract reference (for accurate revision instructions):**
 When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
@@ -1655,9 +1653,9 @@ The orchestrator wants to change this module because: {changes}"""
             # Get multi-timeframe candle data for backtest
             candle_data = {}
             for symbol in self._config.symbols:
-                df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)   # 30 days
-                df_1h = await self._data_store.get_candles(symbol, "1h", limit=720)    # 30 days
-                df_1d = await self._data_store.get_candles(symbol, "1d", limit=30)     # 30 days
+                df_5m = await self._data_store.get_candles(symbol, "5m", limit=8640)   # 30 days (Kraken API limit)
+                df_1h = await self._data_store.get_candles(symbol, "1h", limit=8760)   # 365 days (indicator context)
+                df_1d = await self._data_store.get_candles(symbol, "1d", limit=365)    # 365 days (indicator context)
                 if not df_1h.empty:
                     candle_data[symbol] = (df_5m, df_1h, df_1d)
 
