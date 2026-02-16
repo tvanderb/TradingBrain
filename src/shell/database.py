@@ -203,7 +203,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_observations (
     strategy_assessment TEXT,
     notable_findings TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(date, cycle_id)
+    UNIQUE(date)
 );
 
 -- Capital events (deposits, withdrawals, adjustments)
@@ -546,6 +546,62 @@ class Database:
                 raise
             log.info("database.special_migration.complete",
                      migration="positions_add_tag", backfilled=len(rows))
+
+        # Fix observations unique constraint: UNIQUE(date, cycle_id) → UNIQUE(date)
+        # so manual re-runs on the same day replace the previous observation
+        cursor = await self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_observations'"
+        )
+        row = await cursor.fetchone()
+        if row and "UNIQUE(date, cycle_id)" in row[0]:
+            log.info("database.special_migration", migration="observations_unique_date")
+            existing = await self._conn.execute(
+                "SELECT * FROM orchestrator_observations ORDER BY id"
+            )
+            rows = [dict(r) for r in await existing.fetchall()]
+
+            # Keep only the latest observation per date
+            by_date: dict[str, dict] = {}
+            for r in rows:
+                by_date[r["date"]] = r  # last one wins
+
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute("DROP TABLE orchestrator_observations")
+                await self._conn.execute("""CREATE TABLE orchestrator_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    market_summary TEXT,
+                    strategy_assessment TEXT,
+                    notable_findings TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    strategy_version TEXT,
+                    doc_flag INTEGER DEFAULT 0,
+                    flag_reason TEXT,
+                    UNIQUE(date)
+                )""")
+                await self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_observations_date ON orchestrator_observations(date)"
+                )
+                for r in by_date.values():
+                    await self._conn.execute(
+                        """INSERT INTO orchestrator_observations
+                           (date, cycle_id, market_summary, strategy_assessment,
+                            notable_findings, created_at, strategy_version, doc_flag, flag_reason)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["date"], r["cycle_id"], r.get("market_summary"),
+                         r.get("strategy_assessment"), r.get("notable_findings"),
+                         r.get("created_at"), r.get("strategy_version"),
+                         r.get("doc_flag", 0), r.get("flag_reason")),
+                    )
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
+            log.info("database.special_migration.complete",
+                     migration="observations_unique_date",
+                     before=len(rows), after=len(by_date))
 
     async def close(self) -> None:
         if self._conn:
