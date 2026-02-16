@@ -679,7 +679,12 @@ class Orchestrator:
                     remaining=self._ai.tokens_remaining,
                 )
                 if self._notifier:
-                    await self._notifier.orchestrator_cycle_completed("SKIPPED_BUDGET")
+                    await self._notifier.orchestrator_cycle_completed(
+                        "SKIPPED_BUDGET",
+                        strategy_version=None,
+                        candidate_count=len(self._candidate_manager.get_active_slots()) if self._candidate_manager else 0,
+                        max_candidates=self._config.orchestrator.max_candidates,
+                    )
                 return "Orchestrator: Skipped — insufficient token budget remaining."
 
             # 0b. Check if reflection is due
@@ -733,7 +738,19 @@ class Orchestrator:
 
             log.info("orchestrator.cycle_complete", decision=decision.get("decision"))
             if self._notifier:
-                await self._notifier.orchestrator_cycle_completed(decision_type)
+                # Gather context for enriched notification
+                ver_row = await self._db.fetchone(
+                    "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+                )
+                strat_ver = ver_row["version"] if ver_row else None
+                cand_count = len(self._candidate_manager.get_active_slots()) if self._candidate_manager else 0
+                max_cands = self._config.orchestrator.max_candidates
+                await self._notifier.orchestrator_cycle_completed(
+                    decision_type,
+                    strategy_version=strat_ver,
+                    candidate_count=cand_count,
+                    max_candidates=max_cands,
+                )
             return report
 
         except Exception as e:
@@ -1132,7 +1149,14 @@ Generate the complete strategy.py file."""
                 new_lines = code.splitlines(keepends=True)
                 diff = "".join(difflib.unified_diff(old_lines, new_lines, fromfile="current", tofile="proposed", n=3))
 
-                # Code review
+                # Code review — use current changes (includes revision instructions
+                # from prior outer iterations) so the reviewer evaluates against
+                # the actual goal, not the stale original decision.
+                review_context = {
+                    "decision": decision.get("decision"),
+                    "current_instructions": inner_changes,
+                    "original_reasoning": decision.get("reasoning", ""),
+                }
                 review_prompt = f"""Review this trading strategy code for correctness and safety.
 
 ## Changes from current strategy (diff)
@@ -1147,7 +1171,11 @@ Generate the complete strategy.py file."""
 
 This is a candidate strategy that will run in paper simulation alongside the active strategy.
 
-{json.dumps(decision, indent=2, default=str)}"""
+## What the code was asked to implement
+{inner_changes}
+
+## Original decision context
+{json.dumps(review_context, indent=2, default=str)}"""
 
                 review_response = await self._ai.ask_opus(
                     review_prompt, system=CODE_REVIEW_SYSTEM,
@@ -1183,8 +1211,9 @@ This is a candidate strategy that will run in paper simulation alongside the act
                 changes = f"Original goal: {original_changes}\n\nPrevious attempt crashed during backtest: {backtest_summary}. Try a different approach."
                 continue
 
-            # Opus reviews backtest
-            bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff, attempt_history)
+            # Opus reviews backtest — pass current changes so reviewer knows
+            # what was actually attempted (may differ from original decision)
+            bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff, attempt_history, current_changes=changes)
 
             if bt_review.get("deploy", False):
                 # Deploy to candidate slot
@@ -1253,7 +1282,7 @@ This is a candidate strategy that will run in paper simulation alongside the act
             return f"Cannot cancel: slot {slot} has no running candidate."
         await self._candidate_manager.cancel_candidate(slot, decision.get("reasoning", ""))
         if self._notifier:
-            await self._notifier.candidate_canceled(slot)
+            await self._notifier.candidate_canceled(slot, reason=decision.get("reasoning", ""))
         return f"Candidate in slot {slot} canceled."
 
     async def _promote_candidate(self, decision: dict) -> str:
@@ -1296,8 +1325,8 @@ This is a candidate strategy that will run in paper simulation alongside the act
             self._scan_state["strategy_reload_needed"] = True
 
         if self._notifier:
-            await self._notifier.candidate_promoted(slot, version)
-            await self._notifier.strategy_deployed(version, 0, f"Promoted from slot {slot}")
+            await self._notifier.candidate_promoted(slot, version, position_handling=position_handling)
+            await self._notifier.strategy_deployed(version, 0, f"Promoted from candidate slot {slot}")
 
         return f"Candidate from slot {slot} promoted as {version}. Position handling: {position_handling}."
 
@@ -1587,6 +1616,7 @@ The orchestrator wants to change this module because: {changes}"""
     async def _review_backtest(
         self, result: BacktestResult | None, summary: str, decision: dict, diff: str,
         attempt_history: list[dict] | None = None,
+        *, current_changes: str | None = None,
     ) -> dict:
         """Opus reviews backtest results and decides whether to deploy to candidate slot.
 
@@ -1609,13 +1639,19 @@ The orchestrator wants to change this module because: {changes}"""
         else:
             history_text = "This is the first attempt."
 
+        # Use current_changes if available (reflects revision instructions from
+        # prior iterations), otherwise fall back to original decision context
+        if current_changes:
+            change_context = f"## Current Strategy Instructions (may include revisions from prior attempts)\n{current_changes}"
+        else:
+            change_context = f"## Strategy Change Context\n{json.dumps({k: decision.get(k) for k in ('decision', 'reasoning', 'specific_changes')}, indent=2, default=str)}"
+
         review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to a candidate slot.
 
 ## Backtest Results
 {summary}
 
-## Strategy Change Context
-{json.dumps({k: decision.get(k) for k in ("decision", "reasoning", "specific_changes")}, indent=2, default=str)}
+{change_context}
 
 ## Code Diff
 ```diff

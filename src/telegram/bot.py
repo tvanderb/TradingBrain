@@ -35,25 +35,20 @@ class TelegramBot:
             .build()
         )
 
-        # Register command handlers
+        # Register command handlers (15 commands)
         handlers = {
             "start": self._commands.cmd_help,
             "help": self._commands.cmd_help,
-            "status": self._commands.cmd_status,
-            "health": self._commands.cmd_health,
-            "outlook": self._commands.cmd_outlook,
+            "fund": self._commands.cmd_fund,
             "positions": self._commands.cmd_positions,
             "trades": self._commands.cmd_trades,
             "risk": self._commands.cmd_risk,
-            "daily_performance": self._commands.cmd_daily_performance,
-            "strategy": self._commands.cmd_strategy,
-            "tokens": self._commands.cmd_tokens,
-            "ask": self._commands.cmd_ask,
-            "thoughts": self._commands.cmd_thoughts,
-            "thought": self._commands.cmd_thought,
-            "orchestrate": self._commands.cmd_orchestrate,
-            "reflect_tonight": self._commands.cmd_reflect_tonight,
+            "outlook": self._commands.cmd_outlook,
             "candidates": self._commands.cmd_candidates,
+            "thoughts": self._commands.cmd_thoughts,
+            "ask": self._commands.cmd_ask,
+            "orchestrate": self._commands.cmd_orchestrate,
+            "reflect": self._commands.cmd_reflect,
             "pause": self._commands.cmd_pause,
             "resume": self._commands.cmd_resume,
             "kill": self._commands.cmd_kill,

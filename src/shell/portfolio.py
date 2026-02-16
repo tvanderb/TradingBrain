@@ -631,6 +631,9 @@ class PortfolioTracker:
             "symbol": signal.symbol, "action": "BUY", "qty": qty,
             "price": fill_price, "fee": fee, "intent": signal.intent.value,
             "tag": tag,
+            "stop_loss": effective_sl,
+            "take_profit": effective_tp,
+            "size_pct": signal.size_pct,
         }
 
     async def _execute_sell(
@@ -791,6 +794,8 @@ class PortfolioTracker:
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct, "fee": total_fee,
             "intent": pos.get("intent", "DAY"), "tag": tag,
             "close_reason": close_reason,
+            "entry_price": entry,
+            "opened_at": pos.get("opened_at"),
         }
 
     async def _execute_modify(self, signal: Signal) -> dict | None:
@@ -1025,6 +1030,8 @@ class PortfolioTracker:
             "price": fill_price, "pnl": pnl, "pnl_pct": pnl_pct,
             "fee": total_fee, "intent": pos.get("intent", "DAY"), "tag": tag,
             "close_reason": close_reason,
+            "entry_price": entry,
+            "opened_at": pos.get("opened_at"),
         }
 
     async def update_prices(self, prices: dict[str, float]) -> list[dict]:

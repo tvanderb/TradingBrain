@@ -2879,3 +2879,66 @@ Created `monitoring/build_dashboard.py` — a Python script that:
 | `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | Regenerated — all panels inline, version 9 |
 
 **Tests: 222/222 passing** (unchanged — Grafana JSON only)
+
+## Session Y (2026-02-16) — Telegram Interface Redesign
+
+### Context
+19 commands and 24 notification types. Commands flat and some redundant. Notifications sparse plain text — hard to scan on mobile. Goal: consolidate commands, enrich notifications with emoji + portfolio context, add signal drought detection.
+
+### Changes
+
+#### Command Consolidation (19→15)
+- **Removed**: `/status`, `/daily_performance`, `/strategy`, `/tokens`, `/thought`
+- **Created**: `/fund` (merged `/health` + `/status` — mode, portfolio, trade stats, uptime)
+- **Renamed**: `/reflect_tonight` → `/reflect`
+- **Merged**: `/thought` into `/thoughts` (2-arg form shows full AI response)
+- **Redesigned**: `/help` — grouped with emojis (📊 Fund, 🔭 Intelligence, 💬 Interactive, ⚙️ Control)
+
+#### Notification Enrichment
+- All notifications get emoji prefix for visual anchoring on mobile
+- **BUY**: Entry, size %, SL/TP with distance %, intent, portfolio context
+- **SELL/CLOSE**: Exit/entry, P&L absolute + %, hold duration, close reason, portfolio/cash
+- **stop_triggered**: Trigger/entry, P&L, hold duration, portfolio context via `context` kwarg
+- **signal_rejected**: Confidence, size_pct
+- **risk_halt**: Daily P&L, position count
+- **system_online**: Mode, strategy version, cash, status
+- **system_shutdown**: Portfolio value, positions
+- **orchestrator_cycle_started**: Suppressed from Telegram (WS + activity only)
+- **orchestrator_cycle_completed**: Strategy version, candidate count
+- **candidate_canceled**: Reason
+- **candidate_promoted**: Position handling (kept/closed)
+- **reflection_completed**: Graded breakdown (✓✗?)
+- **NEW**: `signal_drought` — fires after 24h of 0 signals
+
+#### Portfolio Return Dict Enrichment
+- BUY: Added `stop_loss`, `take_profit`, `size_pct` to return
+- SELL/CLOSE: Added `entry_price`, `opened_at` to return
+- `record_exchange_fill`: Added `entry_price`, `opened_at` to return
+
+#### Call Site Enrichment
+- 5 `trade_executed` sites enriched with portfolio_value, position_count, max_positions, cash
+- 2 `stop_triggered` sites enriched with entry, P&L, hold, portfolio context
+- 4 `risk_halt` sites enriched with daily_pnl, position_count
+- 3 `rollback_alert` sites enriched with portfolio_value
+- system_online, system_shutdown, signal_rejected, scan_complete — all enriched
+- orchestrator.py: candidate_canceled + candidate_promoted + orchestrator_cycle_completed enriched
+
+#### Signal Drought Detection
+- Tracks `last_signal_time`, `drought_alerted`, `scan_count` in scan_state
+- After 24h of 0 executed signals: sends `signal_drought` notification (one-shot until reset)
+- Resets on next executed signal
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `src/shell/portfolio.py` | Return dict enrichment (BUY: SL/TP/size_pct, SELL: entry/opened_at) |
+| `src/shell/config.py` | Added `signal_drought: bool = True` to NotificationConfig |
+| `src/telegram/commands.py` | Command consolidation, /fund, /help redesign, /thoughts merge |
+| `src/telegram/bot.py` | Handler registrations 19→15 |
+| `src/telegram/notifications.py` | Full notification enrichment, signal_drought, cycle_started suppression |
+| `src/main.py` | Call site enrichment, signal drought tracking |
+| `src/orchestrator/orchestrator.py` | Enriched candidate/cycle notifications |
+| `docs/dev_notes/notification_guidelines.md` | **NEW** — notification design spec |
+| `tests/test_integration.py` | Updated 3 existing tests + 8 new tests |
+
+**Tests: 230/230 passing** (222 existing + 8 new)

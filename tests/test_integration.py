@@ -1572,26 +1572,21 @@ async def test_telegram_commands():
         context = MagicMock()
         context.args = []
 
-        # /help (also handles /start)
+        # /help (also handles /start) — grouped with emojis
         await commands.cmd_help(update, context)
         reply = update.message.reply_text.call_args[0][0]
         assert "Trading Brain" in reply
-        assert "/status" in reply
-        assert "/health" in reply
+        assert "/fund" in reply
         assert "/outlook" in reply
-        assert "Ask about the system" in reply
-
-        # /status — system health only (no portfolio/P&L)
-        update.message.reply_text.reset_mock()
-        await commands.cmd_status(update, context)
-        reply = update.message.reply_text.call_args[0][0]
-        assert "Mode: paper" in reply
+        assert "/ask" in reply
+        assert "/reflect" in reply
         assert "ACTIVE" in reply
-        assert "Uptime:" in reply
-        # Should NOT contain portfolio/P&L data (moved to /health)
-        assert "Portfolio:" not in reply
-        assert "Cash:" not in reply
-        assert "Daily P&L" not in reply
+        # Removed commands should NOT appear
+        assert "/status" not in reply
+        assert "/strategy" not in reply
+        assert "/tokens" not in reply
+        assert "/daily_performance" not in reply
+        assert "/thought " not in reply  # merged into /thoughts
 
         # /positions (empty)
         update.message.reply_text.reset_mock()
@@ -1611,12 +1606,6 @@ async def test_telegram_commands():
         reply = update.message.reply_text.call_args[0][0]
         assert "Risk Limits" in reply
         assert "Kill switch: OFF" in reply
-
-        # /strategy
-        update.message.reply_text.reset_mock()
-        await commands.cmd_strategy(update, context)
-        reply = update.message.reply_text.call_args[0][0]
-        assert "Strategy" in reply or "Hash" in reply
 
         # /pause and /resume
         update.message.reply_text.reset_mock()
@@ -1649,8 +1638,8 @@ async def test_telegram_commands():
 
 
 @pytest.mark.asyncio
-async def test_telegram_health_command():
-    """T4c: /health returns fund metrics from truth benchmarks + live state."""
+async def test_telegram_fund_command():
+    """T4c: /fund returns combined fund overview — mode, status, portfolio, trade stats."""
     from src.shell.config import load_config
     from src.shell.database import Database
     from src.shell.risk import RiskManager
@@ -1687,16 +1676,16 @@ async def test_telegram_health_command():
         context = MagicMock()
         context.args = []
 
-        await commands.cmd_health(update, context)
+        await commands.cmd_fund(update, context)
         reply = update.message.reply_text.call_args[0][0]
-        assert "Fund Health" in reply
-        assert "Portfolio: $200.00" in reply
-        assert "Cash: $180.00" in reply
-        assert "Win Rate:" in reply
-        assert "Expectancy:" in reply
-        assert "Total Fees:" in reply
-        assert "Strategy:" in reply
-        assert "Max Drawdown:" in reply
+        assert "Mode: paper" in reply
+        assert "ACTIVE" in reply
+        assert "$200.00" in reply
+        assert "$180.00" in reply
+        assert "Win:" in reply
+        assert "Exp:" in reply
+        assert "Fees:" in reply
+        assert "Drawdown:" in reply
 
         await db.close()
     finally:
@@ -1845,7 +1834,7 @@ async def test_telegram_authorization():
         context = MagicMock()
         context.args = []
 
-        await commands.cmd_status(update, context)
+        await commands.cmd_fund(update, context)
         update.message.reply_text.assert_not_called()  # Silently rejected
 
         await db.close()
@@ -7066,3 +7055,247 @@ class Strategy(StrategyBase):
         await db.close()
     finally:
         os.unlink(config.db_path)
+
+
+# --- Session Y: Enriched Notification Tests ---
+
+@pytest.mark.asyncio
+async def test_notifier_enriched_buy_format():
+    """Enriched BUY notification includes entry, SL/TP with percentages, portfolio context."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    trade = {
+        "action": "BUY",
+        "symbol": "BTC/USD",
+        "qty": 0.002,
+        "price": 100000.0,
+        "fee": 0.80,
+        "intent": "SWING",
+        "tag": "auto_BTCUSD_001",
+        "stop_loss": 97000.0,
+        "take_profit": 109000.0,
+        "size_pct": 0.06,
+        "portfolio_value": 3200.0,
+        "position_count": 4,
+        "max_positions": 18,
+    }
+    await notifier.trade_executed(trade)
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "BUY" in msg
+    assert "BTC/USD" in msg
+    assert "auto_BTCUSD_001" in msg
+    assert "Entry:" in msg or "$100,000.00" in msg
+    assert "SL:" in msg
+    assert "TP:" in msg
+    assert "6.0%" in msg  # size_pct
+    assert "SWING" in msg
+    assert "Portfolio:" in msg
+    assert "4/18" in msg
+
+
+@pytest.mark.asyncio
+async def test_notifier_enriched_sell_format():
+    """Enriched SELL notification includes exit/entry, P&L, hold duration, portfolio context."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    trade = {
+        "action": "SELL",
+        "symbol": "ETH/USD",
+        "qty": 0.1,
+        "price": 3500.0,
+        "fee": 0.56,
+        "intent": "DAY",
+        "tag": "auto_ETHUSD_001",
+        "entry_price": 3400.0,
+        "pnl": 9.44,
+        "pnl_pct": 0.0278,
+        "close_reason": "signal",
+        "opened_at": (datetime.now(timezone.utc) - timedelta(days=2, hours=5)).isoformat(),
+        "portfolio_value": 3200.0,
+        "cash": 2800.0,
+    }
+    await notifier.trade_executed(trade)
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "SELL" in msg
+    assert "ETH/USD" in msg
+    assert "Exit:" in msg
+    assert "Entry:" in msg
+    assert "P&L:" in msg
+    assert "$+9.44" in msg
+    assert "Hold:" in msg
+    assert "2d" in msg  # ~2 days hold
+    assert "signal" in msg
+    assert "Portfolio:" in msg
+    assert "Cash:" in msg
+
+
+@pytest.mark.asyncio
+async def test_notifier_enriched_stop_triggered():
+    """Enriched stop_triggered includes entry, P&L, hold, portfolio context."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    context = {
+        "entry_price": 100000.0,
+        "pnl": -6.00,
+        "pnl_pct": -0.03,
+        "opened_at": (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat(),
+        "portfolio_value": 3100.0,
+        "position_count": 3,
+        "max_positions": 18,
+    }
+    await notifier.stop_triggered("BTC/USD", "stop_loss", 97000.0, tag="auto_BTCUSD_001", context=context)
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "STOP LOSS" in msg
+    assert "BTC/USD" in msg
+    assert "auto_BTCUSD_001" in msg
+    assert "Trigger:" in msg
+    assert "Entry:" in msg
+    assert "P&L:" in msg
+    assert "Portfolio:" in msg
+    assert "3/18" in msg
+
+
+@pytest.mark.asyncio
+async def test_notifier_signal_drought():
+    """signal_drought notification dispatches to Telegram with correct format."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    await notifier.signal_drought(24, 288, "v002", "2025-02-15 03:42 UTC")
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "Signal Drought" in msg
+    assert "24" in msg
+    assert "288" in msg
+    assert "v002" in msg
+    assert "2025-02-15 03:42 UTC" in msg
+
+
+@pytest.mark.asyncio
+async def test_notifier_cycle_started_no_telegram():
+    """orchestrator_cycle_started sends to WS/activity but NOT Telegram."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    await notifier.orchestrator_cycle_started()
+    await asyncio.sleep(0.05)
+
+    # Telegram should NOT be called (telegram_text is None)
+    assert mock_app.bot.send_message.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_thoughts_merged():
+    """Merged /thoughts command: /thoughts <id> <step> shows full response."""
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        config.telegram.allowed_user_ids = [12345]
+        commands = BotCommands(config=config, db=db, scan_state={})
+
+        # Insert a thought record
+        await db.execute(
+            """INSERT INTO orchestrator_thoughts
+               (cycle_id, step, model, full_response, input_summary, parsed_result, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'utc'))""",
+            ("cycle_abc", "code_gen", "sonnet", "This is the full AI response text here.", "input summary", "{}"),
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["cycle_abc", "code_gen"]
+
+        await commands.cmd_thoughts(update, context)
+        reply = update.message.reply_text.call_args[0][0]
+
+        assert "cycle_abc" in reply
+        assert "code_gen" in reply
+        assert "sonnet" in reply
+        assert "full AI response text" in reply
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+def test_config_signal_drought_default():
+    """NotificationConfig.signal_drought defaults to True."""
+    from src.shell.config import NotificationConfig
+
+    nc = NotificationConfig()
+    assert nc.signal_drought is True
+
+
+@pytest.mark.asyncio
+async def test_notifier_enriched_reflection():
+    """reflection_completed includes graded breakdown when provided."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    await notifier.reflection_completed(
+        4, 3, "Strategy doc updated",
+        correct=2, incorrect=1, uncertain=1,
+    )
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "Reflection Complete" in msg
+    assert "4 predictions" in msg
+    assert "Strategy doc updated" in msg

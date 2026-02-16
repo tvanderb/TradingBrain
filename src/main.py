@@ -269,7 +269,13 @@ class TradingBrain:
         self._risk.update_portfolio_peak(portfolio_value)
 
         # 11. Notify
-        await self._notifier.system_online(portfolio_value, self._portfolio.position_count)
+        strategy_ver = self._scan_state.get("strategy_version", "none")
+        sys_status = "PAUSED" if self._scan_state.get("paused") else "ACTIVE"
+        await self._notifier.system_online(
+            portfolio_value, self._portfolio.position_count,
+            mode=self._config.mode, strategy_version=strategy_ver,
+            cash=self._portfolio.cash, status=sys_status,
+        )
 
         # Startup alerts (L2 halt, L3 orphans)
         if self._risk.is_halted:
@@ -679,6 +685,7 @@ class TradingBrain:
 
             # Process signals
             executed_symbols = set()
+            rejected_count = 0
             halt_notified = False
             for signal in signals:
                 # Risk check (refresh portfolio_value after each execution for TOCTOU safety)
@@ -694,10 +701,16 @@ class TradingBrain:
                     log.info("scan.signal_rejected", symbol=signal.symbol, reason=check.reason)
                     await self._notifier.signal_rejected(
                         signal.symbol, signal.action.value, check.reason,
+                        confidence=signal.confidence, size_pct=signal.size_pct,
                     )
                     if self._risk.is_halted and not halt_notified:
-                        await self._notifier.risk_halt(self._risk.halt_reason)
+                        await self._notifier.risk_halt(
+                            self._risk.halt_reason,
+                            daily_pnl=self._risk.daily_pnl,
+                            position_count=self._portfolio.position_count,
+                        )
                         halt_notified = True
+                    rejected_count += 1
                     await self._db.execute(
                         "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, strategy_regime, tag, rejected_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (signal.symbol, signal.action.value, signal.size_pct, signal.confidence,
@@ -789,7 +802,11 @@ class TradingBrain:
                             except (TypeError, RuntimeError):
                                 pass
 
-                        # Notify
+                        # Notify — enrich with portfolio context
+                        result["portfolio_value"] = await self._portfolio.total_value()
+                        result["position_count"] = self._portfolio.position_count
+                        result["max_positions"] = self._config.risk.max_positions
+                        result["cash"] = self._portfolio.cash
                         await self._notifier.trade_executed(result)
 
                     # Check rollback triggers (once after all results)
@@ -798,8 +815,15 @@ class TradingBrain:
                         new_value, self._portfolio.daily_start_value
                     )
                     if not rollback.passed:
-                        await self._notifier.rollback_alert(rollback.reason, "previous")
-                        await self._notifier.risk_halt(rollback.reason)
+                        await self._notifier.rollback_alert(
+                            rollback.reason, "previous",
+                            portfolio_value=new_value,
+                        )
+                        await self._notifier.risk_halt(
+                            rollback.reason,
+                            daily_pnl=self._risk.daily_pnl,
+                            position_count=self._portfolio.position_count,
+                        )
                         log.warning("scan.rollback_triggered", reason=rollback.reason)
 
                     # Update portfolio peak
@@ -833,7 +857,30 @@ class TradingBrain:
             self._scan_state["last_scan"] = datetime.now().strftime("%H:%M:%S")
             self._scan_state["last_scan_at"] = datetime.now(timezone.utc)
             log.info("scan.complete", symbols=len(scan_symbols), signals=len(signals))
-            await self._notifier.scan_complete(len(scan_symbols), len(signals))
+            scan_pv = await self._portfolio.total_value() if self._portfolio else None
+            await self._notifier.scan_complete(
+                len(scan_symbols), len(signals),
+                executed_count=len(executed_symbols) if executed_symbols else 0,
+                rejected_count=rejected_count,
+                portfolio_value=scan_pv,
+            )
+
+            # Signal drought tracking
+            self._scan_state.setdefault("scan_count", 0)
+            self._scan_state["scan_count"] += 1
+            if executed_symbols:
+                self._scan_state["last_signal_time"] = datetime.now(timezone.utc)
+                self._scan_state["drought_alerted"] = False
+            elif self._scan_state.get("last_signal_time"):
+                since = datetime.now(timezone.utc) - self._scan_state["last_signal_time"]
+                if since.total_seconds() >= 86400 and not self._scan_state.get("drought_alerted"):
+                    hours = int(since.total_seconds() // 3600)
+                    ver = self._scan_state.get("strategy_version", "unknown")
+                    last_str = self._scan_state["last_signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+                    await self._notifier.signal_drought(
+                        hours, self._scan_state["scan_count"], ver, last_str,
+                    )
+                    self._scan_state["drought_alerted"] = True
 
             # Save strategy state periodically (keep last 10)
             state = self._strategy.get_state()
@@ -955,7 +1002,22 @@ class TradingBrain:
             for r in results:
                 if r.get("pnl") is not None:
                     self._risk.record_trade_result(r["pnl"])
-                await self._notifier.stop_triggered(symbol, reason, price, tag=tag)
+                # Enrich stop context
+                stop_ctx = {
+                    "entry_price": r.get("entry_price"),
+                    "opened_at": r.get("opened_at"),
+                    "pnl": r.get("pnl"),
+                    "pnl_pct": r.get("pnl_pct", 0),
+                    "portfolio_value": await self._portfolio.total_value(),
+                    "position_count": self._portfolio.position_count,
+                    "max_positions": self._config.risk.max_positions,
+                }
+                await self._notifier.stop_triggered(symbol, reason, price, tag=tag, context=stop_ctx)
+                # Enrich trade with portfolio context
+                r["portfolio_value"] = stop_ctx["portfolio_value"]
+                r["position_count"] = self._portfolio.position_count
+                r["max_positions"] = self._config.risk.max_positions
+                r["cash"] = self._portfolio.cash
                 await self._notifier.trade_executed(r)
 
                 # Strategy callbacks (skip if analyze() is running in executor to avoid thread-safety issues)
@@ -992,8 +1054,15 @@ class TradingBrain:
                 new_value, self._portfolio.daily_start_value
             )
             if not rollback.passed:
-                await self._notifier.rollback_alert(rollback.reason, "previous")
-                await self._notifier.risk_halt(rollback.reason)
+                await self._notifier.rollback_alert(
+                    rollback.reason, "previous",
+                    portfolio_value=new_value,
+                )
+                await self._notifier.risk_halt(
+                    rollback.reason,
+                    daily_pnl=self._risk.daily_pnl,
+                    position_count=self._portfolio.position_count,
+                )
             self._risk.update_portfolio_peak(new_value)
 
     async def _check_conditional_orders(self) -> None:
@@ -1064,7 +1133,21 @@ class TradingBrain:
                 )
                 if result:
                     self._risk.record_trade_result(result["pnl"])
-                    await self._notifier.stop_triggered(symbol, reason, fill_price, tag=tag)
+                    # Enrich stop context
+                    cond_stop_ctx = {
+                        "entry_price": result.get("entry_price"),
+                        "opened_at": result.get("opened_at"),
+                        "pnl": result.get("pnl"),
+                        "pnl_pct": result.get("pnl_pct", 0),
+                        "portfolio_value": await self._portfolio.total_value(),
+                        "position_count": self._portfolio.position_count,
+                        "max_positions": self._config.risk.max_positions,
+                    }
+                    await self._notifier.stop_triggered(symbol, reason, fill_price, tag=tag, context=cond_stop_ctx)
+                    result["portfolio_value"] = cond_stop_ctx["portfolio_value"]
+                    result["position_count"] = self._portfolio.position_count
+                    result["max_positions"] = self._config.risk.max_positions
+                    result["cash"] = self._portfolio.cash
                     await self._notifier.trade_executed(result)
 
                     # Strategy callbacks (skip if analyze() in executor — thread-safety)
@@ -1104,8 +1187,15 @@ class TradingBrain:
                         new_value, self._portfolio.daily_start_value
                     )
                     if not rollback.passed:
-                        await self._notifier.rollback_alert(rollback.reason, "previous")
-                        await self._notifier.risk_halt(rollback.reason)
+                        await self._notifier.rollback_alert(
+                            rollback.reason, "previous",
+                            portfolio_value=new_value,
+                        )
+                        await self._notifier.risk_halt(
+                            rollback.reason,
+                            daily_pnl=self._risk.daily_pnl,
+                            position_count=self._portfolio.position_count,
+                        )
                     self._risk.update_portfolio_peak(new_value)
 
                 break  # Only one of SL/TP can fill
@@ -1287,6 +1377,10 @@ class TradingBrain:
                         for r in results:
                             if r.get("pnl") is not None:
                                 self._risk.record_trade_result(r["pnl"])
+                                r["portfolio_value"] = await self._portfolio.total_value()
+                                r["position_count"] = self._portfolio.position_count
+                                r["max_positions"] = self._config.risk.max_positions
+                                r["cash"] = self._portfolio.cash
                                 await self._notifier.trade_executed(r)
                     break  # Success
                 except Exception as e:
@@ -1381,6 +1475,10 @@ class TradingBrain:
                     for r in results:
                         if r.get("pnl") is not None:
                             self._risk.record_trade_result(r["pnl"])
+                        r["portfolio_value"] = await self._portfolio.total_value()
+                        r["position_count"] = self._portfolio.position_count
+                        r["max_positions"] = self._config.risk.max_positions
+                        r["cash"] = self._portfolio.cash
                         await self._notifier.trade_executed(r)
         log.info("promotion.all_positions_closed", count=len(positions))
 
@@ -1390,7 +1488,9 @@ class TradingBrain:
         self._running = False
 
         if self._notifier:
-            await self._notifier.system_shutdown()
+            pv = await self._portfolio.total_value() if self._portfolio else None
+            pc = self._portfolio.position_count if self._portfolio else None
+            await self._notifier.system_shutdown(portfolio_value=pv, position_count=pc)
 
         # 1. Stop scheduler
         if self._scheduler:

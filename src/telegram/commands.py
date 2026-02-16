@@ -99,79 +99,57 @@ class BotCommands:
                 self._unauth_log_last = now
         return authorized
 
+    def _format_uptime(self, delta) -> str:
+        """Format a timedelta as a human-readable uptime string."""
+        days = delta.days
+        hours = delta.seconds // 3600
+        mins = (delta.seconds % 3600) // 60
+        if days > 0:
+            return f"{days}d {hours}h {mins}m"
+        elif hours > 0:
+            return f"{hours}h {mins}m"
+        return f"{mins}m"
+
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        await update.message.reply_text(
-            "Trading Brain v2 (IO-Container)\n"
-            f"Mode: {self._config.mode}\n"
-            f"Symbols: {', '.join(self._config.symbols)}\n\n"
-            "Commands:\n"
-            "/status - System health\n"
-            "/health - Fund performance\n"
-            "/outlook - Orchestrator's market view\n"
-            "/positions - Open positions\n"
-            "/trades - Recent trades\n"
-            "/risk - Risk utilization\n"
-            "/daily_performance - Daily performance\n"
-            "/strategy - Active strategy info\n"
-            "/tokens - Token usage\n"
-            "/ask <question> - Ask about the system\n"
-            "/thoughts - Browse orchestrator AI reasoning\n"
-            "/thought <cycle> <step> - Full AI response\n"
-            "/orchestrate - Trigger orchestration cycle\n"
-            "/reflect_tonight - Add reflection to next cycle\n"
-            "/pause - Pause trading\n"
-            "/resume - Resume trading\n"
-            "/kill - Emergency stop"
-        )
-
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """System health only — mode, status, last scan, uptime."""
-        if not self._authorized(update):
-            return
-
-        lines = [f"Mode: {self._config.mode}"]
 
         # Status line
-        if self._risk and self._risk.is_halted:
-            lines.append(f"Status: HALTED — {self._risk.halt_reason}")
-        elif self._paused:
-            lines.append("Status: PAUSED")
-        else:
-            lines.append("Status: ACTIVE")
-
-        # Last scan time
-        last_scan = self._scan_state.get("last_scan")
-        if last_scan:
-            lines.append(f"Last Scan: {last_scan}")
-
-        # Uptime from first scan
-        first_scan = await self._db.fetchone(
-            "SELECT MIN(created_at) as first_scan FROM scan_results"
+        ver = await self._db.fetchone(
+            "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
         )
-        if first_scan and first_scan["first_scan"]:
-            try:
-                started = datetime.fromisoformat(first_scan["first_scan"]).replace(tzinfo=timezone.utc)
-                delta = datetime.now(timezone.utc) - started
-                days = delta.days
-                hours = delta.seconds // 3600
-                mins = (delta.seconds % 3600) // 60
-                if days > 0:
-                    lines.append(f"Uptime: {days}d {hours}h {mins}m")
-                elif hours > 0:
-                    lines.append(f"Uptime: {hours}h {mins}m")
-                else:
-                    lines.append(f"Uptime: {mins}m")
-            except (ValueError, TypeError):
-                lines.append("Uptime: unknown")
+        ver_str = ver["version"] if ver else "none"
+
+        if self._risk and self._risk.is_halted:
+            status = "HALTED"
+        elif self._paused:
+            status = "PAUSED"
         else:
-            lines.append("Uptime: No scans yet")
+            status = "ACTIVE"
 
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(
+            f"Trading Brain \u2014 Autonomous Crypto Fund\n"
+            f"Mode: {self._config.mode} | Strategy: {ver_str} | Status: {status}\n\n"
+            "\U0001F4CA Fund\n"
+            "/fund \u2014 Portfolio, returns, drawdown, trade stats\n"
+            "/positions \u2014 Open positions with live P&L\n"
+            "/trades \u2014 Recent closed trades with entry/exit\n"
+            "/risk \u2014 Risk limits and current utilization\n\n"
+            "\U0001F52D Intelligence\n"
+            "/outlook \u2014 Orchestrator's market view\n"
+            "/candidates \u2014 Candidate strategy status\n"
+            "/thoughts \u2014 Browse orchestrator reasoning\n\n"
+            "\U0001F4AC Interactive\n"
+            "/ask <question> \u2014 Ask about the system\n\n"
+            "\u2699\uFE0F Control\n"
+            "/orchestrate \u2014 Trigger nightly cycle now\n"
+            "/reflect \u2014 Schedule reflection for tonight\n"
+            "/pause / /resume \u2014 Pause or resume trading\n"
+            "/kill \u2014 Emergency close all positions"
+        )
 
-    async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Long-term fund health — portfolio, returns, trade stats."""
+    async def cmd_fund(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Combined fund overview — mode, status, portfolio, returns, trade stats, uptime."""
         if not self._authorized(update):
             return
 
@@ -180,20 +158,33 @@ class BotCommands:
         try:
             truth = await compute_truth_benchmarks(self._db)
         except Exception as e:
-            log.error("telegram.health_failed", error=str(e))
-            await update.message.reply_text("Error computing fund health metrics.")
+            log.error("telegram.fund_failed", error=str(e))
+            await update.message.reply_text("Error computing fund metrics.")
             return
 
-        lines = ["--- Fund Health ---"]
+        # Strategy version
+        ver = truth.get("current_strategy_version") or "none"
 
-        # Live portfolio state
+        # Status
+        if self._risk and self._risk.is_halted:
+            status = f"HALTED \u2014 {self._risk.halt_reason}"
+        elif self._paused:
+            status = "PAUSED"
+        else:
+            status = "ACTIVE"
+
+        lines = [f"Mode: {self._config.mode} | Strategy: {ver} | Status: {status}"]
+        lines.append("")
+
+        # Portfolio
         if self._portfolio:
             value = await self._portfolio.total_value()
-            lines.append(f"Portfolio: ${value:.2f}")
-            lines.append(f"Cash: ${self._portfolio.cash:.2f}")
-            lines.append(f"Positions: {self._portfolio.position_count}")
+            pos_count = self._portfolio.position_count
+            max_pos = self._config.risk.max_positions
+            lines.append(f"\u2014\u2014\u2014 Fund \u2014\u2014\u2014")
+            lines.append(f"Portfolio: ${value:,.2f} | Cash: ${self._portfolio.cash:,.2f} | Positions: {pos_count}/{max_pos}")
 
-            # Total return — account for capital events (deposits/withdrawals)
+            # Total return
             initial = self._config.paper_balance_usd
             cap_row = await self._db.fetchone(
                 "SELECT COALESCE(SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END), 0) as net FROM capital_events"
@@ -201,50 +192,53 @@ class BotCommands:
             invested = initial + (cap_row["net"] if cap_row else 0)
             ret = value - invested
             ret_pct = (ret / invested * 100) if invested > 0 else 0
-            lines.append(f"\nTotal Return: ${ret:+.2f} ({ret_pct:+.1f}%)")
+            lines.append(f"Total Return: {ret:+.2f} ({ret_pct:+.1f}%)")
+
+            # Drawdown
+            if self._risk and self._risk.peak_portfolio is not None and self._risk.peak_portfolio > 0:
+                current_dd = (self._risk.peak_portfolio - value) / self._risk.peak_portfolio * 100
+                lines.append(f"Drawdown: {current_dd:.1f}% from peak | Max: {truth['max_drawdown_pct'] * 100:.1f}%")
+            else:
+                lines.append(f"Max Drawdown: {truth['max_drawdown_pct'] * 100:.1f}%")
         else:
             lines.append("Portfolio: unavailable")
 
-        # Drawdown
-        if self._risk and self._risk.peak_portfolio is not None and self._risk.peak_portfolio > 0:
-            if self._portfolio:
-                current_dd = (self._risk.peak_portfolio - value) / self._risk.peak_portfolio * 100
-                lines.append(f"Current Drawdown: {current_dd:.1f}% from peak")
-        lines.append(f"Max Drawdown: {truth['max_drawdown_pct'] * 100:.1f}%")
-
         # Trade stats
+        lines.append("")
         tc = truth["trade_count"]
         wc = truth["win_count"]
         lc = truth["loss_count"]
-        lines.append(f"\nTrades: {tc} ({wc}W/{lc}L)")
-        lines.append(f"Win Rate: {truth['win_rate'] * 100:.0f}%")
-        lines.append(f"Expectancy: ${truth['expectancy']:.2f}")
-        lines.append(f"Total Fees: ${truth['total_fees']:.2f}")
+        lines.append(f"Trades: {tc} ({wc}W/{lc}L) | Win: {truth['win_rate'] * 100:.0f}% | Exp: ${truth['expectancy']:.2f}")
+        lines.append(f"Fees: ${truth['total_fees']:.2f}")
 
-        # Strategy + orchestrator
-        ver = truth.get("current_strategy_version") or "none"
-        lines.append(f"\nStrategy: {ver}")
+        # Operational
+        lines.append("")
+        last_scan = self._scan_state.get("last_scan")
+        if last_scan:
+            lines.append(f"Last Scan: {last_scan}", )
 
+        # Uptime
+        first_scan = await self._db.fetchone(
+            "SELECT MIN(created_at) as first_scan FROM scan_results"
+        )
+        if first_scan and first_scan["first_scan"]:
+            try:
+                started = datetime.fromisoformat(first_scan["first_scan"]).replace(tzinfo=timezone.utc)
+                delta = datetime.now(timezone.utc) - started
+                uptime_parts = [f"Uptime: {self._format_uptime(delta)}"]
+                if last_scan:
+                    lines[-1] += f" | {uptime_parts[0]}"
+                else:
+                    lines.append(uptime_parts[0])
+            except (ValueError, TypeError):
+                pass
+
+        # Last orchestrator
         last_cycle = await self._db.fetchone(
             "SELECT date FROM orchestrator_observations ORDER BY date DESC LIMIT 1"
         )
         if last_cycle:
-            lines.append(f"Last Orchestrator Cycle: {last_cycle['date']}")
-        else:
-            lines.append("Last Orchestrator Cycle: none")
-
-        last_trade = await self._db.fetchone(
-            "SELECT closed_at FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1"
-        )
-        if last_trade and last_trade["closed_at"]:
-            try:
-                trade_dt = datetime.fromisoformat(last_trade["closed_at"]).replace(tzinfo=timezone.utc)
-                days_since = (datetime.now(timezone.utc) - trade_dt).days
-                lines.append(f"Days Since Last Trade: {days_since}")
-            except (ValueError, TypeError):
-                lines.append("Days Since Last Trade: unknown")
-        else:
-            lines.append("Days Since Last Trade: N/A")
+            lines.append(f"Last Orchestrator: {last_cycle['date']}")
 
         await self._send_long(update, "\n".join(lines))
 
@@ -374,70 +368,6 @@ class BotCommands:
 
         await update.message.reply_text("\n".join(lines))
 
-    async def cmd_daily_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-
-        if self._reporter:
-            summary = await self._reporter.daily_summary()
-            await update.message.reply_text(summary)
-        else:
-            await update.message.reply_text("Reporter not available.")
-
-    async def cmd_strategy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-
-        from src.strategy.loader import get_strategy_path, get_code_hash
-
-        path = get_strategy_path()
-        if path.exists():
-            code_hash = get_code_hash(path)
-            # Read first 5 lines for description
-            lines_all = path.read_text().split("\n")
-            desc = "\n".join(lines_all[:6])
-
-            version = await self._db.fetchone(
-                "SELECT version, deployed_at FROM strategy_versions ORDER BY created_at DESC LIMIT 1"
-            )
-            ver_str = version["version"] if version else "v001 (initial)"
-
-            # Paper test status
-            test = await self._db.fetchone(
-                "SELECT * FROM paper_tests WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
-            )
-
-            lines = [
-                f"Strategy: {ver_str}",
-                f"Hash: {code_hash}",
-                f"\n{desc}",
-            ]
-
-            if test:
-                lines.append(f"\nPaper Test: tier {test['risk_tier']}, ends {test['ends_at'][:10]}")
-
-            await update.message.reply_text("\n".join(lines))
-        else:
-            await update.message.reply_text("No active strategy file found.")
-
-    async def cmd_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-
-        if self._ai:
-            usage = await self._ai.get_daily_usage()
-            lines = [
-                "--- Token Usage ---",
-                f"Budget: {usage['used']:,} / {usage['daily_limit']:,}",
-                f"Cost today: ${usage['total_cost']:.4f}",
-            ]
-            for model, data in usage.get("models", {}).items():
-                short = model.split("-")[1] if "-" in model else model
-                lines.append(f"  {short}: {data['calls']} calls, ${data['cost']:.4f}")
-            await update.message.reply_text("\n".join(lines))
-        else:
-            await update.message.reply_text("AI client not available.")
-
     async def cmd_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Context-aware question to Haiku — assembles system state as context."""
         if not self._authorized(update):
@@ -519,8 +449,8 @@ class BotCommands:
             if self._activity_logger:
                 activity = await self._activity_logger.recent(30)
                 if activity:
-                    lines = [f"  [{a['timestamp'][11:19]}] {a['category']} | {a['summary']}" for a in activity]
-                    ctx_parts.append("Recent activity:\n" + "\n".join(lines))
+                    act_lines = [f"  [{a['timestamp'][11:19]}] {a['category']} | {a['summary']}" for a in activity]
+                    ctx_parts.append("Recent activity:\n" + "\n".join(act_lines))
 
             context_str = "\n\n".join(ctx_parts)
             prompt = (
@@ -541,9 +471,10 @@ class BotCommands:
     async def cmd_thoughts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Browse orchestrator thought spool.
 
-        /thoughts       — show latest cycle summary
-        /thoughts list  — show recent cycles
-        /thoughts <id>  — show steps for a specific cycle
+        /thoughts            — show latest cycle summary
+        /thoughts list       — show recent cycles
+        /thoughts <id>       — show steps for a specific cycle
+        /thoughts <id> <step> — show full AI response for a step
         """
         if not self._authorized(update):
             return
@@ -562,8 +493,43 @@ class BotCommands:
                 return
             lines = ["Recent Orchestrator Cycles:"]
             for r in rows:
-                lines.append(f"\n{r['cycle_id']} — {r['steps']} steps ({r['started'][:16]})")
+                lines.append(f"\n{r['cycle_id']} \u2014 {r['steps']} steps ({r['started'][:16]})")
             await update.message.reply_text("\n".join(lines))
+
+        elif len(args) >= 2:
+            # Show full AI response for a specific cycle step (merged from /thought)
+            cycle_id = args[0]
+            step = args[1]
+
+            row = await self._db.fetchone(
+                """SELECT full_response, model, input_summary, parsed_result, created_at
+                   FROM orchestrator_thoughts
+                   WHERE cycle_id = ? AND step = ?""",
+                (cycle_id, step),
+            )
+            if not row:
+                await update.message.reply_text(f"No thought found for cycle '{cycle_id}', step '{step}'.")
+                return
+
+            header = f"Cycle: {cycle_id}\nStep: {step} ({row['model']})\nTime: {row['created_at']}\n"
+            if row["input_summary"]:
+                header += f"Input: {row['input_summary'][:200]}...\n"
+            header += "\n--- Response ---\n"
+
+            text = row["full_response"]
+            max_chunk = 4096 - len(header) - 50  # margin for chunk label
+
+            try:
+                if len(text) <= max_chunk:
+                    await update.message.reply_text(header + text)
+                else:
+                    # Split into chunks
+                    chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
+                    for i, chunk in enumerate(chunks):
+                        prefix = header if i == 0 else f"(part {i+1}/{len(chunks)})\n"
+                        await update.message.reply_text(prefix + chunk)
+            except Exception as e:
+                log.error("telegram.thought_send_failed", error=str(e))
 
         elif args:
             # Show steps for a specific cycle
@@ -579,8 +545,8 @@ class BotCommands:
                 return
             lines = [f"Cycle {cycle_id}:"]
             for r in rows:
-                lines.append(f"\n  {r['step']} ({r['model']}) — {r['resp_len']} chars @ {r['created_at'][:16]}")
-            lines.append(f"\nUse /thought {cycle_id} <step> to view full response.")
+                lines.append(f"\n  {r['step']} ({r['model']}) \u2014 {r['resp_len']} chars @ {r['created_at'][:16]}")
+            lines.append(f"\nUse /thoughts {cycle_id} <step> to view full response.")
             await update.message.reply_text("\n".join(lines))
 
         else:
@@ -601,57 +567,10 @@ class BotCommands:
             )
             lines = [f"Latest Cycle: {cycle_id}"]
             for r in rows:
-                lines.append(f"\n  {r['step']} ({r['model']}) — {r['resp_len']} chars")
-            lines.append(f"\nUse /thought {cycle_id} <step> to view full response.")
+                lines.append(f"\n  {r['step']} ({r['model']}) \u2014 {r['resp_len']} chars")
+            lines.append(f"\nUse /thoughts {cycle_id} <step> to view full response.")
             lines.append("Use /thoughts list to see all cycles.")
             await update.message.reply_text("\n".join(lines))
-
-    async def cmd_thought(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show full AI response for a specific cycle step.
-
-        /thought <cycle_id> <step>
-        Chunks long responses for Telegram's 4096 char limit.
-        """
-        if not self._authorized(update):
-            return
-
-        args = context.args if context.args else []
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /thought <cycle_id> <step>")
-            return
-
-        cycle_id = args[0]
-        step = args[1]
-
-        row = await self._db.fetchone(
-            """SELECT full_response, model, input_summary, parsed_result, created_at
-               FROM orchestrator_thoughts
-               WHERE cycle_id = ? AND step = ?""",
-            (cycle_id, step),
-        )
-        if not row:
-            await update.message.reply_text(f"No thought found for cycle '{cycle_id}', step '{step}'.")
-            return
-
-        header = f"Cycle: {cycle_id}\nStep: {step} ({row['model']})\nTime: {row['created_at']}\n"
-        if row["input_summary"]:
-            header += f"Input: {row['input_summary'][:200]}...\n"
-        header += "\n--- Response ---\n"
-
-        text = row["full_response"]
-        max_chunk = 4096 - len(header) - 50  # margin for chunk label
-
-        try:
-            if len(text) <= max_chunk:
-                await update.message.reply_text(header + text)
-            else:
-                # Split into chunks
-                chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
-                for i, chunk in enumerate(chunks):
-                    prefix = header if i == 0 else f"(part {i+1}/{len(chunks)})\n"
-                    await update.message.reply_text(prefix + chunk)
-        except Exception as e:
-            log.error("telegram.thought_send_failed", error=str(e))
 
     async def cmd_orchestrate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Manually trigger an orchestration cycle."""
@@ -668,7 +587,7 @@ class BotCommands:
             "Orchestration cycle triggered. You'll be notified when it completes."
         )
 
-    async def cmd_reflect_tonight(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def cmd_reflect(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Flag the next orchestration cycle to include a reflection."""
         if not self._authorized(update):
             return

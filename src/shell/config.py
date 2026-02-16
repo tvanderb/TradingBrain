@@ -52,13 +52,13 @@ class NotificationConfig:
     websocket_feed_lost: bool = True
     daily_summary: bool = True
     weekly_report: bool = True
+    orchestrator_cycle_completed: bool = True
     # High-frequency — default off for Telegram
     signal_rejected: bool = False
     scan_complete: bool = False
     paper_test_started: bool = False
     paper_test_completed: bool = False
     orchestrator_cycle_started: bool = False
-    orchestrator_cycle_completed: bool = False
     # Candidate events
     candidate_created: bool = True
     candidate_canceled: bool = True
@@ -66,6 +66,7 @@ class NotificationConfig:
     candidate_trade_executed: bool = True
     candidate_stop_triggered: bool = True
     reflection_completed: bool = True
+    signal_drought: bool = True
 
 
 @dataclass
