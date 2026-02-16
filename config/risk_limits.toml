@@ -8,7 +8,7 @@
 
 [position]
 max_position_pct = 0.25   # Max 25% of portfolio per position — emergency backstop only
-max_positions = 5          # Max 5 concurrent positions
+max_positions = 18         # Max 18 concurrent positions
 max_leverage = 1.0         # No leverage
 
 [daily]
@@ -17,9 +17,9 @@ max_daily_trades = 20      # Max trades per day
 
 [per_trade]
 max_trade_pct = 0.10       # Max 10% of portfolio per trade — emergency backstop
-default_trade_pct = 0.03   # Default 3% per trade
-default_stop_loss_pct = 0.02
-default_take_profit_pct = 0.06
+default_trade_pct = 0.06   # Default 6% per trade
+default_stop_loss_pct = 0.03
+default_take_profit_pct = 0.09
 
 [emergency]
 kill_switch = false

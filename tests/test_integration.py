@@ -137,7 +137,7 @@ def test_risk_basic_checks():
 
     # Should fail: max positions
     sig3 = Signal(symbol="ETH/USD", action=Action.BUY, size_pct=0.02)
-    check3 = rm.check_signal(sig3, portfolio_value=200, open_position_count=5)
+    check3 = rm.check_signal(sig3, portfolio_value=200, open_position_count=18)
     assert not check3.passed
     assert "Max positions" in check3.reason
 
