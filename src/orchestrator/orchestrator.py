@@ -1348,9 +1348,6 @@ This is a candidate strategy that will run in paper simulation alongside the act
                 )
                 await self._db.commit()
 
-                if self._notifier:
-                    await self._notifier.candidate_created(slot, version, eval_days)
-
                 eval_str = f"{eval_days}d" if eval_days else "indefinite"
                 return f"Candidate deployed to slot {slot} as {version} (evaluation: {eval_str})."
 
@@ -1380,8 +1377,6 @@ This is a candidate strategy that will run in paper simulation alongside the act
         if slot not in active:
             return f"Cannot cancel: slot {slot} has no running candidate."
         await self._candidate_manager.cancel_candidate(slot, decision.get("reasoning", ""))
-        if self._notifier:
-            await self._notifier.candidate_canceled(slot, reason=decision.get("reasoning", ""))
         return f"Candidate in slot {slot} canceled."
 
     async def _promote_candidate(self, decision: dict) -> str:
@@ -1434,10 +1429,6 @@ This is a candidate strategy that will run in paper simulation alongside the act
         # Signal main.py to reload strategy
         if self._scan_state:
             self._scan_state["strategy_reload_needed"] = True
-
-        if self._notifier:
-            await self._notifier.candidate_promoted(slot, version, position_handling=position_handling)
-            await self._notifier.strategy_deployed(version, 0, f"Promoted from candidate slot {slot}")
 
         return f"Candidate from slot {slot} promoted as {version}. Position handling: {position_handling}."
 
