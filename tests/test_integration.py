@@ -7543,3 +7543,264 @@ async def test_notifier_enriched_reflection():
     assert "Reflection Complete" in msg
     assert "4 predictions" in msg
     assert "Strategy doc updated" in msg
+
+
+# --- Session AB: Decision Feedback Loop ---
+
+@pytest.mark.asyncio
+async def test_orchestrator_outcome_stored():
+    """orchestrator_log.outcome column is populated when _log_orchestration is called."""
+    from src.shell.database import Database
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert with outcome column
+        await db.execute(
+            """INSERT INTO orchestrator_log
+               (date, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd, outcome)
+               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("CREATE_CANDIDATE", "{}", "", None, None, 5000, 0.50,
+             "Candidate deployed to slot 2 as v20260216_candidate (evaluation: 10d)."),
+        )
+        await db.commit()
+
+        row = await db.fetchone("SELECT outcome FROM orchestrator_log ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "Candidate deployed" in row["outcome"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_gather_since_last_cycle_structure():
+    """_gather_since_last_cycle returns correct dict structure with prior data."""
+    from src.shell.database import Database
+    from src.orchestrator.orchestrator import Orchestrator
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Insert a prior orchestration log entry
+        await db.execute(
+            """INSERT INTO orchestrator_log
+               (date, action, analysis, changes, tokens_used, cost_usd, outcome, created_at)
+               VALUES (date('now'), ?, ?, ?, ?, ?, ?, datetime('now', '-1 day'))""",
+            ("NO_CHANGE", "{}", "", 10000, 0.25, "No changes."),
+        )
+        # Insert some signals since that time
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on, rejected_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("BTC/USD", "BUY", 0.02, 0.8, "DAY", "test", 1, None),
+        )
+        await db.execute(
+            "INSERT INTO signals (symbol, action, size_pct, confidence, intent, reasoning, acted_on, rejected_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ETH/USD", "BUY", 0.02, 0.7, "DAY", "test", 0, "Max positions"),
+        )
+        # Insert scan results
+        await db.execute(
+            "INSERT INTO scan_results (timestamp, symbol, price, spread, created_at) VALUES (datetime('now'), ?, ?, ?, datetime('now'))",
+            ("BTC/USD", 50000, 0.5),
+        )
+        # Insert activity log entries
+        await db.execute(
+            "INSERT INTO activity_log (timestamp, category, severity, summary) VALUES (datetime('now', 'utc'), ?, ?, ?)",
+            ("RISK", "warning", "Trading halted: daily loss limit"),
+        )
+        await db.commit()
+
+        # Create a minimal orchestrator just to call _gather_since_last_cycle
+        orch = object.__new__(Orchestrator)
+        orch._db = db
+
+        result = await orch._gather_since_last_cycle()
+        assert result is not None
+        assert result["last_decision"]["action"] == "NO_CHANGE"
+        assert result["last_decision"]["outcome"] == "No changes."
+        assert result["hours_since_last_cycle"] > 0
+        assert result["scanning"]["active_signals"]["total"] >= 2
+        assert result["scanning"]["active_signals"]["executed"] >= 1
+        assert result["scanning"]["active_signals"]["rejected"] >= 1
+        assert "Max positions" in result["scanning"]["rejection_reasons"]
+        assert result["scanning"]["total_scans"] >= 1
+        assert result["event_summary"]["warnings"] >= 1
+        assert len(result["events"]) >= 1
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_since_last_cycle_filters_scan_events():
+    """SCAN category events are excluded from since-last-cycle activity."""
+    from src.shell.database import Database
+    from src.orchestrator.orchestrator import Orchestrator
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Prior log entry
+        await db.execute(
+            "INSERT INTO orchestrator_log (date, action, analysis, changes, tokens_used, cost_usd, outcome, created_at) "
+            "VALUES (date('now'), ?, ?, ?, ?, ?, ?, datetime('now', '-1 day'))",
+            ("NO_CHANGE", "{}", "", 5000, 0.10, ""),
+        )
+        # Insert SCAN event (should be excluded)
+        await db.execute(
+            "INSERT INTO activity_log (timestamp, category, severity, summary) VALUES (datetime('now', 'utc'), ?, ?, ?)",
+            ("SCAN", "info", "Scan completed 9 symbols"),
+        )
+        # Insert TRADE event (should be included)
+        await db.execute(
+            "INSERT INTO activity_log (timestamp, category, severity, summary) VALUES (datetime('now', 'utc'), ?, ?, ?)",
+            ("TRADE", "info", "BUY BTC/USD executed"),
+        )
+        await db.commit()
+
+        orch = object.__new__(Orchestrator)
+        orch._db = db
+
+        result = await orch._gather_since_last_cycle()
+        assert result is not None
+        categories = [e["category"] for e in result["events"]]
+        assert "SCAN" not in categories
+        assert "TRADE" in categories
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_since_last_cycle_first_run():
+    """_gather_since_last_cycle returns None when no prior cycle exists."""
+    from src.shell.database import Database
+    from src.orchestrator.orchestrator import Orchestrator
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        orch = object.__new__(Orchestrator)
+        orch._db = db
+
+        result = await orch._gather_since_last_cycle()
+        assert result is None
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_candidate_signal_count_in_context():
+    """get_context_for_orchestrator includes signal_count per candidate."""
+    from src.shell.database import Database
+    from src.candidates.manager import CandidateManager
+    from src.candidates.runner import CandidateRunner
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Create a minimal config
+        from src.shell.config import load_config
+        config = load_config()
+
+        mgr = CandidateManager(config, db)
+
+        # Mock a running candidate in slot 1
+        mock_runner = MagicMock(spec=CandidateRunner)
+        mock_runner.version = "test_v1"
+        mock_runner.get_status.return_value = {
+            "slot": 1, "status": "running", "version": "test_v1",
+            "portfolio_value": 1000, "cash": 800, "positions": 0,
+            "total_trades": 2, "win_rate": 0.5,
+        }
+        mgr._runners[1] = mock_runner
+
+        # Insert DB record for this candidate
+        await db.execute(
+            "INSERT INTO candidates (slot, strategy_version, code, code_hash, portfolio_snapshot, status, evaluation_duration_days, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (1, "test_v1", "# code", "abc123", '{"cash": 1000}', "running", 10, "Test candidate"),
+        )
+        # Insert some candidate signals
+        for _ in range(5):
+            await db.execute(
+                "INSERT INTO candidate_signals (candidate_slot, symbol, action, size_pct, acted_on) VALUES (?, ?, ?, ?, ?)",
+                (1, "BTC/USD", "BUY", 0.02, 1),
+            )
+        await db.commit()
+
+        context = await mgr.get_context_for_orchestrator()
+        slot1 = [c for c in context if c.get("slot") == 1][0]
+        assert slot1["signal_count"] == 5
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_format_since_last_cycle():
+    """_format_since_last_cycle produces readable prompt text."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    since = {
+        "last_decision": {
+            "action": "CREATE_CANDIDATE",
+            "outcome": "Candidate deployed to slot 2.",
+            "created_at": "2026-02-16 08:34:05",
+            "tokens_used": 45000,
+            "cost_usd": 1.23,
+        },
+        "hours_since_last_cycle": 24.5,
+        "scanning": {
+            "total_scans": 288,
+            "active_signals": {"total": 3, "executed": 1, "rejected": 2},
+            "rejection_reasons": {"Max positions": 2},
+            "candidate_signals": {2: {"total": 5, "executed": 3}},
+        },
+        "events": [
+            {"timestamp": "2026-02-16 12:30", "category": "RISK", "severity": "warning", "summary": "Trading halted"},
+        ],
+        "event_summary": {"errors": 0, "warnings": 1, "risk_events": 1, "restarts": 0},
+    }
+
+    text = Orchestrator._format_since_last_cycle(since)
+
+    assert "SINCE YOUR LAST CYCLE" in text
+    assert "CREATE_CANDIDATE" in text
+    assert "Candidate deployed to slot 2." in text
+    assert "24h 30m ago" in text
+    assert "$1.23" in text
+    assert "288 scans" in text
+    assert "3 signals (1 executed, 2 rejected)" in text
+    assert "Max positions (2)" in text
+    assert "Candidate slot 2" in text
+    assert "Trading halted" in text
+    assert "0 errors, 1 warnings, 0 restarts" in text

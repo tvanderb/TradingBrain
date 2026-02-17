@@ -392,6 +392,12 @@ class CandidateManager:
                     status["created_at"] = row["created_at"]
                     status["evaluation_duration_days"] = row["evaluation_duration_days"]
                     status["description"] = row["description"]
+                # Add total signal count for this candidate
+                sig_row = await self._db.fetchone(
+                    "SELECT COUNT(*) as count FROM candidate_signals WHERE candidate_slot = ?",
+                    (slot,),
+                )
+                status["signal_count"] = sig_row["count"] if sig_row else 0
                 context.append(status)
             else:
                 context.append({"slot": slot, "status": "empty"})

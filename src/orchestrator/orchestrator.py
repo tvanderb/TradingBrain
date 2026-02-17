@@ -789,7 +789,7 @@ class Orchestrator:
             await self._store_predictions(decision)
 
             # 5. Log orchestration
-            await self._log_orchestration(decision, deployed_version=deployed_version)
+            await self._log_orchestration(decision, deployed_version=deployed_version, outcome=report)
 
             # 6. Data maintenance
             await self._data_store.run_nightly_maintenance()
@@ -818,6 +818,113 @@ class Orchestrator:
             raise
         finally:
             self._running = False
+
+    async def _gather_since_last_cycle(self) -> dict | None:
+        """Gather feedback about what happened since the last orchestrator cycle.
+
+        Queries orchestrator_log, signals, candidate_signals, scan_results,
+        and activity_log to build a structured summary. Returns None on first run.
+        """
+        # A. Last decision
+        last = await self._db.fetchone(
+            "SELECT action, outcome, strategy_version_to, tokens_used, cost_usd, created_at "
+            "FROM orchestrator_log ORDER BY id DESC LIMIT 1"
+        )
+        if not last:
+            return None
+
+        since_ts = last["created_at"]  # UTC timestamp of last cycle
+
+        # Hours since last cycle
+        try:
+            last_dt = datetime.strptime(since_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            # Fallback for date-only format
+            try:
+                last_dt = datetime.strptime(since_ts, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                last_dt = datetime.now(timezone.utc)
+        hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+
+        # B. Active strategy signals since last cycle
+        sig_totals = await self._db.fetchone(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN acted_on = 1 THEN 1 ELSE 0 END) as executed, "
+            "SUM(CASE WHEN rejected_reason IS NOT NULL THEN 1 ELSE 0 END) as rejected "
+            "FROM signals WHERE created_at >= ?",
+            (since_ts,),
+        )
+        rejection_rows = await self._db.fetchall(
+            "SELECT rejected_reason, COUNT(*) as count "
+            "FROM signals WHERE created_at >= ? AND rejected_reason IS NOT NULL "
+            "GROUP BY rejected_reason",
+            (since_ts,),
+        )
+        rejection_reasons = {r["rejected_reason"]: r["count"] for r in rejection_rows}
+
+        # C. Candidate signals since last cycle
+        cand_sig_rows = await self._db.fetchall(
+            "SELECT candidate_slot, COUNT(*) as total, "
+            "SUM(CASE WHEN acted_on = 1 THEN 1 ELSE 0 END) as executed "
+            "FROM candidate_signals WHERE created_at >= ? "
+            "GROUP BY candidate_slot",
+            (since_ts,),
+        )
+        candidate_signals = {
+            r["candidate_slot"]: {"total": r["total"], "executed": r["executed"] or 0}
+            for r in cand_sig_rows
+        }
+
+        # D. Scan count
+        scan_row = await self._db.fetchone(
+            "SELECT COUNT(*) as count FROM scan_results WHERE created_at >= ?",
+            (since_ts,),
+        )
+        total_scans = scan_row["count"] if scan_row else 0
+
+        # E. Activity log (exclude SCAN category — too noisy)
+        events = await self._db.fetchall(
+            "SELECT timestamp, category, severity, summary "
+            "FROM activity_log "
+            "WHERE timestamp >= ? AND category != 'SCAN' "
+            "ORDER BY id ASC LIMIT 50",
+            (since_ts,),
+        )
+        events = [dict(e) for e in events]
+
+        # F. Event summary
+        errors = sum(1 for e in events if e["severity"] == "error")
+        warnings = sum(1 for e in events if e["severity"] == "warning")
+        risk_events = sum(1 for e in events if e["category"] == "RISK")
+        restarts = sum(1 for e in events if e["category"] == "SYSTEM" and "restart" in (e["summary"] or "").lower())
+
+        return {
+            "last_decision": {
+                "action": last["action"],
+                "outcome": last["outcome"] or "",
+                "created_at": since_ts,
+                "tokens_used": last["tokens_used"] or 0,
+                "cost_usd": last["cost_usd"] or 0,
+            },
+            "hours_since_last_cycle": round(hours_since, 1),
+            "scanning": {
+                "total_scans": total_scans,
+                "active_signals": {
+                    "total": sig_totals["total"] or 0,
+                    "executed": sig_totals["executed"] or 0,
+                    "rejected": sig_totals["rejected"] or 0,
+                },
+                "rejection_reasons": rejection_reasons,
+                "candidate_signals": candidate_signals,
+            },
+            "events": events,
+            "event_summary": {
+                "errors": errors,
+                "warnings": warnings,
+                "risk_events": risk_events,
+                "restarts": restarts,
+            },
+        }
 
     async def _gather_context(self) -> dict:
         """Collect all context needed for analysis.
@@ -984,6 +1091,13 @@ class Orchestrator:
             log.warning("orchestrator.context_error", section="observations", error=str(e))
             recent_observations = []
 
+        # --- 7. SINCE LAST CYCLE (decision feedback loop) ---
+        try:
+            since_last_cycle = await self._gather_since_last_cycle()
+        except Exception as e:
+            log.warning("orchestrator.context_error", section="since_last_cycle", error=str(e))
+            since_last_cycle = None
+
         return {
             # Ground truth (rigid)
             "ground_truth": ground_truth,
@@ -1006,6 +1120,7 @@ class Orchestrator:
             "candidates": candidate_context,
             "recent_observations": [dict(o) for o in recent_observations],
             "signal_drought": drought_info,
+            "since_last_cycle": since_last_cycle,
         }
 
     async def _build_time_context(self) -> str:
@@ -1044,10 +1159,63 @@ class Orchestrator:
             f"{last_line}"
         )
 
+    @staticmethod
+    def _format_since_last_cycle(since: dict) -> str:
+        """Format the since-last-cycle feedback section for the analysis prompt."""
+        ld = since["last_decision"]
+        hours = since["hours_since_last_cycle"]
+        h = int(hours)
+        m = int((hours - h) * 60)
+
+        lines = ["---", "", "## SINCE YOUR LAST CYCLE", ""]
+
+        # Last decision
+        lines.append(f"Last decision: {ld['action']}")
+        if ld["outcome"]:
+            lines.append(f"  Outcome: {ld['outcome']}")
+        lines.append(f"  Time: {ld['created_at']} UTC ({h}h {m}m ago)")
+        lines.append(f"  Cost: ${ld['cost_usd']:.2f} ({ld['tokens_used']:,} tokens)")
+        lines.append("")
+
+        # Scanning
+        sc = since["scanning"]
+        lines.append(f"Scanning: {sc['total_scans']} scans since last cycle")
+        active = sc["active_signals"]
+        lines.append(f"  Active strategy: {active['total']} signals ({active['executed']} executed, {active['rejected']} rejected)")
+        for slot, counts in sorted(sc.get("candidate_signals", {}).items()):
+            rejected = counts["total"] - counts["executed"]
+            if rejected > 0:
+                lines.append(f"  Candidate slot {slot}: {counts['total']} signals ({counts['executed']} executed, {rejected} rejected)")
+            else:
+                lines.append(f"  Candidate slot {slot}: {counts['total']} signals ({counts['executed']} executed)")
+        if sc["rejection_reasons"]:
+            reasons = ", ".join(f"{r} ({c})" for r, c in sc["rejection_reasons"].items())
+            lines.append(f"  Rejection reasons: {reasons}")
+        lines.append("")
+
+        # System events
+        events = since["events"]
+        if events:
+            lines.append("System events (excluding routine scans):")
+            for e in events:
+                lines.append(f"  [{e['timestamp']}] {e['category']} {e['severity']} — {e['summary']}")
+            summary = since["event_summary"]
+            lines.append(f"  Summary: {summary['errors']} errors, {summary['warnings']} warnings, {summary['restarts']} restarts")
+        else:
+            lines.append("System events: none")
+
+        return "\n".join(lines)
+
     async def _analyze(self, context: dict) -> dict:
         """Opus analyzes performance and decides on action."""
         time_context = await self._build_time_context()
+
+        # Build since-last-cycle section (empty string if first run)
+        since = context.get("since_last_cycle")
+        since_section = self._format_since_last_cycle(since) if since else ""
+
         prompt = f"""{time_context}
+{since_section}
 
 Current fund state for nightly review.
 
@@ -2152,7 +2320,7 @@ The orchestrator wants to change this module because: {changes}"""
             log.info("orchestrator.predictions_stored", count=count)
 
     async def _log_orchestration(
-        self, decision: dict, deployed_version: str | None = None
+        self, decision: dict, deployed_version: str | None = None, outcome: str = ""
     ) -> None:
         """Record orchestration decision in database."""
         # Get current strategy version — if we just deployed, the new version has retired_at IS NULL
@@ -2178,8 +2346,8 @@ The orchestrator wants to change this module because: {changes}"""
 
         await self._db.execute(
             """INSERT INTO orchestrator_log
-               (date, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd)
-               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?)""",
+               (date, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd, outcome)
+               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 decision.get("decision", "UNKNOWN"),
                 json.dumps(decision, default=str),
@@ -2188,6 +2356,7 @@ The orchestrator wants to change this module because: {changes}"""
                 deployed_version,
                 tokens_used,
                 cost_today,
+                outcome,
             ),
         )
         await self._db.commit()

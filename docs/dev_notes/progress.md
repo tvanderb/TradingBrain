@@ -3050,3 +3050,38 @@ Critical gaps:
 - **Thought truncation**: 500 chars keeps token cost low while giving Haiku the orchestrator's latest reasoning
 - **Static system facts in prompt**: Pairs, schedule, candidate system, long-only restriction — always true, cheap, unlocks many architectural questions
 - **Command redirects**: Haiku told to suggest /positions, /risk, /candidates, Grafana when those serve better than a text answer
+
+## Session AB (2026-02-16) — Orchestrator Decision Feedback Loop
+
+### Problem
+The orchestrator operates in "present-only" mode. Every cycle, Opus receives a comprehensive snapshot of current fund state but **no feedback about its own previous decisions**. It literally said *"The fact that I'm being triggered again suggests the previous cycle may not have successfully created the candidate. I need to actually execute this time."* — guessing whether its own action succeeded.
+
+Root causes:
+- `orchestrator_log` has full decision history but was **never queried** in `_gather_context()`
+- `activity_log` captures inter-cycle events but was **never queried** by the orchestrator
+- Decision outcomes (success/failure) were **not stored** — `_create_candidate()` returns a string but it wasn't persisted
+- Rejected signal breakdown exists in `signals` table (`acted_on`, `rejected_reason`) but was **never surfaced**
+- Candidate signal counts exist in `candidate_signals` table but were **not included** in candidate status
+
+### Solution
+Added a structured `## SINCE YOUR LAST CYCLE` section to the orchestrator's analysis prompt, pulling from existing data sources that were already populated but never queried.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `src/shell/database.py` | Added `outcome` column migration to `orchestrator_log` |
+| `src/orchestrator/orchestrator.py` | `_gather_since_last_cycle()` helper, `_format_since_last_cycle()` formatter, added to `_gather_context()`, inserted section into `_analyze()` prompt, `outcome` param to `_log_orchestration()` |
+| `src/candidates/manager.py` | Added `signal_count` to `get_context_for_orchestrator()` |
+| `tests/test_integration.py` | 6 new tests |
+| `docs/dev_notes/progress.md` | This entry |
+
+### Key Design Decisions
+- **Section placement**: After time context, before "Current fund state" — first thing orchestrator reads
+- **SCAN events excluded**: Too noisy (288/day). Activity log filtered to non-SCAN categories only.
+- **50 event limit**: Cap activity log entries to keep token usage reasonable
+- **Graceful first run**: Returns `None` if no prior cycle exists, section omitted entirely
+- **Static method for formatting**: `_format_since_last_cycle()` is pure function, easy to test
+
+### Test Results
+- **241/241 passing** (6 new tests)
