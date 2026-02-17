@@ -52,7 +52,7 @@ echo ""
 
 # Common rsync options
 RSYNC_BASE=(
-    rsync -az --itemize-changes
+    rsync -az --checksum --itemize-changes
     -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new"
     --exclude='__pycache__'
     --exclude='*.pyc'
@@ -67,25 +67,28 @@ sync_and_detect() {
     local dest="$2"
     local tier="$3"
     local label="$4"
-    local extra_args=("${@:5}")
+    shift 4
+    local extra_args=("$@")
 
     local output
     if $DRY_RUN; then
-        output=$("${RSYNC_BASE[@]}" --dry-run "${extra_args[@]}" "$src" "$SSH_USER@$SSH_HOST:$dest" 2>&1 || true)
+        output=$("${RSYNC_BASE[@]}" --dry-run ${extra_args[@]+"${extra_args[@]}"} "$src" "$SSH_USER@$SSH_HOST:$dest" 2>&1 || true)
     else
-        output=$("${RSYNC_BASE[@]}" "${extra_args[@]}" "$src" "$SSH_USER@$SSH_HOST:$dest" 2>&1 || true)
+        output=$("${RSYNC_BASE[@]}" ${extra_args[@]+"${extra_args[@]}"} "$src" "$SSH_USER@$SSH_HOST:$dest" 2>&1 || true)
     fi
 
-    # Check if any files were transferred (lines starting with > or c)
+    # Check if any files were transferred
+    # rsync --itemize-changes format: YXcstpoguax
+    #   < = sent to remote, > = received from remote, c = local change, * = message (e.g. *deleting)
     local changed_files
-    changed_files=$(echo "$output" | grep -c '^[>c]' || true)
+    changed_files=$(echo "$output" | grep -c '^[<>c*]' || true)
 
     if [[ "$changed_files" -gt 0 ]]; then
         echo "[$label] $changed_files file(s) changed"
         if [[ -n "$output" ]]; then
-            echo "$output" | grep '^[>c]' | head -10
+            echo "$output" | grep '^[<>c*]' | head -10
             local total
-            total=$(echo "$output" | grep -c '^[>c]' || true)
+            total=$(echo "$output" | grep -c '^[<>c*]' || true)
             if [[ "$total" -gt 10 ]]; then
                 echo "  ... and $((total - 10)) more"
             fi

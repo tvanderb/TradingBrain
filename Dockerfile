@@ -9,12 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python deps only — parsed from pyproject.toml
 COPY pyproject.toml .
-RUN pip install --no-cache-dir $(python3 -c "
-import tomllib
-with open('pyproject.toml', 'rb') as f:
-    deps = tomllib.load(f)['project']['dependencies']
-print(' '.join(deps))
-")
+RUN pip install --no-cache-dir $(python3 -c "import tomllib; deps=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; print(' '.join(deps))")
 
 # Create runtime directories and non-root user
 RUN groupadd -r brain && useradd -r -g brain -d /app brain && \
