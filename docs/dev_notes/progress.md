@@ -3012,3 +3012,41 @@ Original design doc proposed expanding to 90 days. Investigation revealed code a
 - Future: may expand to multi-step research pipeline when sufficient history exists
 
 ### Tests: 230/230 passing
+
+---
+
+## Session AA (2026-02-16) — /ask Context Enrichment
+
+### Context
+Live system running on VPS. Earlier this session: fixed observations dedup bug (UNIQUE(date) constraint), added manual trigger awareness to orchestrator prompt, removed duplicate candidate notifications. User then proposed stress-testing the `/ask` command by imagining 32 realistic investor questions and scoring them against what Haiku actually receives.
+
+### Problem
+The `/ask` command assembled only 6 context blocks for Haiku: portfolio summary (value/cash/count), risk state (daily P&L/halted/losses), 5 recent trades, latest observation, strategy version, and 30 activity log entries. Scoring 32 realistic questions against this context: **3 answerable, 12 partial, 17 fail.** Over half of reasonable investor questions hit a wall.
+
+Critical gaps:
+- **No open positions** — only position count, not symbols/entries/P&L/SL/TP
+- **No risk limits** — Haiku couldn't explain safety parameters
+- **No candidates** — couldn't explain what the orchestrator is testing
+- **No system architecture knowledge** — zero awareness of pairs, schedule, long-only restriction
+- **No close_reason on trades** — couldn't explain why exits happened
+- **No orchestrator reasoning** — only observation summary, not the thought spool
+
+### Solution
+
+**System prompt rewrite**: Added conciseness directive ("answer as briefly as accurate"), anti-hallucination reinforcement, command redirect guidance, and static system facts (pairs, long-only, Kraken, schedule, candidate system, available commands, Grafana).
+
+**6 new context blocks** (all from already-accessible objects):
+1. **Open positions**: symbol, tag, intent, qty, entry, current price, P&L%, SL, TP
+2. **Risk limits + drawdown**: config limits + current drawdown from peak
+3. **Candidates**: slot status, version, value, P&L, trades, win rate
+4. **System config**: mode, strategy version, status, symbol count
+5. **close_reason on trades**: added to existing trade query
+6. **Latest orchestrator thought**: most recent reasoning from thought spool (truncated 500 chars)
+
+**Re-score**: 3 Good → 18 Good. 17 Fail → 3 Fail. Remaining fails are historical aggregates (worst trade ever, total fees, uptime) — Haiku redirects to Grafana.
+
+### Design Decisions
+- **Conciseness wording**: "Answer as briefly as accurate — a single number or sentence is fine. Elaborate only when the user asks why, how, or to explain something." Distinguishes data questions from understanding questions.
+- **Thought truncation**: 500 chars keeps token cost low while giving Haiku the orchestrator's latest reasoning
+- **Static system facts in prompt**: Pairs, schedule, candidate system, long-only restriction — always true, cheap, unlocks many architectural questions
+- **Command redirects**: Haiku told to suggest /positions, /risk, /candidates, Grafana when those serve better than a text answer

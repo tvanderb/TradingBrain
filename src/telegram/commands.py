@@ -21,9 +21,22 @@ log = structlog.get_logger()
 # System prompt for the /ask Haiku assistant
 ASK_SYSTEM_PROMPT = (
     "You are the investor relations assistant for an autonomous crypto trading fund. "
-    "You explain system behavior, recent decisions, and current state in clear, concise terms. "
-    "You are grounded in the data provided — do not speculate beyond what the data shows. "
-    "If the data doesn't answer the question, say so honestly."
+    "Answer as briefly as accurate — a single number or sentence is fine. "
+    "Elaborate only when the user asks why, how, or to explain something.\n\n"
+    "You are grounded in the data provided — never invent numbers or speculate beyond what the data shows. "
+    "If the data doesn't contain the answer, say \"I don't have that data\" rather than guessing. "
+    "Redirect when appropriate: if a question would be better answered by a specific command "
+    "or Grafana, say so (e.g. \"Run /positions for live P&L\" or \"Check Grafana for historical charts\").\n\n"
+    "System facts (always true):\n"
+    "- Long-only fund (no shorting — Canadian regulatory restriction)\n"
+    "- 9 pairs: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, AVAX, DOT (all /USD)\n"
+    "- Exchange: Kraken. Maker 0.25%, Taker 0.40%\n"
+    "- Orchestrator runs nightly 12-3am EST, can also be triggered manually via /orchestrate\n"
+    "- Candidate system: up to 3 candidate strategies run paper simulations alongside the active strategy\n"
+    "- Strategy is a single Python file rewritten by AI. Orchestrator (Opus) reviews, backtests, then deploys or creates candidates\n"
+    "- Risk limits are emergency backstops, not targets\n"
+    "- Available commands: /fund, /positions, /trades, /risk, /outlook, /candidates, /thoughts, /ask\n"
+    "- Grafana dashboard available for historical charts and detailed metrics"
 )
 
 
@@ -397,6 +410,15 @@ class BotCommands:
             # Assemble context
             ctx_parts = []
 
+            # System config
+            mode = self._config.mode
+            sys_status = "PAUSED" if self._scan_state.get("paused") else "ACTIVE"
+            strategy_ver = self._scan_state.get("strategy_version", "unknown")
+            ctx_parts.append(
+                f"System: {mode} mode, strategy {strategy_ver}, status {sys_status}, "
+                f"{len(self._config.symbols)} symbols"
+            )
+
             # Portfolio state
             if self._portfolio:
                 value = await self._portfolio.total_value()
@@ -405,27 +427,92 @@ class BotCommands:
                     f"Positions: {self._portfolio.position_count}"
                 )
 
-            # Risk state
-            if self._risk:
-                ctx_parts.append(
-                    f"Risk: Daily P&L ${self._risk.daily_pnl:+.2f}, "
-                    f"Halted: {self._risk.is_halted}, "
-                    f"Consecutive Losses: {self._risk.consecutive_losses}"
-                )
+                # Open positions detail
+                if self._portfolio.positions:
+                    live_prices = {}
+                    if self._scan_state.get("symbols"):
+                        for sym, data in self._scan_state["symbols"].items():
+                            live_prices[sym] = data.get("price", 0)
+                    pos_lines = []
+                    for tag, p in self._portfolio.positions.items():
+                        symbol = p["symbol"]
+                        entry = p["avg_entry"]
+                        current = live_prices.get(symbol) or p.get("current_price") or entry
+                        pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+                        sl = p.get("stop_loss")
+                        tp = p.get("take_profit")
+                        sl_str = f"SL ${sl:.2f}" if sl else "no SL"
+                        tp_str = f"TP ${tp:.2f}" if tp else "no TP"
+                        pos_lines.append(
+                            f"  {symbol} [{tag}] {p.get('intent', 'DAY')} — "
+                            f"{p['qty']:.6f} @ ${entry:.2f}, now ${current:.2f} ({pnl_pct:+.1f}%), "
+                            f"{sl_str}, {tp_str}"
+                        )
+                    ctx_parts.append("Open positions:\n" + "\n".join(pos_lines))
 
-            # Recent trades
+            # Risk state + limits + drawdown
+            if self._risk:
+                r = self._config.risk
+                risk_line = (
+                    f"Risk: Daily P&L ${self._risk.daily_pnl:+.2f}, "
+                    f"Halted: {self._risk.is_halted}"
+                )
+                if self._risk.is_halted:
+                    risk_line += f" ({self._risk.halt_reason})"
+                risk_line += f", Consecutive Losses: {self._risk.consecutive_losses}"
+                ctx_parts.append(risk_line)
+
+                limits_line = (
+                    f"Risk limits: {r.max_trade_pct:.0%} max/trade, "
+                    f"{r.max_positions} max positions, "
+                    f"{r.max_daily_loss_pct:.0%} max daily loss, "
+                    f"{r.max_drawdown_pct:.0%} max drawdown"
+                )
+                if self._risk.peak_portfolio is not None and self._portfolio:
+                    value = await self._portfolio.total_value()
+                    drawdown = (self._risk.peak_portfolio - value) / self._risk.peak_portfolio
+                    limits_line += f"\nCurrent drawdown: {drawdown:.1%} from peak (${self._risk.peak_portfolio:.2f})"
+                ctx_parts.append(limits_line)
+
+            # Recent trades (with close_reason)
             trades = await self._db.fetchall(
-                "SELECT symbol, side, pnl, pnl_pct, fees, closed_at FROM trades "
+                "SELECT symbol, side, pnl, pnl_pct, fees, closed_at, close_reason FROM trades "
                 "WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 5"
             )
             if trades:
                 trade_lines = []
                 for t in trades:
                     pnl = t.get("pnl") or 0
+                    reason = t.get("close_reason") or ""
+                    reason_str = f" ({reason})" if reason else ""
                     trade_lines.append(
-                        f"  {t['symbol']} {t['side']} P&L=${pnl:+.2f} ({t['closed_at'][:10]})"
+                        f"  {t['symbol']} {t['side']} P&L=${pnl:+.2f}{reason_str} ({t['closed_at'][:10]})"
                     )
                 ctx_parts.append("Recent trades:\n" + "\n".join(trade_lines))
+
+            # Candidates
+            if self._candidate_manager:
+                try:
+                    slots = await self._candidate_manager.get_context_for_orchestrator()
+                    cand_lines = []
+                    for s in slots:
+                        slot_num = s.get("slot", "?")
+                        status = s.get("status", "empty")
+                        if status == "empty":
+                            cand_lines.append(f"  Slot {slot_num}: empty")
+                        else:
+                            version = s.get("version", "?")
+                            cand_val = s.get("total_value", 0)
+                            cand_pnl = s.get("pnl", 0)
+                            cand_trades = s.get("trade_count", 0)
+                            cand_wr = s.get("win_rate", 0)
+                            cand_lines.append(
+                                f"  Slot {slot_num}: {version} — ${cand_val:.2f}, "
+                                f"P&L ${cand_pnl:+.2f}, {cand_trades} trades, {cand_wr*100:.0f}% win"
+                            )
+                    ctx_parts.append("Candidates:\n" + "\n".join(cand_lines))
+                except Exception:
+                    pass
 
             # Latest orchestrator observations
             obs = await self._db.fetchone(
@@ -438,12 +525,22 @@ class BotCommands:
                 if obs["strategy_assessment"]:
                     ctx_parts.append(f"Strategy assessment: {obs['strategy_assessment']}")
 
+            # Latest orchestrator thought (truncated)
+            thought = await self._db.fetchone(
+                "SELECT full_response FROM orchestrator_thoughts ORDER BY created_at DESC LIMIT 1"
+            )
+            if thought and thought["full_response"]:
+                text = thought["full_response"][:500]
+                if len(thought["full_response"]) > 500:
+                    text += "..."
+                ctx_parts.append(f"Latest orchestrator reasoning:\n  {text}")
+
             # Strategy version
             ver = await self._db.fetchone(
                 "SELECT version FROM strategy_versions ORDER BY deployed_at DESC LIMIT 1"
             )
             if ver:
-                ctx_parts.append(f"Strategy version: {ver['version']}")
+                ctx_parts.append(f"Active strategy version: {ver['version']}")
 
             # Recent activity timeline
             if self._activity_logger:

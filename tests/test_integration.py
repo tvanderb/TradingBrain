@@ -1766,6 +1766,7 @@ async def test_telegram_ask_command():
         portfolio.total_value = AsyncMock(return_value=200.0)
         portfolio.cash = 180.0
         portfolio.position_count = 0
+        portfolio.positions = {}
 
         ai = MagicMock()
         ai.ask_haiku = AsyncMock(return_value="The fund is currently stable with no open positions.")
@@ -6079,6 +6080,249 @@ async def test_ask_context_includes_activity():
         await db.close()
     finally:
         os.unlink(db_path)
+
+
+# --- Session AA: /ask Context Enrichment Tests ---
+
+
+@pytest.mark.asyncio
+async def test_ask_context_includes_positions():
+    """AA1: /ask context includes open position details (symbol, entry, P&L, SL/TP)."""
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        config = load_config()
+        risk = RiskManager(config.risk)
+
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=1000.0)
+        portfolio.cash = 800.0
+        portfolio.position_count = 1
+        portfolio.positions = {
+            "auto_BTC_001": {
+                "symbol": "BTC/USD",
+                "avg_entry": 95000.0,
+                "qty": 0.001,
+                "current_price": 97000.0,
+                "stop_loss": 92000.0,
+                "take_profit": 105000.0,
+                "intent": "SWING",
+            }
+        }
+
+        mock_ai = MagicMock()
+        mock_ai.ask_haiku = AsyncMock(return_value="BTC is up 2.1%.")
+
+        config.telegram.allowed_user_ids = [12345]
+        commands = BotCommands(
+            config=config, db=db, scan_state={},
+            portfolio_tracker=portfolio, risk_manager=risk, ai_client=mock_ai,
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["what", "positions", "am", "I", "in?"]
+
+        await commands.cmd_ask(update, context)
+
+        mock_ai.ask_haiku.assert_called_once()
+        prompt = mock_ai.ask_haiku.call_args[0][0]
+        assert "BTC/USD" in prompt
+        assert "auto_BTC_001" in prompt
+        assert "SWING" in prompt
+        assert "95000" in prompt
+        assert "SL $92000" in prompt
+        assert "TP $105000" in prompt
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_context_includes_risk_limits():
+    """AA2: /ask context includes risk limits and drawdown."""
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        config = load_config()
+        risk = RiskManager(config.risk)
+        risk._peak_portfolio = 1100.0
+
+        portfolio = MagicMock()
+        portfolio.total_value = AsyncMock(return_value=1000.0)
+        portfolio.cash = 1000.0
+        portfolio.position_count = 0
+        portfolio.positions = {}
+
+        mock_ai = MagicMock()
+        mock_ai.ask_haiku = AsyncMock(return_value="Drawdown is 9.1%.")
+
+        config.telegram.allowed_user_ids = [12345]
+        commands = BotCommands(
+            config=config, db=db, scan_state={},
+            portfolio_tracker=portfolio, risk_manager=risk, ai_client=mock_ai,
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["drawdown?"]
+
+        await commands.cmd_ask(update, context)
+
+        prompt = mock_ai.ask_haiku.call_args[0][0]
+        assert "Risk limits:" in prompt
+        assert "max drawdown" in prompt
+        assert "drawdown:" in prompt.lower()
+        assert "peak" in prompt.lower()
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_context_includes_candidates():
+    """AA3: /ask context includes candidate strategy status."""
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        config = load_config()
+
+        mock_ai = MagicMock()
+        mock_ai.ask_haiku = AsyncMock(return_value="Candidate in slot 2.")
+
+        mock_cm = MagicMock()
+        mock_cm.get_context_for_orchestrator = AsyncMock(return_value=[
+            {"slot": 1, "status": "empty"},
+            {"slot": 2, "status": "running", "version": "v003", "total_value": 1000.0,
+             "pnl": 12.0, "trade_count": 3, "win_rate": 0.67},
+            {"slot": 3, "status": "empty"},
+        ])
+
+        config.telegram.allowed_user_ids = [12345]
+        commands = BotCommands(
+            config=config, db=db, scan_state={}, ai_client=mock_ai,
+        )
+        commands.set_candidate_manager(mock_cm)
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["any", "candidates?"]
+
+        await commands.cmd_ask(update, context)
+
+        prompt = mock_ai.ask_haiku.call_args[0][0]
+        assert "Candidates:" in prompt
+        assert "Slot 1: empty" in prompt
+        assert "v003" in prompt
+        assert "67%" in prompt
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_context_includes_thought():
+    """AA4: /ask context includes latest orchestrator thought (truncated)."""
+    from src.shell.database import Database
+    from src.telegram.commands import BotCommands
+    from src.shell.config import load_config
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        config = load_config()
+
+        # Insert a thought into DB
+        await db.execute(
+            "INSERT INTO orchestrator_thoughts (cycle_id, step, full_response, model) "
+            "VALUES (?, ?, ?, ?)",
+            ("cycle_1", "analysis", "The market shows consolidation with BTC holding above 95k support.",
+             "opus"),
+        )
+        await db.commit()
+
+        mock_ai = MagicMock()
+        mock_ai.ask_haiku = AsyncMock(return_value="Market is consolidating.")
+
+        config.telegram.allowed_user_ids = [12345]
+        commands = BotCommands(
+            config=config, db=db, scan_state={}, ai_client=mock_ai,
+        )
+
+        update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 12345
+        update.message = AsyncMock()
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.args = ["what", "does", "the", "orchestrator", "think?"]
+
+        await commands.cmd_ask(update, context)
+
+        prompt = mock_ai.ask_haiku.call_args[0][0]
+        assert "orchestrator reasoning" in prompt.lower()
+        assert "consolidation" in prompt
+        assert "95k" in prompt
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_system_prompt_contains_system_facts():
+    """AA5: System prompt includes static system facts for architectural questions."""
+    from src.telegram.commands import ASK_SYSTEM_PROMPT
+
+    assert "Long-only" in ASK_SYSTEM_PROMPT
+    assert "9 pairs" in ASK_SYSTEM_PROMPT
+    assert "Kraken" in ASK_SYSTEM_PROMPT
+    assert "nightly" in ASK_SYSTEM_PROMPT
+    assert "Candidate" in ASK_SYSTEM_PROMPT or "candidate" in ASK_SYSTEM_PROMPT
+    assert "Grafana" in ASK_SYSTEM_PROMPT
+    assert "/positions" in ASK_SYSTEM_PROMPT
+    assert "concise" in ASK_SYSTEM_PROMPT.lower() or "briefly" in ASK_SYSTEM_PROMPT.lower()
 
 
 # --- Prometheus Metrics ---
