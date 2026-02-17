@@ -125,12 +125,12 @@ trading-brain/
 │   ├── telegram/                  # User interface
 │   │   ├── __init__.py
 │   │   ├── bot.py                 # Bot setup + lifecycle
-│   │   ├── commands.py            # 17 command handlers
+│   │   ├── commands.py            # 15 command handlers
 │   │   └── notifications.py       # Dual dispatch (Telegram + WebSocket)
 │   ├── api/                       # Data API
 │   │   ├── __init__.py
 │   │   ├── server.py              # aiohttp app with auth + error middleware
-│   │   ├── routes.py              # 13 REST endpoints
+│   │   ├── routes.py              # 20 REST endpoints
 │   │   └── websocket.py           # WebSocket event stream
 │   └── utils/
 │       ├── __init__.py
@@ -372,7 +372,7 @@ Analyzes: trades, signals, portfolio snapshots
 
 ### Orchestrator Mandate (embedded in system prompt)
 **Fund mandate**: Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund.
-**Framework**: Three-layer prompt — Identity (WHO) / System Understanding (WHAT it works with) / Institutional Memory (WHAT it learned). No numeric targets, no behavioral directives. See discussions.md Sessions 7-8.
+**Framework**: Three-layer prompt — Identity (WHO) / System Understanding (WHAT it works with) / Institutional Memory (WHAT it learned). No numeric targets, no behavioral directives.
 
 ### Updated Orchestrator Nightly Flow
 ```
@@ -389,7 +389,9 @@ Analyzes: trades, signals, portfolio snapshots
      "USER CONSTRAINTS (you cannot change this)"
 7. Opus analysis                     → decisions + reasoning
 8. Possible decisions (zero or more per cycle):
-     - STRATEGY_TWEAK / RESTRUCTURE / OVERHAUL → nested loop pipeline (see below)
+     - CREATE_CANDIDATE → nested loop pipeline (see below), deploys to candidate slot
+     - CANCEL_CANDIDATE → terminate a candidate strategy
+     - PROMOTE_CANDIDATE → promote candidate to active strategy
      - UPDATE_MARKET_ANALYSIS → generate → review (math focus) → deploy
      - UPDATE_TRADE_PERFORMANCE → generate → review (math focus) → deploy
      - NO_CHANGE
@@ -444,7 +446,7 @@ The orchestrator builds institutional memory through falsifiable predictions and
 - Orchestrator receives its own ungraded predictions as context each night
 
 **Reflection** (periodic, configurable interval — default 7 days):
-- Trigger: `>= reflection_interval_days` since last reflection OR manual `/reflect_tonight` command
+- Trigger: `>= reflection_interval_days` since last reflection OR manual `/reflect` command
 - First-time trigger: never reflected AND `>= max(3, interval/2)` observations exist
 - Full Opus call with 14-section evidence template covering predictions, strategy performance, market analysis, candidate outcomes, and observation patterns
 - Grades predictions by ID (confirmed/denied/partial/inconclusive)
@@ -525,50 +527,10 @@ CREATE TABLE capital_events (
 );
 ```
 
--- Predictions: falsifiable claims from nightly orchestrator decisions
-CREATE TABLE predictions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    claim TEXT NOT NULL,
-    evidence TEXT,
-    falsification TEXT,
-    confidence TEXT,
-    evaluation_timeframe TEXT,
-    strategy_version TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    graded_at TEXT,
-    grade TEXT,  -- confirmed, denied, partial, inconclusive
-    grade_reasoning TEXT
-);
-
--- Strategy document versions: permanent archive of every reflection rewrite
-CREATE TABLE strategy_doc_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Candidate signals: signal history for candidate strategies
-CREATE TABLE candidate_signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    candidate_slot INTEGER NOT NULL,
-    symbol TEXT NOT NULL, action TEXT NOT NULL,
-    confidence REAL, intent TEXT, reasoning TEXT,
-    acted_on INTEGER DEFAULT 0, rejected_reason TEXT,
-    strategy_version TEXT, strategy_regime TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Candidate daily performance: daily snapshots for candidate strategies
-CREATE TABLE candidate_daily_performance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    candidate_slot INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    portfolio_value REAL NOT NULL, cash REAL NOT NULL,
-    position_count INTEGER DEFAULT 0,
-    daily_pnl REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
-);
+-- Additional tables: predictions, strategy_doc_versions, candidate_signals,
+-- candidate_daily_performance, orchestrator_thoughts, orchestrator_observations,
+-- activity_log, decisions, and more.
+-- See src/shell/database.py for the authoritative schema (20+ tables).
 ```
 
 Key columns on existing tables:

@@ -43,8 +43,9 @@ To enhance learning and collaboration:
 - `docs/dev_notes/progress.md` — Build progress, what's done/working/broken
 - `docs/dev_notes/decisions.md` — Key technical and architectural decisions with rationale
 - `docs/dev_notes/architecture.md` — System architecture, data flow, component relationships
-- `docs/dev_notes/discussions.md` — Ongoing conversation threads, design direction, user preferences, open questions
 - `docs/dev_notes/gotchas.md` — Technical gotchas, bugs, and their fixes (reference for future sessions)
+- `docs/dev_notes/roadmap.md` — System goal, phases, predicted problems
+- `docs/dev_notes/notification_guidelines.md` — Telegram notification design spec
 
 **Quality bar**: An engineer picking up this project mid-stream should be able to read the notes and understand not just WHAT was built, but WHY, what the user cares about, what's been discussed, and where the project is heading. Notes should be concise but complete — scannable headers, bullet points, not walls of text. Update existing content rather than only appending. Review notes at the start of each session.
 

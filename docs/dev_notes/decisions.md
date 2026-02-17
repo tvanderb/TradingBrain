@@ -60,14 +60,10 @@
 - Realistic slippage (0.05%) and fee simulation
 - Toggled via config: `mode = "paper"` vs `"live"`
 
-## Strategy Safety: Three-Tier Paper Testing
-| Tier | Scope | Duration |
-|------|-------|----------|
-| 1 (Tweak) | Parameters, thresholds | 1 day |
-| 2 (Restructure) | Logic changes, new indicators | 2 days |
-| 3 (Overhaul) | Fundamentally different approach | 1 week |
-- Agent self-classifies tier, Opus validates
-- Pipeline: backtest → paper test → deploy
+## Strategy Safety: Candidate System (replaced paper test tiers)
+- **Original design** (Sessions 3-8): Three-tier paper testing (1d/2d/7d) with agent self-classification
+- **Replaced by** (Session T): Candidate strategy system — up to 3 candidates run paper simulations alongside active strategy. Opus manages lifecycle freely (no fixed durations).
+- Pipeline: backtest → candidate slot → promote or cancel
 
 ## Strategy Failure: Automatic Rollback
 - **Shell-enforced**: Risk limits in `config/risk_limits.toml` — daily loss halt, drawdown halt, crashes → immediate rollback. Values are dynamic (pulled from config at runtime).
@@ -92,10 +88,9 @@
 - All metrics tracked by truth benchmarks: expectancy, win rate, P&L, profit factor, drawdown, fees
 - Orchestrator decides relative importance based on context, not hardcoded priority order
 
-## Skills Library — REMOVED (Session K)
-- ~~Agent builds reusable indicator functions in `strategy/skills/`~~
-- **Removed**: Every function was a trivial wrapper around pandas/ta. First live orchestrator cycle failed 3/3 importing from `src.strategy.skills.indicators`.
-- **Replacement**: Strategy imports `pandas`, `numpy`, `ta`, `scipy`, and stdlib modules directly. No intermediary wrappers needed.
+## Skills Library — Removed (Session K)
+- Skills library (`strategy/skills/`) was removed. Every function was a trivial wrapper around pandas/ta. First live orchestrator cycle failed 3/3 importing from `src.strategy.skills.indicators`.
+- Strategy imports `pandas`, `numpy`, `ta`, `scipy`, and stdlib modules directly. No intermediary wrappers needed.
 
 ## Pip Install: Dropped
 - Pre-install comprehensive analysis libraries (ta, pandas, numpy, etc.)
@@ -137,7 +132,7 @@
 ### Decision: Fund Mandate Replaces Explicit Goals (Sessions 7-8)
 - **What**: Scrapped prioritized numeric goals. Replaced with a fund mandate: "Portfolio growth with capital preservation. Avoid major drawdowns. Long-term fund."
 - **Why**: Per "maximize awareness, minimize direction" framework — numeric targets are directives. A well-informed agent with the right identity decides what to optimize. The mandate is the investor's voice; the manager decides how.
-- **See**: discussions.md Sessions 7-8 for full framework
+- **See**: MEMORY.md for framework summary
 
 ### Decision: Statistics Module Code Review — Mathematical Focus
 - **What**: Opus code review for statistics module must verify mathematical correctness, not just code safety
@@ -307,7 +302,7 @@
 - **Inspiration**: Ray Dalio's "Pain + Reflection = Progress" — principles created from experience, refined over time.
 - **Design**: Predictions stored with claim/evidence/falsification/confidence/timeframe. Reflection cycle gathers 14 sections of evidence, Opus grades predictions by ID (avoiding fragile text matching), rewrites strategy doc, stores new predictions.
 - **Key trade-off**: Full strategy doc rewrite each reflection (not append). Previous versions permanently archived. This ensures the document stays coherent rather than accumulating layers.
-- **See**: `docs/dev_notes/strategy_document_design.md` for full design spec.
+- **See**: `architecture.md` Institutional Learning System section for design details.
 
 ### Decision: Configurable Reflection Period (Session W)
 - **What**: `orchestrator.reflection_interval_days` config option (default 7 days). Controls reflection trigger, observation window, and pruning.
