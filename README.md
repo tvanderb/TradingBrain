@@ -33,7 +33,7 @@ An autonomous crypto trading fund managed by AI. The system trades 24/7 — scan
                         │                                     │
                         │  Opus analyzes → Sonnet generates   │
                         │  → Opus reviews → backtest          │
-                        │  → paper test → deploy              │
+                        │  → candidate test → deploy           │
                         └─────────────────────────────────────┘
 ```
 
@@ -55,8 +55,8 @@ An autonomous crypto trading fund managed by AI. The system trades 24/7 — scan
 - **Strategy sandbox** with AST-based validation blocks dangerous code before execution
 - **Paper and live modes** with identical logic paths and fill confirmation
 - **Restart safety**: 9 landmine fixes — persistent starting capital, halt evaluation on startup, strategy DB fallback, orphaned position detection, config validation
-- **Telegram observability** with 17 commands for monitoring, plus an emergency kill switch
-- **REST API** (13 endpoints) and **WebSocket** event stream (19 event types) for programmatic access
+- **Telegram observability** with 14 commands for monitoring, plus an emergency kill switch
+- **REST API** (20 endpoints) and **WebSocket** event stream for programmatic access
 - **Activity log**: unified timeline across all subsystems with REST + WebSocket endpoints
 - **Observability stack**: Prometheus metrics (50+ gauges), Loki log aggregation, Grafana dashboard — all self-hosted
 - **Truth benchmarks**: 28 rigid metrics computed from raw DB data (not AI-generated)
@@ -117,18 +117,18 @@ src/
 │   └── readonly_db.py       # Read-only DB wrapper for analysis
 ├── api/                     # Data API
 │   ├── server.py            # aiohttp app with auth + error middleware
-│   ├── routes.py            # 13 REST endpoints
+│   ├── routes.py            # 20 REST endpoints
 │   ├── metrics.py           # Prometheus /metrics endpoint (50+ gauges)
 │   └── websocket.py         # WebSocket event stream
 └── telegram/                # Telegram bot
-    ├── commands.py           # 17 bot commands
+    ├── commands.py           # 14 bot commands
     └── notifications.py      # Dual dispatch (Telegram + WebSocket)
 
 strategy/active/             # AI-rewritable strategy module
 statistics/active/           # AI-rewritable analysis modules
 config/                      # TOML configuration files
 monitoring/                  # Prometheus, Grafana provisioning, dashboard JSON
-tests/                       # 222 integration tests
+tests/                       # 253 integration tests
 docs/                        # Deployment guide and dev notes
 deploy/                      # Ansible playbooks, VPS hardening, restart script
 ```
@@ -138,20 +138,16 @@ deploy/                      # Ansible playbooks, VPS hardening, restart script
 | Command | Description |
 |---------|-------------|
 | `/help` | System intro and command list |
-| `/status` | System health: mode, active/paused/halted, last scan, uptime |
-| `/health` | Fund metrics: portfolio value, daily P&L, drawdown, risk state |
-| `/outlook` | Latest orchestrator observations (market summary, assessment) |
-| `/positions` | Open positions with entry price, P&L, stops, tags |
-| `/trades` | Last 10 completed trades |
+| `/fund` | Portfolio overview: value, returns, drawdown, trade stats |
+| `/positions` | Open positions with live P&L, stops, tags |
+| `/trades` | Recent closed trades with entry/exit prices |
 | `/risk` | Risk limits and current utilization |
-| `/performance` | Daily performance summary |
-| `/strategy` | Active strategy version and description |
-| `/tokens` | AI token usage and cost breakdown |
-| `/ask` | Context-aware question to Haiku (portfolio + risk injected) |
-| `/candidates` | Active candidate strategies and their performance |
+| `/outlook` | Orchestrator's latest market view |
+| `/candidates` | Candidate strategy status across all slots |
 | `/thoughts` | Browse orchestrator reasoning spool |
-| `/thought` | View full AI response for a specific cycle step |
-| `/reflect_tonight` | Schedule reflection for the next orchestration cycle |
+| `/ask <question>` | Context-aware question to Haiku (portfolio + risk injected) |
+| `/orchestrate` | Manually trigger nightly orchestration cycle |
+| `/reflect` | Schedule reflection for the next orchestration cycle |
 | `/pause` / `/resume` | Pause/resume trading |
 | `/kill` | Emergency stop — close all positions and shut down |
 
@@ -159,9 +155,9 @@ deploy/                      # Ansible playbooks, VPS hardening, restart script
 
 Bearer token auth. Set `API_KEY` in `.env`.
 
-**REST** (13 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, signals, strategy, ai/usage, benchmarks, activity, predictions, strategy-doc/versions.
+**REST** (20 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, signals, strategy, ai/usage, benchmarks, activity, candidates, predictions, strategy-doc, strategy-doc/versions, decisions, thoughts (list/cycle/detail).
 
-**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (19 event types). Activity stream at `/v1/activity/live`.
+**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (25 event types). Activity stream at `/v1/activity/live`.
 
 **Prometheus** at `/metrics`: 50+ gauges including portfolio, risk, per-position, candidates, predictions, and reflection metrics.
 

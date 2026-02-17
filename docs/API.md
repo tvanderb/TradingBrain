@@ -188,7 +188,7 @@ Closed trade history. Returns raw rows from the `trades` table.
     "entry_price": 3100.00,
     "exit_price": 3200.00,
     "pnl": 4.36,
-    "pnl_pct": 0.032,
+    "pnl_pct": 3.2,
     "fees": 1.14,
     "intent": "DAY",
     "strategy_version": "v20260208_010000",
@@ -209,7 +209,7 @@ Closed trade history. Returns raw rows from the `trades` table.
 | `entry_price` | float | Entry price |
 | `exit_price` | float or null | Exit price (null if still open) |
 | `pnl` | float or null | Realized profit/loss (USD) |
-| `pnl_pct` | float or null | P&L as decimal ratio |
+| `pnl_pct` | float or null | P&L as percentage (e.g. `3.2` = 3.2%) |
 | `fees` | float | Total fees paid |
 | `intent` | string | Trade intent (`"DAY"`, `"SWING"`, `"POSITION"`) |
 | `strategy_version` | string | Strategy version that generated the signal |
@@ -245,8 +245,8 @@ Daily performance snapshots.
     "gross_pnl": 5.48,
     "net_pnl": 3.20,
     "fees_total": 2.28,
-    "max_drawdown_pct": 0.02,
-    "win_rate": 0.75,
+    "max_drawdown_pct": 2.0,
+    "win_rate": 75.0,
     "expectancy": 1.80,
     "sharpe": null,
     "strategy_version": "v20260208_010000",
@@ -266,8 +266,8 @@ Daily performance snapshots.
 | `gross_pnl` | float | P&L before fees |
 | `net_pnl` | float | P&L after fees |
 | `fees_total` | float | Total fees that day |
-| `max_drawdown_pct` | float | Max intraday drawdown |
-| `win_rate` | float | Wins / total trades |
+| `max_drawdown_pct` | float | Max intraday drawdown (percentage) |
+| `win_rate` | float | Wins / total trades (percentage) |
 | `expectancy` | float | Expected value per trade |
 | `sharpe` | float or null | Sharpe ratio (null if insufficient data) |
 | `strategy_version` | string | Active strategy version |
@@ -282,19 +282,19 @@ Risk limits (from config) and current utilization.
 ```json
 {
   "limits": {
-    "max_position_pct": 0.15,
+    "max_position_pct": 25.0,
     "max_positions": 5,
-    "max_daily_loss_pct": 0.06,
-    "max_drawdown_pct": 0.12,
+    "max_daily_loss_pct": 10.0,
+    "max_drawdown_pct": 40.0,
     "max_daily_trades": 20,
-    "max_trade_pct": 0.10
+    "max_trade_pct": 10.0
   },
   "current": {
     "daily_pnl": -1.20,
-    "daily_pnl_pct": -0.006,
+    "daily_pnl_pct": -0.6,
     "daily_trades": 3,
     "consecutive_losses": 1,
-    "drawdown_pct": 0.02,
+    "drawdown_pct": 2.0,
     "halted": false,
     "halt_reason": null
   }
@@ -303,17 +303,17 @@ Risk limits (from config) and current utilization.
 
 | Field | Type | Description |
 |---|---|---|
-| `limits.max_position_pct` | float | Max single position as fraction of portfolio |
+| `limits.max_position_pct` | float | Max single position as percentage of portfolio |
 | `limits.max_positions` | int | Max concurrent positions |
-| `limits.max_daily_loss_pct` | float | Max daily loss as fraction of portfolio |
-| `limits.max_drawdown_pct` | float | Max drawdown before halt |
+| `limits.max_daily_loss_pct` | float | Max daily loss as percentage of portfolio |
+| `limits.max_drawdown_pct` | float | Max drawdown percentage before halt |
 | `limits.max_daily_trades` | int | Max trades per day |
-| `limits.max_trade_pct` | float | Max trade size as fraction of portfolio |
+| `limits.max_trade_pct` | float | Max trade size as percentage of portfolio |
 | `current.daily_pnl` | float | Today's realized P&L (USD) |
-| `current.daily_pnl_pct` | float | Today's P&L as fraction of portfolio |
+| `current.daily_pnl_pct` | float | Today's P&L as percentage of portfolio |
 | `current.daily_trades` | int | Trades executed today |
 | `current.consecutive_losses` | int | Current consecutive loss streak |
-| `current.drawdown_pct` | float | Current drawdown from peak |
+| `current.drawdown_pct` | float | Current drawdown from peak (percentage) |
 | `current.halted` | bool | Whether risk halt is active |
 | `current.halt_reason` | string or null | Reason for halt |
 
@@ -340,7 +340,7 @@ Signal history from the strategy module.
     "id": 101,
     "symbol": "BTCUSD",
     "action": "BUY",
-    "size_pct": 0.10,
+    "size_pct": 10.0,
     "confidence": 0.72,
     "intent": "DAY",
     "reasoning": "RSI oversold with bullish divergence",
@@ -358,7 +358,7 @@ Signal history from the strategy module.
 | `id` | int | Signal ID |
 | `symbol` | string | Trading pair |
 | `action` | string | `"BUY"`, `"SELL"`, or `"CLOSE"` |
-| `size_pct` | float | Requested position size as fraction of portfolio |
+| `size_pct` | float | Requested position size as percentage of portfolio |
 | `confidence` | float or null | Strategy confidence score (0-1) |
 | `intent` | string or null | Trade intent |
 | `reasoning` | string or null | Strategy's reasoning for the signal |
@@ -372,7 +372,7 @@ Signal history from the strategy module.
 
 ### GET /v1/strategy
 
-Active strategy, running paper test, and recent version history.
+Active strategy and recent version history.
 
 **Response:**
 ```json
@@ -382,26 +382,13 @@ Active strategy, running paper test, and recent version history.
     "version": "v20260208_010000",
     "parent_version": "v20260207_010000",
     "code_hash": "a1b2c3d4",
-    "risk_tier": 1,
     "description": "Added RSI divergence filter",
     "tags": "rsi,divergence",
     "backtest_result": "{...}",
-    "paper_test_result": "{...}",
     "market_conditions": "ranging",
     "deployed_at": "2026-02-08T01:00:00",
     "retired_at": null,
     "created_at": "2026-02-08T00:45:00"
-  },
-  "paper_test": {
-    "id": 2,
-    "strategy_version": "v20260209_010000",
-    "risk_tier": 2,
-    "required_days": 3,
-    "started_at": "2026-02-09T01:00:00",
-    "ends_at": "2026-02-12T01:00:00",
-    "status": "running",
-    "result": null,
-    "completed_at": null
   },
   "recent_versions": [ ... ]
 }
@@ -413,12 +400,8 @@ Active strategy, running paper test, and recent version history.
 | `active.version` | string | Version identifier |
 | `active.parent_version` | string or null | What this version evolved from |
 | `active.code_hash` | string | SHA hash of the strategy code |
-| `active.risk_tier` | int | 1 (tweak), 2 (restructure), 3 (overhaul) |
 | `active.description` | string or null | What changed |
 | `active.deployed_at` | string | When it went live |
-| `paper_test` | object or null | Currently running paper test (null if none) |
-| `paper_test.status` | string | `"running"`, `"passed"`, or `"failed"` |
-| `paper_test.ends_at` | string | When the test period ends |
 | `recent_versions` | array | Last 10 strategy versions (same shape as `active`) |
 
 ---
@@ -463,7 +446,7 @@ AI token consumption and costs for the current day.
 
 ### GET /v1/benchmarks
 
-Truth benchmarks — 17 verifiable metrics computed from raw database data. These are ground truth calculations that the AI orchestrator cannot modify.
+Truth benchmarks — 28 verifiable metrics computed from raw database data. These are ground truth calculations that the AI orchestrator cannot modify.
 
 **Response:**
 ```json
@@ -471,7 +454,7 @@ Truth benchmarks — 17 verifiable metrics computed from raw database data. Thes
   "trade_count": 42,
   "win_count": 26,
   "loss_count": 16,
-  "win_rate": 0.619,
+  "win_rate": 61.9,
   "net_pnl": 28.50,
   "total_fees": 8.40,
   "avg_win": 3.20,
@@ -480,10 +463,10 @@ Truth benchmarks — 17 verifiable metrics computed from raw database data. Thes
   "consecutive_losses": 0,
   "portfolio_value": 228.50,
   "portfolio_cash": 180.00,
-  "max_drawdown_pct": 0.08,
+  "max_drawdown_pct": 8.0,
   "total_signals": 150,
   "acted_signals": 42,
-  "signal_act_rate": 0.28,
+  "signal_act_rate": 28.0,
   "total_scans": 8640,
   "first_scan_at": "2026-02-01T00:00:00",
   "last_scan_at": "2026-02-09T03:10:00",
@@ -497,7 +480,7 @@ Truth benchmarks — 17 verifiable metrics computed from raw database data. Thes
 | `trade_count` | int | Total closed trades |
 | `win_count` | int | Trades with positive P&L |
 | `loss_count` | int | Trades with zero or negative P&L |
-| `win_rate` | float | win_count / trade_count |
+| `win_rate` | float | win_count / trade_count (percentage) |
 | `net_pnl` | float | Sum of all realized P&L |
 | `total_fees` | float | Sum of all fees paid |
 | `avg_win` | float | Average P&L of winning trades |
@@ -506,10 +489,10 @@ Truth benchmarks — 17 verifiable metrics computed from raw database data. Thes
 | `consecutive_losses` | int | Current consecutive loss streak |
 | `portfolio_value` | float or null | Latest daily snapshot value |
 | `portfolio_cash` | float or null | Latest daily snapshot cash |
-| `max_drawdown_pct` | float | Peak-to-trough drawdown from daily snapshots |
+| `max_drawdown_pct` | float | Peak-to-trough drawdown from daily snapshots (percentage) |
 | `total_signals` | int | Total signals generated |
 | `acted_signals` | int | Signals that were executed |
-| `signal_act_rate` | float | acted / total signals |
+| `signal_act_rate` | float | acted / total signals (percentage) |
 | `total_scans` | int | Total market scans performed |
 | `first_scan_at` | string or null | Timestamp of first scan |
 | `last_scan_at` | string or null | Timestamp of most recent scan |
@@ -517,6 +500,256 @@ Truth benchmarks — 17 verifiable metrics computed from raw database data. Thes
 | `strategy_version_count` | int | Total strategy versions created |
 
 Returns HTTP 500 with error envelope if computation fails.
+
+---
+
+### GET /v1/activity
+
+Unified activity timeline across all subsystems.
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 50 | Max results (capped at 500) |
+| `since` | string | — | Filter: `created_at >= since` (ISO datetime) |
+| `until` | string | — | Filter: `created_at <= until` (ISO datetime) |
+| `category` | string | — | Filter by category (e.g. `trade`, `risk`, `orchestrator`, `system`) |
+| `severity` | string | — | Filter by severity (e.g. `info`, `warning`, `error`) |
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "category": "trade",
+    "severity": "info",
+    "title": "BUY BTCUSD",
+    "detail": { "symbol": "BTCUSD", "qty": 0.001, "price": 45000.00 },
+    "created_at": "2026-02-09T03:10:00"
+  }
+]
+```
+
+---
+
+### GET /v1/candidates
+
+Active candidate strategies and their performance.
+
+**Response:**
+```json
+[
+  {
+    "slot": 0,
+    "status": "active",
+    "strategy_version": "v20260210_010000",
+    "description": "Momentum strategy with MACD crossover",
+    "positions": [],
+    "trade_count": 5,
+    "net_pnl": 2.30,
+    "signal_count": 12,
+    "created_at": "2026-02-10T01:00:00"
+  }
+]
+```
+
+Returns up to 3 candidate slots. Each includes positions, trade stats, and P&L.
+
+---
+
+### GET /v1/predictions
+
+Falsifiable predictions made by the orchestrator during nightly cycles.
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 50 | Max results (capped at 500) |
+| `graded` | string | — | `"true"` for graded only, `"false"` for ungraded only |
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "cycle_id": "20260209_030000",
+    "claim": "BTC will break above 50000 within 7 days",
+    "evidence": "Strong uptrend on daily chart...",
+    "falsification": "BTC closes below 48000",
+    "confidence": 0.65,
+    "evaluation_timeframe": "7d",
+    "category": "price",
+    "graded_at": null,
+    "grade": null,
+    "grade_evidence": null,
+    "grade_learning": null,
+    "created_at": "2026-02-09T03:30:00"
+  }
+]
+```
+
+---
+
+### GET /v1/strategy-doc
+
+Current live strategy document content.
+
+**Response:**
+```json
+{
+  "content": "# Strategy Document\n\n...",
+  "length": 1234
+}
+```
+
+---
+
+### GET /v1/strategy-doc/versions
+
+Strategy document version history (metadata only).
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 20 | Max results (capped at 100) |
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "version": 3,
+    "reflection_cycle_id": "20260215_030000",
+    "created_at": "2026-02-15T03:45:00",
+    "content_length": 2048
+  }
+]
+```
+
+---
+
+### GET /v1/strategy-doc/versions/{version}
+
+Full content of a specific strategy document version.
+
+**Response:**
+```json
+{
+  "id": 1,
+  "version": 3,
+  "content": "# Strategy Document\n\n...",
+  "reflection_cycle_id": "20260215_030000",
+  "created_at": "2026-02-15T03:45:00"
+}
+```
+
+Returns 404 if the version does not exist.
+
+---
+
+### GET /v1/decisions
+
+Orchestrator decision history.
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 20 | Max results (capped at 100) |
+| `since` | string | — | Filter: `date >= since` (ISO date) |
+| `until` | string | — | Filter: `date <= until` (ISO date) |
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "date": "2026-02-09",
+    "action": "NO_CHANGE",
+    "strategy_version_from": "v20260208_010000",
+    "strategy_version_to": null,
+    "tokens_used": 45000,
+    "cost_usd": 0.21,
+    "outcome": null,
+    "analysis": { "market_regime": "ranging", "summary": "..." },
+    "created_at": "2026-02-09T03:30:00"
+  }
+]
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `action` | string | `"NO_CHANGE"`, `"CREATE_CANDIDATE"`, `"CANCEL_CANDIDATE"`, `"PROMOTE_CANDIDATE"` |
+| `outcome` | string or null | Outcome feedback from subsequent cycles |
+| `analysis` | object or null | Parsed JSON analysis data |
+
+---
+
+### GET /v1/thoughts
+
+List orchestrator thought cycles.
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 10 | Max results (capped at 50) |
+
+**Response:**
+```json
+[
+  {
+    "cycle_id": "20260209_030000",
+    "step_count": 4,
+    "started_at": "2026-02-09T03:00:00",
+    "models": "claude-opus-4-6,claude-sonnet-4-5-20250929"
+  }
+]
+```
+
+---
+
+### GET /v1/thoughts/{cycle_id}
+
+Steps within a specific orchestrator cycle.
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "step": "analysis",
+    "model": "claude-opus-4-6",
+    "response_length": 5432,
+    "created_at": "2026-02-09T03:00:05"
+  }
+]
+```
+
+Returns 404 if the cycle does not exist.
+
+---
+
+### GET /v1/thoughts/{cycle_id}/{step}
+
+Full AI response for a specific cycle step.
+
+**Response:**
+```json
+{
+  "step": "analysis",
+  "model": "claude-opus-4-6",
+  "input_summary": "Market data for 9 symbols...",
+  "full_response": "After reviewing the current...",
+  "parsed_result": { "decision": "NO_CHANGE", "reasoning": "..." },
+  "created_at": "2026-02-09T03:00:05"
+}
+```
+
+Returns 404 if the step does not exist.
 
 ---
 
@@ -637,6 +870,16 @@ Every WebSocket message is a JSON object:
 }
 ```
 
+**`signal_drought`** — No signals generated for 24+ hours.
+```json
+{
+  "event": "signal_drought",
+  "data": {
+    "hours_since_last_signal": 26.5
+  }
+}
+```
+
 #### Strategy Events
 
 **`strategy_deployed`** — A new strategy version went live.
@@ -653,28 +896,64 @@ Every WebSocket message is a JSON object:
 ```
 Note: `changes` is truncated to 500 characters.
 
-**`paper_test_started`** — A new strategy version entered paper testing.
+#### Candidate Events
+
+**`candidate_created`** — A candidate strategy was created.
 ```json
 {
-  "event": "paper_test_started",
+  "event": "candidate_created",
   "data": {
+    "slot": 0,
     "version": "v20260209_010000",
-    "days": 3
+    "description": "Momentum strategy with MACD crossover"
   }
 }
 ```
 
-**`paper_test_completed`** — Paper test finished with results.
+**`candidate_canceled`** — A candidate strategy was canceled.
 ```json
 {
-  "event": "paper_test_completed",
+  "event": "candidate_canceled",
   "data": {
-    "version": "v20260209_010000",
-    "passed": true,
-    "results": {
-      "trades": 5,
-      "pnl": 2.30
-    }
+    "slot": 0,
+    "version": "v20260209_010000"
+  }
+}
+```
+
+**`candidate_promoted`** — A candidate strategy was promoted to active.
+```json
+{
+  "event": "candidate_promoted",
+  "data": {
+    "slot": 0,
+    "version": "v20260209_010000"
+  }
+}
+```
+
+**`candidate_trade_executed`** — A trade was executed in a candidate strategy.
+```json
+{
+  "event": "candidate_trade_executed",
+  "data": {
+    "slot": 0,
+    "action": "BUY",
+    "symbol": "BTCUSD",
+    "qty": 0.001,
+    "price": 45000.00
+  }
+}
+```
+
+**`candidate_stop_triggered`** — A stop loss or take profit was hit in a candidate strategy.
+```json
+{
+  "event": "candidate_stop_triggered",
+  "data": {
+    "slot": 0,
+    "symbol": "BTCUSD",
+    "reason": "stop_loss"
   }
 }
 ```
@@ -698,7 +977,19 @@ Note: `changes` is truncated to 500 characters.
   }
 }
 ```
-`decision_type` values: `"NO_CHANGE"`, `"TWEAK"`, `"RESTRUCTURE"`, `"OVERHAUL"`
+`decision_type` values: `"NO_CHANGE"`, `"CREATE_CANDIDATE"`, `"CANCEL_CANDIDATE"`, `"PROMOTE_CANDIDATE"`
+
+**`reflection_completed`** — Institutional learning reflection cycle finished.
+```json
+{
+  "event": "reflection_completed",
+  "data": {
+    "predictions_graded": 3,
+    "new_predictions": 2,
+    "strategy_doc_version": 4
+  }
+}
+```
 
 #### System Events
 
@@ -786,22 +1077,32 @@ All events are always sent over WebSocket. Telegram delivery is configurable per
 
 ```toml
 [telegram.notifications]
-trade_executed = true           # default: true
-stop_triggered = true           # default: true
-risk_halt = true                # default: true
-risk_resumed = true             # default: true
-rollback = true                 # default: true
-strategy_deployed = true        # default: true
-system_online = true            # default: true
-system_shutdown = true          # default: true
-system_error = true             # default: true
-websocket_failed = true         # default: true
-daily_summary = true            # default: true
-weekly_report = true            # default: true
-signal_rejected = false         # default: false (high frequency)
-scan_complete = false           # default: false (high frequency)
-paper_test_started = false      # default: false
-paper_test_completed = false    # default: false
-orchestrator_cycle_started = false   # default: false
-orchestrator_cycle_completed = false # default: false
+# Default true — important events
+trade_executed = true
+stop_triggered = true
+risk_halt = true
+risk_resumed = true
+strategy_rollback = true
+strategy_deployed = true
+system_online = true
+system_shutdown = true
+system_error = true
+websocket_feed_lost = true
+daily_summary = true
+weekly_report = true
+orchestrator_cycle_completed = true
+candidate_created = true
+candidate_canceled = true
+candidate_promoted = true
+candidate_trade_executed = true
+candidate_stop_triggered = true
+reflection_completed = true
+signal_drought = true
+
+# Default false — high frequency or low priority
+signal_rejected = false
+scan_complete = false
+paper_test_started = false
+paper_test_completed = false
+orchestrator_cycle_started = false
 ```

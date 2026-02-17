@@ -196,18 +196,16 @@ docker compose up -d --build
 | Command | Description |
 |---------|-------------|
 | `/help` | System intro and command list |
-| `/status` | System health: mode, active/paused/halted, last scan, uptime |
-| `/health` | Fund metrics: portfolio value, daily P&L, drawdown, risk state |
-| `/outlook` | Latest orchestrator observations (market summary, assessment) |
-| `/positions` | Open positions with entry price, P&L, stops, tags |
-| `/trades` | Last 10 completed trades |
+| `/fund` | Portfolio overview: value, returns, drawdown, trade stats |
+| `/positions` | Open positions with live P&L, stops, tags |
+| `/trades` | Recent closed trades with entry/exit prices |
 | `/risk` | Risk limits and current utilization |
-| `/performance` | Daily performance summary |
-| `/strategy` | Active strategy version and description |
-| `/tokens` | AI token usage and cost breakdown |
+| `/outlook` | Orchestrator's latest market view |
+| `/candidates` | Candidate strategy status across all slots |
 | `/thoughts` | Browse orchestrator reasoning spool |
-| `/thought <id> <step>` | Full AI response for a specific cycle step |
 | `/ask <question>` | Context-aware question to Haiku (portfolio + risk injected) |
+| `/orchestrate` | Manually trigger nightly orchestration cycle |
+| `/reflect` | Schedule reflection for the next orchestration cycle |
 | `/pause` | Pause trading (scans continue) |
 | `/resume` | Resume trading, clear risk halt |
 | `/kill` | Emergency stop — cancel all orders, close positions, shutdown |
@@ -251,6 +249,6 @@ docker compose up -d
 | Telegram commands don't work | Add your Telegram user ID to `allowed_user_ids` in settings.toml (empty list = deny all) |
 | Stale PID lockfile | Delete `data/brain.pid` and restart |
 | DB locked | Stop container, delete `data/brain.db-shm` and `data/brain.db-wal`, restart |
-| Orchestrator not running | Runs nightly 3:30-6am EST. Check `/tokens` for recent activity |
+| Orchestrator not running | Runs nightly 3:30-6am EST. Check `/thoughts` for recent activity |
 | `.env` changes not applied | `docker compose restart` doesn't re-read `.env`. Use `deploy/restart.sh` |
 | Strategy won't load | Check `strategy/active/strategy.py` exists. System falls back to DB, then paused mode |

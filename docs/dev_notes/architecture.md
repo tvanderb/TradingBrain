@@ -125,7 +125,7 @@ trading-brain/
 │   ├── telegram/                  # User interface
 │   │   ├── __init__.py
 │   │   ├── bot.py                 # Bot setup + lifecycle
-│   │   ├── commands.py            # 15 command handlers
+│   │   ├── commands.py            # 14 command handlers
 │   │   └── notifications.py       # Dual dispatch (Telegram + WebSocket)
 │   ├── api/                       # Data API
 │   │   ├── __init__.py
