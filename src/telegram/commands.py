@@ -157,6 +157,7 @@ class BotCommands:
             "\u2699\uFE0F Control\n"
             "/orchestrate \u2014 Trigger nightly cycle now\n"
             "/reflect \u2014 Schedule reflection for tonight\n"
+            "/reload \u2014 Hot-reload config from disk\n"
             "/pause / /resume \u2014 Pause or resume trading\n"
             "/kill \u2014 Emergency close all positions"
         )
@@ -757,6 +758,13 @@ class BotCommands:
             await update.message.reply_text("Trading RESUMED. Risk halt cleared.")
         else:
             await update.message.reply_text("Trading RESUMED.")
+
+    async def cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Hot-reload config from disk."""
+        if not self._authorized(update):
+            return
+        self._scan_state["reload_requested"] = True
+        await update.message.reply_text("Config reload triggered.")
 
     async def cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Emergency stop — close all positions."""

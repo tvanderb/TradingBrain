@@ -308,6 +308,11 @@ class TradingBrain:
                     self._scan_state["kill_requested"] = False
                 # If failed, flag stays True — retries next iteration
 
+            # Check config reload trigger
+            if self._scan_state.get("reload_requested"):
+                self._scan_state["reload_requested"] = False
+                await self._reload_config()
+
             # Check manual orchestration trigger
             if self._scan_state.get("orchestrate_requested"):
                 self._scan_state["orchestrate_requested"] = False
@@ -374,6 +379,217 @@ class TradingBrain:
         )
 
         log.info("scheduler.configured", scan_interval=scan_interval)
+
+    async def _reload_config(self) -> None:
+        """Hot-reload config from disk. Safe fields updated under trade lock.
+
+        Called from the keep-alive loop (between iterations) so it never
+        interrupts an in-progress scan or trade execution.
+        """
+        log.info("reload.starting")
+        changes: list[str] = []
+        refused: list[str] = []
+        errors: list[str] = []
+
+        # 1. Parse new config from disk
+        try:
+            new_config = load_config()
+        except Exception as e:
+            log.error("reload.parse_failed", error=str(e))
+            errors.append(f"Parse error: {e}")
+            if self._notifier:
+                await self._notifier.config_reloaded(changes, refused, errors)
+            return
+
+        old = self._config
+
+        # 2. Refuse immutable fields (log each with reason)
+        immutable = {
+            "mode": ("Fundamentally changes execution paths", old.mode, new_config.mode),
+            "symbols": ("Affects WS subscriptions, data store, scan loop", old.symbols, new_config.symbols),
+            "paper_balance_usd": ("Meaningless after startup", old.paper_balance_usd, new_config.paper_balance_usd),
+            "db_path": ("Requires DB reconnection", old.db_path, new_config.db_path),
+        }
+        # Telegram connection fields
+        tg_immutable = {
+            "telegram.bot_token": ("Requires bot restart", old.telegram.bot_token, new_config.telegram.bot_token),
+            "telegram.chat_id": ("Requires bot restart", old.telegram.chat_id, new_config.telegram.chat_id),
+        }
+        # Kraken credential fields
+        kraken_immutable = {
+            "kraken.api_key": ("Requires REST client restart", old.kraken.api_key, new_config.kraken.api_key),
+            "kraken.secret_key": ("Requires REST client restart", old.kraken.secret_key, new_config.kraken.secret_key),
+        }
+        # API server fields
+        api_immutable = {
+            "api.host": ("Requires server restart", old.api.host, new_config.api.host),
+            "api.port": ("Requires server restart", old.api.port, new_config.api.port),
+        }
+
+        for field_name, (reason, old_val, new_val) in {**immutable, **tg_immutable, **kraken_immutable, **api_immutable}.items():
+            if old_val != new_val:
+                refused.append(field_name)
+                log.warning("reload.refused", field=field_name, reason=reason)
+
+        # 3. Apply safe fields under trade lock
+        async with self._trade_lock:
+            # Risk config
+            if vars(old.risk) != vars(new_config.risk):
+                old.risk = new_config.risk
+                self._risk.reload_config(new_config.risk)
+                changes.append("risk")
+                log.info("reload.updated", field="risk")
+
+            # Notification filter
+            if vars(old.telegram.notifications) != vars(new_config.telegram.notifications):
+                old.telegram.notifications = new_config.telegram.notifications
+                self._notifier.reload_notification_config(new_config.telegram.notifications)
+                changes.append("telegram.notifications")
+                log.info("reload.updated", field="telegram.notifications")
+
+            # Orchestrator config
+            old_orch = old.orchestrator
+            new_orch = new_config.orchestrator
+            if vars(old_orch) != vars(new_orch):
+                reschedule = (old_orch.start_hour != new_orch.start_hour or
+                              old_orch.start_minute != new_orch.start_minute)
+                old.orchestrator = new_config.orchestrator
+                changes.append("orchestrator")
+                log.info("reload.updated", field="orchestrator")
+                # Reschedule orchestration job if start time changed
+                if reschedule and self._scheduler:
+                    try:
+                        self._scheduler.reschedule_job(
+                            "orchestration",
+                            trigger=CronTrigger(
+                                hour=new_orch.start_hour,
+                                minute=new_orch.start_minute,
+                            ),
+                        )
+                        log.info("reload.orchestration_rescheduled",
+                                 hour=new_orch.start_hour, minute=new_orch.start_minute)
+                    except Exception as e:
+                        log.warning("reload.reschedule_failed", error=str(e))
+
+            # Fee config
+            if vars(old.fees) != vars(new_config.fees):
+                reschedule_fee = old.fees.check_interval_hours != new_config.fees.check_interval_hours
+                old.fees = new_config.fees
+                changes.append("fees")
+                log.info("reload.updated", field="fees")
+                if reschedule_fee and self._scheduler:
+                    try:
+                        self._scheduler.reschedule_job(
+                            "fee_check",
+                            trigger=IntervalTrigger(hours=new_config.fees.check_interval_hours),
+                        )
+                    except Exception as e:
+                        log.warning("reload.fee_reschedule_failed", error=str(e))
+
+            # Data config
+            if vars(old.data) != vars(new_config.data):
+                old.data = new_config.data
+                changes.append("data")
+                log.info("reload.updated", field="data")
+
+            # AI config (models + token limit — not credentials)
+            ai_fields = ("sonnet_model", "opus_model", "haiku_model", "daily_token_limit",
+                         "provider", "vertex_project_id", "vertex_region")
+            ai_changed = any(
+                getattr(old.ai, f) != getattr(new_config.ai, f) for f in ai_fields
+            )
+            if ai_changed:
+                for f in ai_fields:
+                    setattr(old.ai, f, getattr(new_config.ai, f))
+                changes.append("ai")
+                log.info("reload.updated", field="ai")
+
+            # Kraken fee defaults
+            if (old.kraken.maker_fee_pct != new_config.kraken.maker_fee_pct or
+                    old.kraken.taker_fee_pct != new_config.kraken.taker_fee_pct):
+                old.kraken.maker_fee_pct = new_config.kraken.maker_fee_pct
+                old.kraken.taker_fee_pct = new_config.kraken.taker_fee_pct
+                changes.append("kraken.fees")
+                log.info("reload.updated", field="kraken.fees")
+
+            # Slippage
+            if old.default_slippage_factor != new_config.default_slippage_factor:
+                old.default_slippage_factor = new_config.default_slippage_factor
+                changes.append("default_slippage_factor")
+                log.info("reload.updated", field="default_slippage_factor")
+
+            # Log level
+            if old.log_level != new_config.log_level:
+                old.log_level = new_config.log_level
+                setup_logging(new_config.log_level)
+                changes.append("log_level")
+                log.info("reload.updated", field="log_level")
+
+            # Telegram allowed_user_ids
+            if old.telegram.allowed_user_ids != new_config.telegram.allowed_user_ids:
+                old.telegram.allowed_user_ids = new_config.telegram.allowed_user_ids
+                changes.append("telegram.allowed_user_ids")
+                log.info("reload.updated", field="telegram.allowed_user_ids")
+
+        # 4. Strategy hot-reload (outside trade lock — uses its own patterns)
+        strategy_path = get_strategy_path()
+        new_hash = get_code_hash(strategy_path)
+        if self._scan_state.get("strategy_hash") != new_hash:
+            try:
+                new_strategy = load_strategy()
+                risk_limits = RiskLimits(
+                    max_trade_pct=self._config.risk.max_trade_pct,
+                    default_trade_pct=self._config.risk.default_trade_pct,
+                    max_positions=self._config.risk.max_positions,
+                    max_daily_loss_pct=self._config.risk.max_daily_loss_pct,
+                    max_drawdown_pct=self._config.risk.max_drawdown_pct,
+                    max_position_pct=self._config.risk.max_position_pct,
+                    max_daily_trades=self._config.risk.max_daily_trades,
+                    rollback_consecutive_losses=self._config.risk.rollback_consecutive_losses,
+                )
+                new_strategy.initialize(risk_limits, self._config.symbols)
+                # Attempt to restore state
+                try:
+                    state_row = await self._db.fetchone(
+                        "SELECT state_json FROM strategy_state ORDER BY saved_at DESC LIMIT 1"
+                    )
+                    if state_row:
+                        new_strategy.load_state(json.loads(state_row["state_json"]))
+                except Exception:
+                    pass
+                self._strategy = new_strategy
+                self._scan_state["strategy_hash"] = new_hash
+                changes.append("strategy")
+                log.info("reload.strategy_reloaded")
+
+                # Update scan interval if changed
+                new_interval = new_strategy.scan_interval_minutes
+                try:
+                    job = self._scheduler.get_job("scan")
+                    if job:
+                        self._scheduler.reschedule_job(
+                            "scan", trigger=IntervalTrigger(minutes=new_interval)
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                log.error("reload.strategy_failed", error=str(e))
+                errors.append(f"Strategy reload failed: {e}")
+
+        # 5. Notify
+        log.info("reload.complete", changes=changes, refused=refused, errors=errors)
+        if self._notifier:
+            await self._notifier.config_reloaded(changes, refused, errors)
+        if self._activity:
+            parts = []
+            if changes:
+                parts.append(f"updated: {', '.join(changes)}")
+            if refused:
+                parts.append(f"refused: {', '.join(refused)}")
+            if errors:
+                parts.append(f"errors: {len(errors)}")
+            summary = "Config reload: " + ("; ".join(parts) if parts else "no changes")
+            await self._activity.system(summary)
 
     async def _bootstrap_historical_data(self) -> None:
         """Fetch historical candles (5m, 1h, 1d) from Kraken if DB is sparse.
@@ -1621,6 +1837,11 @@ async def main() -> None:
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
+
+    def sighup_handler():
+        brain._scan_state["reload_requested"] = True
+
+    loop.add_signal_handler(signal.SIGHUP, sighup_handler)
 
     try:
         await brain.start()

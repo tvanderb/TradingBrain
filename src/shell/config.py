@@ -67,6 +67,7 @@ class NotificationConfig:
     candidate_stop_triggered: bool = True
     reflection_completed: bool = True
     signal_drought: bool = True
+    config_reloaded: bool = True
 
 
 @dataclass

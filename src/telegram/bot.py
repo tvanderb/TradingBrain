@@ -35,7 +35,7 @@ class TelegramBot:
             .build()
         )
 
-        # Register command handlers (15 commands)
+        # Register command handlers (16 commands)
         handlers = {
             "start": self._commands.cmd_help,
             "help": self._commands.cmd_help,
@@ -49,6 +49,7 @@ class TelegramBot:
             "ask": self._commands.cmd_ask,
             "orchestrate": self._commands.cmd_orchestrate,
             "reflect": self._commands.cmd_reflect,
+            "reload": self._commands.cmd_reload,
             "pause": self._commands.cmd_pause,
             "resume": self._commands.cmd_resume,
             "kill": self._commands.cmd_kill,

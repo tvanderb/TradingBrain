@@ -323,3 +323,16 @@
 - **What**: Added `candidate_signals` and `candidate_daily_performance` tables, mirroring fund-level signal and daily snapshot tracking.
 - **Why**: Without signal and daily performance data, candidate strategies can only be evaluated on trade outcomes. The orchestrator needs the full picture — what signals were generated, which were acted on, how the portfolio evolved daily — to make informed promotion decisions.
 - **Design**: Signals captured in `CandidateRunner.run_scan()`, daily snapshots in `CandidateManager.persist_state()`. Both tables pruned 30 days after candidate resolved.
+
+### Decision: Live Config Reload via SIGHUP (Session AD)
+- **What**: Config can be hot-reloaded without restarting the container. Triggered by SIGHUP signal or `/reload` Telegram command.
+- **Why**: With real money in play, every restart means 5-20 seconds of unmonitored positions. Config changes (risk limits, notification filters, orchestrator schedule) are the most frequent changes and should be zero-downtime. Baking `src/` into the Docker image meant even one-line code fixes required a 15-minute rebuild.
+- **Design**: SIGHUP sets a boolean flag checked in the keep-alive loop (between iterations, never during scan/trade). `_reload_config()` re-reads TOML files, applies safe fields under `_trade_lock`, refuses immutable fields with a reason, and hot-reloads strategy if the code hash changed. Uses in-place mutation of the Config dataclass so all components holding references see new values atomically.
+- **Safe vs immutable**: Fields that affect in-memory state only (risk limits, notification filters, schedules) are safe. Fields that require infrastructure changes (mode, symbols, DB path, API credentials, server bind address) are refused. This split was chosen to keep the reload logic simple — no need to restart WebSocket subscriptions, rebuild the data store, or reconnect to exchanges.
+- **Alternative considered**: Full restart on any config change. Rejected because most config changes are low-risk (risk limits, notification toggles) and don't warrant downtime.
+
+### Decision: Deps-Only Docker Image (Session AD)
+- **What**: Dockerfile installs only pip dependencies, not the application code. `src/` is volume-mounted into the container.
+- **Why**: numpy/scipy/pandas take 15-20 minutes to install. Previously, any code change triggered a full rebuild because `COPY src/` invalidated the pip cache layer. With deps-only image, code deploys become rsync + restart (~5 seconds). Image rebuilds only when `pyproject.toml` changes.
+- **Design**: `deploy/deploy.sh` detects what changed via rsync `--itemize-changes` and picks the minimum-downtime action: SIGHUP for config, restart for code, rebuild for deps.
+- **Trade-off**: The container now depends on the host filesystem for `src/`. If the volume mount is misconfigured, the container won't start. Acceptable because this is a single-instance deployment with Ansible managing the volume setup.

@@ -86,10 +86,30 @@ curl -H "Authorization: Bearer <API_KEY>" http://<VPS_IP>/v1/system
 
 ### Updating
 
-After code changes, re-run the playbook. It only restarts the container when relevant files change:
+#### Quick deploy (recommended for daily use)
+
+The `deploy.sh` script detects what changed and picks the minimum-downtime action:
 
 ```bash
-# Full sync (only restarts if src/, config/, or build files changed)
+deploy/deploy.sh              # Deploy everything
+deploy/deploy.sh --dry-run    # Preview without applying
+```
+
+| Changed files | Action | Downtime |
+|---------------|--------|----------|
+| `config/`, `strategy/`, `statistics/` only | SIGHUP → live config reload | **Zero** |
+| `src/` or `docker-compose.yml` | Container restart | **~5 seconds** |
+| `pyproject.toml` | Image rebuild + restart | **15-20 minutes** |
+| Nothing | No action | None |
+
+The script reads SSH connection details from `deploy/inventory.yml` (same source of truth as Ansible).
+
+#### Ansible (full infrastructure)
+
+For infrastructure changes (secrets, Caddy, Docker setup), use the Ansible playbook:
+
+```bash
+# Full sync (handler picks reload/restart/rebuild based on what changed)
 ansible-playbook playbook.yml --tags sync
 
 # Secrets only
@@ -175,6 +195,51 @@ Controls hard limits enforced by the shell. Key settings:
 | `emergency.max_drawdown_pct` | `0.40` | 40% max drawdown halt |
 | `rollback.max_daily_loss_pct` | `0.15` | 15% daily drop → strategy rollback |
 
+## Live Config Reload
+
+The system supports hot-reloading configuration without restarting the container. Trigger via:
+
+- **SIGHUP signal**: `docker kill --signal=HUP trading-brain`
+- **Telegram**: `/reload` command
+- **Deploy script**: `deploy/deploy.sh` sends SIGHUP when only config/strategy files changed
+
+After reload, a `config_reloaded` notification is sent with the list of updated, refused, and errored fields.
+
+### Reloadable Fields
+
+| Field group | Config path | What happens on reload |
+|-------------|-------------|----------------------|
+| Risk limits | `config/risk_limits.toml` (all sections) | RiskManager config replaced under trade lock |
+| Notification filters | `telegram.notifications.*` | Notifier filter replaced; takes effect on next event |
+| Orchestrator schedule | `orchestrator.start_hour`, `start_minute` | Orchestration cron job rescheduled |
+| Orchestrator settings | `orchestrator.end_hour`, `max_revisions`, etc. | Config updated in-place |
+| Fee check interval | `fees.check_interval_hours` | Fee check job rescheduled |
+| Data retention | `data.candle_*_retention_*` | Config updated; takes effect on next pruning |
+| AI models | `ai.sonnet_model`, `opus_model`, `haiku_model` | Config updated; next AI call uses new model |
+| AI token limit | `ai.daily_token_limit` | Config updated in-place |
+| Kraken fee defaults | `kraken.maker_fee_pct`, `taker_fee_pct` | Updated; overridden by per-pair fees from API |
+| Slippage factor | `general.default_slippage_factor` | Config updated in-place |
+| Log level | `general.log_level` | Logging reconfigured immediately |
+| Allowed Telegram users | `telegram.allowed_user_ids` | Updated; takes effect on next command |
+| Strategy code | `strategy/active/strategy.py` | Reloaded if file hash changed; state restored from DB |
+
+### Immutable Fields (require restart)
+
+| Field | Reason |
+|-------|--------|
+| `general.mode` | Fundamentally changes execution paths (paper vs live) |
+| `markets.symbols` | Affects WebSocket subscriptions, data store, scan loop |
+| `general.paper_balance_usd` | Meaningless after startup (portfolio already initialized) |
+| `db_path` | Requires database reconnection |
+| `telegram.bot_token` | Requires Telegram bot restart |
+| `telegram.chat_id` | Requires Telegram bot restart |
+| `kraken.api_key`, `secret_key` | Requires REST client restart |
+| `api.host`, `api.port` | Requires API server restart |
+
+If an immutable field is changed in the config file and a reload is triggered, the change is **refused** (logged with reason, old value kept) and reported in the `config_reloaded` notification.
+
+If the config file has a parse error, the entire reload is aborted (old config preserved) and an error notification is sent.
+
 ## Running (Local Docker)
 
 ```bash
@@ -187,9 +252,19 @@ docker compose logs -f
 # Stop
 docker compose down
 
-# Rebuild after code changes
+# Rebuild after dependency changes (pyproject.toml)
 docker compose up -d --build
+
+# Restart after code changes (src/ is volume-mounted)
+docker compose up -d --force-recreate
+
+# Reload config without restart (config/, strategy/, statistics/)
+docker kill --signal=HUP trading-brain
 ```
+
+> **Note**: Application code (`src/`) is volume-mounted into the container, not baked into the image.
+> The Docker image only contains pip dependencies. Code changes take effect on container restart,
+> config/strategy changes take effect on SIGHUP.
 
 ## Monitoring — Telegram Commands
 
@@ -206,6 +281,7 @@ docker compose up -d --build
 | `/ask <question>` | Context-aware question to Haiku (portfolio + risk injected) |
 | `/orchestrate` | Manually trigger nightly orchestration cycle |
 | `/reflect` | Schedule reflection for the next orchestration cycle |
+| `/reload` | Hot-reload config from disk (zero downtime) |
 | `/pause` | Pause trading (scans continue) |
 | `/resume` | Resume trading, clear risk halt |
 | `/kill` | Emergency stop — cancel all orders, close positions, shutdown |
@@ -215,10 +291,12 @@ docker compose up -d --build
 ### Paper to Live
 
 1. Edit `config/settings.toml`: change `mode = "live"`
-2. Restart: `deploy/restart.sh` (or re-run Ansible playbook)
-3. Verify via `/status` in Telegram
+2. Restart container: `docker compose up -d --force-recreate` (or `deploy/deploy.sh`)
+3. Verify via `/fund` in Telegram
 
-**Important**: `docker compose restart` does NOT re-read `.env` changes. Always use `deploy/restart.sh` or `docker compose up -d --force-recreate`.
+**Note**: `mode` is an immutable field — it cannot be live-reloaded via SIGHUP. A container restart is required.
+
+**Important**: `docker compose restart` does NOT re-read `.env` changes. Always use `docker compose up -d --force-recreate`.
 
 ### Adding Funds
 

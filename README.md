@@ -55,7 +55,8 @@ An autonomous crypto trading fund managed by AI. The system trades 24/7 — scan
 - **Strategy sandbox** with AST-based validation blocks dangerous code before execution
 - **Paper and live modes** with identical logic paths and fill confirmation
 - **Restart safety**: 9 landmine fixes — persistent starting capital, halt evaluation on startup, strategy DB fallback, orphaned position detection, config validation
-- **Telegram observability** with 14 commands for monitoring, plus an emergency kill switch
+- **Live config reload**: SIGHUP or `/reload` for zero-downtime config changes; 3-tier deploy script (SIGHUP / restart / rebuild)
+- **Telegram observability** with 16 commands for monitoring, plus an emergency kill switch
 - **REST API** (20 endpoints) and **WebSocket** event stream for programmatic access
 - **Activity log**: unified timeline across all subsystems with REST + WebSocket endpoints
 - **Observability stack**: Prometheus metrics (50+ gauges), Loki log aggregation, Grafana dashboard — all self-hosted
@@ -121,16 +122,16 @@ src/
 │   ├── metrics.py           # Prometheus /metrics endpoint (50+ gauges)
 │   └── websocket.py         # WebSocket event stream
 └── telegram/                # Telegram bot
-    ├── commands.py           # 14 bot commands
+    ├── commands.py           # 16 bot commands
     └── notifications.py      # Dual dispatch (Telegram + WebSocket)
 
 strategy/active/             # AI-rewritable strategy module
 statistics/active/           # AI-rewritable analysis modules
 config/                      # TOML configuration files
 monitoring/                  # Prometheus, Grafana provisioning, dashboard JSON
-tests/                       # 253 integration tests
+tests/                       # 264 integration tests
 docs/                        # Deployment guide and dev notes
-deploy/                      # Ansible playbooks, VPS hardening, restart script
+deploy/                      # Ansible playbooks, deploy script, VPS hardening
 ```
 
 ## Telegram Commands
@@ -148,6 +149,7 @@ deploy/                      # Ansible playbooks, VPS hardening, restart script
 | `/ask <question>` | Context-aware question to Haiku (portfolio + risk injected) |
 | `/orchestrate` | Manually trigger nightly orchestration cycle |
 | `/reflect` | Schedule reflection for the next orchestration cycle |
+| `/reload` | Hot-reload config from disk (zero downtime) |
 | `/pause` / `/resume` | Pause/resume trading |
 | `/kill` | Emergency stop — close all positions and shut down |
 
@@ -157,7 +159,7 @@ Bearer token auth. Set `API_KEY` in `.env`.
 
 **REST** (20 endpoints at `/v1/*`): system, portfolio, positions, trades, performance, risk, signals, strategy, ai/usage, benchmarks, activity, candidates, predictions, strategy-doc, strategy-doc/versions, decisions, thoughts (list/cycle/detail).
 
-**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (25 event types). Activity stream at `/v1/activity/live`.
+**WebSocket** at `/v1/events?token=<API_KEY>`: real-time event stream (26 event types including `config_reloaded`). Activity stream at `/v1/activity/live`.
 
 **Prometheus** at `/metrics`: 50+ gauges including portfolio, risk, per-position, candidates, predictions, and reflection metrics.
 

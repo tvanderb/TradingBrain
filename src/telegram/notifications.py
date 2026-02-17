@@ -47,6 +47,7 @@ _EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
     "candidate_stop_triggered":    ("CANDIDATE", "warning"),
     "reflection_completed":        ("ORCH",      "info"),
     "signal_drought":              ("SCAN",      "warning"),
+    "config_reloaded":             ("SYSTEM",    "info"),
 }
 
 
@@ -208,6 +209,10 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         hours = data.get("hours", 0)
         return f"Signal drought: {hours}h without signals"
 
+    if event_name == "config_reloaded":
+        changes = data.get("changes", [])
+        return f"Config reloaded: {len(changes)} field(s) updated" if changes else "Config reloaded: no changes"
+
     return None
 
 
@@ -234,6 +239,10 @@ class Notifier:
 
     def set_activity_logger(self, logger: ActivityLogger) -> None:
         self._activity_logger = logger
+
+    def reload_notification_config(self, config: NotificationConfig) -> None:
+        """Hot-reload notification filter config."""
+        self._tg_filter = config
 
     def _should_telegram(self, event_name: str) -> bool:
         if self._tg_filter is None:
@@ -703,6 +712,23 @@ class Notifier:
 
         data = {**trade, "slot": slot}
         await self._dispatch("candidate_stop_triggered", data, "\n".join(lines))
+
+    # --- Config Reload ---
+
+    async def config_reloaded(
+        self, changes: list[str], refused: list[str], errors: list[str],
+    ) -> None:
+        data = {"changes": changes, "refused": refused, "errors": errors}
+        lines = ["\u2699\uFE0F Config Reloaded"]
+        if changes:
+            lines.append(f"Updated: {', '.join(changes)}")
+        if refused:
+            lines.append(f"Refused: {', '.join(refused)}")
+        if errors:
+            lines.append(f"Errors: {', '.join(errors)}")
+        if not changes and not errors:
+            lines.append("No changes detected")
+        await self._dispatch("config_reloaded", data, "\n".join(lines))
 
     # --- Signal Drought ---
 

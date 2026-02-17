@@ -251,6 +251,10 @@ class RiskManager:
             signal.size_pct = max_size
         return signal
 
+    def reload_config(self, config: RiskConfig) -> None:
+        """Hot-reload risk config. Caller must hold _trade_lock."""
+        self._config = config
+
     def unhalt(self) -> None:
         """Manual unhalt (user action via Telegram)."""
         self._halted = False

@@ -2590,3 +2590,50 @@ The REST API (`src/api/routes.py`, 14 endpoints) accumulated inconsistencies ove
 
 ### Test Results
 - **253/253 passing** (12 new tests, 1 updated)
+
+## Session AD (2026-02-17) — Live Config Reload + Deployment Acceleration
+
+**Goal**: Four deployment tiers — from zero-downtime config reload to fast shell code deploys — plus a lightweight deploy script.
+
+### Dockerfile Refactor
+- Removed `COPY` for `src/`, `strategy/`, `statistics/`, `config/` — image is now deps-only
+- Pip dependencies parsed from `pyproject.toml` at build time (no `pip install .`)
+- Image only rebuilds when `pyproject.toml` changes
+
+### Docker Compose
+- Added `./src:/app/src:ro` volume mount — code deploys become rsync (seconds)
+
+### SIGHUP Handler + Config Reload (`src/main.py`)
+- `SIGHUP` signal handler sets `reload_requested` flag in `_scan_state`
+- Keep-alive loop checks flag between iterations — never interrupts scan/trade
+- `_reload_config()` method:
+  - **Safe fields** (updated under `_trade_lock`): risk, notifications, orchestrator (reschedules), fees (reschedules), data, AI models/limits, Kraken fee defaults, slippage, log level, allowed_user_ids
+  - **Refused fields** (logged with reason): mode, symbols, paper_balance_usd, db_path, telegram.bot_token/chat_id, kraken.api_key/secret_key, api.host/port
+  - **Strategy hot-reload**: checks code hash, reloads if changed
+  - Sends `config_reloaded` notification with changes/refused/errors
+
+### Component Reload Methods
+- `RiskManager.reload_config(config)` — simple attribute replacement
+- `Notifier.reload_notification_config(config)` — replaces Telegram filter
+- `Notifier.config_reloaded(changes, refused, errors)` — new notification event
+
+### `/reload` Telegram Command
+- Sets `reload_requested` flag (same as SIGHUP)
+- Added to Control group in `/help` (16 commands total)
+
+### Deploy Script (`deploy/deploy.sh`)
+- Reads SSH details from `deploy/inventory.yml`
+- Rsyncs all file groups, detects what changed
+- Picks minimum-downtime action:
+  - Tier 1: config/strategy/statistics → SIGHUP (zero downtime)
+  - Tier 2: src/docker-compose.yml → container restart (~5s)
+  - Tier 3: pyproject.toml → image rebuild (15-20 min)
+- `--dry-run` flag for preview
+
+### Ansible Playbook Updates
+- Split build sync: Dockerfile+compose → restart, pyproject.toml → rebuild
+- Config/strategy/statistics sync → `reload config` handler (SIGHUP)
+- Monitoring sync → no signal (volume-mounted)
+
+### Test Results
+- **264/264 passing** (11 new tests)

@@ -2136,7 +2136,7 @@ async def test_api_server_endpoints():
         ai = MagicMock()
         ai.get_daily_usage = AsyncMock(return_value={"used": 1000, "total_cost": 0.01, "models": {}})
         ai.tokens_remaining = 1499000
-        scan_state = {"symbols": {"BTC/USD": {"price": 45000, "spread": 0.3}}, "last_scan": "03:10:00"}
+        scan_state = {"symbols": {"BTC/USD": {"price": 45000, "spread": 0.3}}, "last_scan_at": datetime(2026, 2, 16, 3, 10, 0, tzinfo=timezone.utc)}
         commands = MagicMock()
         commands.is_paused = False
 
@@ -4704,8 +4704,8 @@ async def test_api_portfolio_and_risk_nontrivial():
             assert current["daily_pnl"] == -25.0
             assert current["daily_trades"] == 3
             assert current["consecutive_losses"] == 2
-            # Drawdown: (1100 - 950) / 1100 ≈ 0.1364
-            assert abs(current["drawdown_pct"] - 0.1364) < 0.001
+            # Drawdown: (1100 - 950) / 1100 ≈ 13.64%
+            assert abs(current["drawdown_pct"] - 13.64) < 0.1
 
         await db.close()
     finally:
@@ -7804,3 +7804,779 @@ async def test_format_since_last_cycle():
     assert "Candidate slot 2" in text
     assert "Trading halted" in text
     assert "0 errors, 1 warnings, 0 restarts" in text
+
+
+# --- API Refactor (Session AC) ---
+
+async def _make_api_client(db, scan_state=None, commands=None):
+    """Helper: create an authenticated aiohttp test client with seeded DB."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from src.api import api_key_key
+    from src.api.server import create_app
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+
+    config = load_config()
+    risk = RiskManager(config.risk)
+    portfolio = MagicMock()
+    portfolio.total_value = AsyncMock(return_value=1000.0)
+    portfolio.get_portfolio = AsyncMock(return_value=MagicMock(
+        total_value=1000.0, cash=900.0, positions=[]
+    ))
+    ai = MagicMock()
+    ai.get_daily_usage = AsyncMock(return_value={"used": 0, "total_cost": 0, "models": {}})
+    ai.tokens_remaining = 1500000
+
+    if scan_state is None:
+        scan_state = {"symbols": {}}
+    if commands is None:
+        commands = MagicMock()
+        commands.is_paused = False
+
+    app, _, _ = create_app(config, db, portfolio, risk, ai, scan_state, commands)
+    app[api_key_key] = "test-key"
+    return TestClient(TestServer(app)), {"Authorization": "Bearer test-key"}
+
+
+@pytest.mark.asyncio
+async def test_decisions_endpoint():
+    """C1: /v1/decisions returns orchestrator decision history with parsed analysis JSON."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed orchestrator_log
+        await db.execute(
+            """INSERT INTO orchestrator_log (date, action, analysis, strategy_version_from,
+               strategy_version_to, tokens_used, cost_usd, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("2026-02-16", "CREATE_CANDIDATE", '{"reasoning": "test analysis"}',
+             "v1", "v2", 5000, 0.15, "Candidate deployed to slot 1."),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/decisions", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            decisions = body["data"]
+            assert len(decisions) == 1
+
+            d = decisions[0]
+            assert d["action"] == "CREATE_CANDIDATE"
+            assert d["outcome"] == "Candidate deployed to slot 1."
+            assert d["analysis"] == {"reasoning": "test analysis"}  # Parsed from JSON string
+            assert d["tokens_used"] == 5000
+            assert d["cost_usd"] == 0.15
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_decisions_date_filter():
+    """C1b: /v1/decisions filters by since/until."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        for i, date in enumerate(["2026-02-14", "2026-02-15", "2026-02-16"]):
+            await db.execute(
+                "INSERT INTO orchestrator_log (date, action, tokens_used, cost_usd) VALUES (?, ?, ?, ?)",
+                (date, "NO_CHANGE", 1000 * (i + 1), 0.01),
+            )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/decisions?since=2026-02-15", headers=headers)
+            body = await resp.json()
+            assert len(body["data"]) == 2
+
+            resp = await client.get("/v1/decisions?since=2026-02-15&until=2026-02-15", headers=headers)
+            body = await resp.json()
+            assert len(body["data"]) == 1
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_thoughts_list():
+    """C2: /v1/thoughts returns cycle aggregation."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Two cycles, different step counts
+        for step in ["analysis", "code_gen", "code_review"]:
+            await db.execute(
+                "INSERT INTO orchestrator_thoughts (cycle_id, step, model, full_response) VALUES (?, ?, ?, ?)",
+                ("cycle_001", step, "opus", "response text"),
+            )
+        await db.execute(
+            "INSERT INTO orchestrator_thoughts (cycle_id, step, model, full_response) VALUES (?, ?, ?, ?)",
+            ("cycle_002", "analysis", "sonnet", "response text"),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/thoughts", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            cycles = body["data"]
+            assert len(cycles) == 2
+
+            # Verify both cycles present with correct step counts
+            by_cycle = {c["cycle_id"]: c for c in cycles}
+            assert by_cycle["cycle_001"]["step_count"] == 3
+            assert by_cycle["cycle_002"]["step_count"] == 1
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_thoughts_cycle():
+    """C3: /v1/thoughts/{cycle_id} returns steps list, 404 on unknown cycle."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            "INSERT INTO orchestrator_thoughts (cycle_id, step, model, full_response) VALUES (?, ?, ?, ?)",
+            ("cycle_abc", "analysis", "opus", "big response"),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            # Valid cycle
+            resp = await client.get("/v1/thoughts/cycle_abc", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            steps = body["data"]
+            assert len(steps) == 1
+            assert steps[0]["step"] == "analysis"
+            assert "response_length" in steps[0]
+            assert "full_response" not in steps[0]  # Not included in list
+
+            # Unknown cycle → 404
+            resp = await client.get("/v1/thoughts/nonexistent", headers=headers)
+            assert resp.status == 404
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_thoughts_detail():
+    """C4: /v1/thoughts/{cycle_id}/{step} returns full detail, parses parsed_result, 404."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            """INSERT INTO orchestrator_thoughts (cycle_id, step, model, input_summary, full_response, parsed_result)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("cycle_xyz", "code_review", "opus", "strategy summary",
+             "The strategy looks good.", '{"approved": true}'),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            # Valid step
+            resp = await client.get("/v1/thoughts/cycle_xyz/code_review", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            d = body["data"]
+            assert d["step"] == "code_review"
+            assert d["full_response"] == "The strategy looks good."
+            assert d["parsed_result"] == {"approved": True}  # JSON parsed
+
+            # Unknown step → 404
+            resp = await client.get("/v1/thoughts/cycle_xyz/nonexistent", headers=headers)
+            assert resp.status == 404
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_strategy_doc_current():
+    """C5: /v1/strategy-doc reads the live strategy document file."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/strategy-doc", headers=headers)
+            # File may or may not exist — just verify shape if 200
+            if resp.status == 200:
+                body = await resp.json()
+                assert "content" in body["data"]
+                assert "length" in body["data"]
+                assert body["data"]["length"] == len(body["data"]["content"])
+            else:
+                assert resp.status == 404
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_strategy_doc_version_detail():
+    """C6: /v1/strategy-doc/versions/{version} returns content, 404 on missing, 400 on non-integer."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            "INSERT INTO strategy_doc_versions (version, content, reflection_cycle_id) VALUES (?, ?, ?)",
+            (1, "# Strategy v1\nBe patient.", "cycle_001"),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            # Valid version
+            resp = await client.get("/v1/strategy-doc/versions/1", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["version"] == 1
+            assert "Be patient" in body["data"]["content"]
+
+            # Missing version → 404
+            resp = await client.get("/v1/strategy-doc/versions/999", headers=headers)
+            assert resp.status == 404
+
+            # Non-integer → 400
+            resp = await client.get("/v1/strategy-doc/versions/abc", headers=headers)
+            assert resp.status == 400
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_pct_normalization_risk():
+    """D8: Risk limits and current values are percentages (10.0 not 0.10)."""
+    from src.shell.database import Database
+    from src.shell.risk import RiskManager
+    from src.shell.config import load_config
+
+    config = load_config()
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/risk", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            limits = body["data"]["limits"]
+
+            # Config has fractions (e.g., 0.10), API should return percentages (e.g., 10.0)
+            assert limits["max_trade_pct"] == round(config.risk.max_trade_pct * 100, 2)
+            assert limits["max_position_pct"] == round(config.risk.max_position_pct * 100, 2)
+            assert limits["max_drawdown_pct"] == round(config.risk.max_drawdown_pct * 100, 2)
+            assert limits["max_daily_loss_pct"] == round(config.risk.max_daily_loss_pct * 100, 2)
+
+            # All should be > 1 (they're percentages, not fractions)
+            assert limits["max_trade_pct"] >= 1.0
+            assert limits["max_drawdown_pct"] >= 1.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_pct_normalization_trades():
+    """D9: Trade pnl_pct stored as fraction in DB, returned as percentage via API."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        await db.execute(
+            """INSERT INTO trades (symbol, side, qty, entry_price, exit_price, pnl, pnl_pct,
+               fees, opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("BTC/USD", "long", 0.01, 50000, 51150, 11.50, 0.023,
+             2.0, "2026-02-15 10:00:00", "2026-02-16 10:00:00"),
+        )
+        await db.commit()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/trades", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            trades = body["data"]
+            assert len(trades) == 1
+            # 0.023 → 2.3%
+            assert abs(trades[0]["pnl_pct"] - 2.3) < 0.01
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_date_validation_invalid():
+    """D10: Invalid date params return 400 on trades, performance, signals."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            for endpoint in ["/v1/trades", "/v1/performance", "/v1/signals"]:
+                resp = await client.get(f"{endpoint}?since=banana", headers=headers)
+                assert resp.status == 400, f"{endpoint} should reject since=banana"
+                body = await resp.json()
+                assert body["error"]["code"] == "invalid_param"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_strategy_no_paper_test():
+    """D11: /v1/strategy response no longer contains paper_test key."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        client, headers = await _make_api_client(db)
+        async with client:
+            resp = await client.get("/v1/strategy", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            assert "paper_test" not in body["data"]
+            assert "active" in body["data"]
+            assert "recent_versions" in body["data"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_system_last_scan_format():
+    """D12: /v1/system last_scan is ISO datetime from last_scan_at, None when absent."""
+    from src.shell.database import Database
+
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # No scan yet
+        client, headers = await _make_api_client(db, scan_state={"symbols": {}})
+        async with client:
+            resp = await client.get("/v1/system", headers=headers)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["last_scan"] is None
+
+        # With a scan
+        scan_time = datetime(2026, 2, 16, 3, 10, 5, tzinfo=timezone.utc)
+        client2, headers2 = await _make_api_client(db, scan_state={"symbols": {}, "last_scan_at": scan_time})
+        async with client2:
+            resp = await client2.get("/v1/system", headers=headers2)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["data"]["last_scan"] == "2026-02-16T03:10:05+00:00"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Config Reload ---
+
+def test_risk_manager_reload_config():
+    """RiskManager.reload_config() replaces internal config."""
+    from src.shell.config import RiskConfig
+    from src.shell.risk import RiskManager
+
+    config1 = RiskConfig(max_trade_pct=0.05)
+    config2 = RiskConfig(max_trade_pct=0.10)
+    rm = RiskManager(config1)
+    assert rm._config.max_trade_pct == 0.05
+    rm.reload_config(config2)
+    assert rm._config.max_trade_pct == 0.10
+
+
+def test_notifier_reload_notification_config():
+    """Notifier.reload_notification_config() replaces filter."""
+    from src.shell.config import NotificationConfig
+    from src.telegram.notifications import Notifier
+
+    nc1 = NotificationConfig(scan_complete=False)
+    nc2 = NotificationConfig(scan_complete=True)
+    n = Notifier(chat_id="123", tg_filter=nc1)
+    assert not n._should_telegram("scan_complete")
+    n.reload_notification_config(nc2)
+    assert n._should_telegram("scan_complete")
+
+
+@pytest.mark.asyncio
+async def test_notifier_config_reloaded_event():
+    """config_reloaded notification dispatches correctly."""
+    from src.telegram.notifications import Notifier
+
+    n = Notifier(chat_id="123")
+    n._broadcast_ws = AsyncMock()
+    n._send_telegram = AsyncMock()
+
+    await n.config_reloaded(["risk", "fees"], ["mode"], [])
+    n._broadcast_ws.assert_called_once()
+    call_args = n._broadcast_ws.call_args
+    assert call_args[0][0] == "config_reloaded"
+    assert call_args[0][1]["changes"] == ["risk", "fees"]
+    assert call_args[0][1]["refused"] == ["mode"]
+
+
+@pytest.mark.asyncio
+async def test_reload_config_updates_risk_limits():
+    """_reload_config updates RiskManager when risk config changes."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    new_config = load_config()
+    new_config.risk.max_trade_pct = 0.08
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value=brain._scan_state.get("strategy_hash", "same")):
+            await TradingBrain._reload_config(brain)
+
+    assert brain._risk._config.max_trade_pct == 0.08
+    assert brain._config.risk.max_trade_pct == 0.08
+
+
+@pytest.mark.asyncio
+async def test_reload_config_refuses_immutable_fields():
+    """_reload_config refuses mode/symbols changes and keeps old values."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    new_config = load_config()
+    new_config.mode = "live"
+    new_config.symbols = ["BTC/USD"]
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value=brain._scan_state.get("strategy_hash", "same")):
+            await TradingBrain._reload_config(brain)
+
+    assert brain._config.mode == "paper"
+    assert len(brain._config.symbols) == 9
+
+    call_args = brain._notifier._broadcast_ws.call_args
+    data = call_args[0][1]
+    assert "mode" in data["refused"]
+    assert "symbols" in data["refused"]
+
+
+@pytest.mark.asyncio
+async def test_reload_config_handles_parse_error():
+    """_reload_config handles TOML parse errors gracefully."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+    original_risk = config.risk.max_trade_pct
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", side_effect=ValueError("Bad TOML")):
+        await TradingBrain._reload_config(brain)
+
+    assert brain._config.risk.max_trade_pct == original_risk
+
+    call_args = brain._notifier._broadcast_ws.call_args
+    data = call_args[0][1]
+    assert len(data["errors"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_reload_config_updates_notification_filter():
+    """_reload_config updates Notifier filter when notification config changes."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123", tg_filter=config.telegram.notifications)
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    new_config = load_config()
+    new_config.telegram.notifications.scan_complete = not config.telegram.notifications.scan_complete
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value=brain._scan_state.get("strategy_hash", "same")):
+            await TradingBrain._reload_config(brain)
+
+    assert brain._notifier._tg_filter.scan_complete == new_config.telegram.notifications.scan_complete
+
+
+@pytest.mark.asyncio
+async def test_reload_config_sends_notification():
+    """_reload_config sends config_reloaded notification even with no changes."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    new_config = load_config()
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value=brain._scan_state.get("strategy_hash", "same")):
+            await TradingBrain._reload_config(brain)
+
+    brain._notifier._broadcast_ws.assert_called_once()
+    event_name = brain._notifier._broadcast_ws.call_args[0][0]
+    assert event_name == "config_reloaded"
+
+
+@pytest.mark.asyncio
+async def test_reload_config_acquires_trade_lock():
+    """_reload_config acquires trade lock during config update."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = None
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    lock_acquired = False
+    original_acquire = brain._trade_lock.acquire
+
+    async def tracking_acquire():
+        nonlocal lock_acquired
+        lock_acquired = True
+        return await original_acquire()
+
+    brain._trade_lock.acquire = tracking_acquire
+
+    new_config = load_config()
+    new_config.risk.max_trade_pct = 0.09
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value=brain._scan_state.get("strategy_hash", "same")):
+            await TradingBrain._reload_config(brain)
+
+    assert lock_acquired
+
+
+@pytest.mark.asyncio
+async def test_reload_config_reschedules_orchestration():
+    """_reload_config reschedules orchestration job when start time changes."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    scheduler = MagicMock()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = scheduler
+    brain._strategy = None
+    brain._db = MagicMock()
+
+    new_config = load_config()
+    new_config.orchestrator.start_hour = 5
+
+    # Use a stable hash to prevent strategy reload from also calling reschedule_job
+    brain._scan_state["strategy_hash"] = "stable"
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=new_config):
+        with patch("src.main.get_code_hash", return_value="stable"):
+            await TradingBrain._reload_config(brain)
+
+    scheduler.reschedule_job.assert_called()
+    # Find the orchestration reschedule among all calls
+    orch_calls = [c for c in scheduler.reschedule_job.call_args_list if c[0][0] == "orchestration"]
+    assert len(orch_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reload_config_reloads_strategy():
+    """_reload_config reloads strategy when code hash changes."""
+    from src.shell.config import load_config
+    from src.shell.risk import RiskManager
+    from src.telegram.notifications import Notifier
+
+    config = load_config()
+
+    brain = MagicMock()
+    brain._config = config
+    brain._risk = RiskManager(config.risk)
+    brain._notifier = Notifier(chat_id="123")
+    brain._notifier._broadcast_ws = AsyncMock()
+    brain._notifier._send_telegram = AsyncMock()
+    brain._activity = None
+    brain._scan_state = {"strategy_hash": "old_hash"}
+    brain._trade_lock = asyncio.Lock()
+    brain._scheduler = MagicMock()
+    brain._scheduler.get_job = MagicMock(return_value=None)
+    brain._strategy = None
+    brain._db = MagicMock()
+    brain._db.fetchone = AsyncMock(return_value=None)
+
+    mock_strategy = MagicMock()
+    mock_strategy.scan_interval_minutes = 5
+
+    from src.main import TradingBrain
+    with patch("src.main.load_config", return_value=load_config()):
+        with patch("src.main.get_code_hash", return_value="new_hash"):
+            with patch("src.main.load_strategy", return_value=mock_strategy):
+                await TradingBrain._reload_config(brain)
+
+    assert brain._strategy == mock_strategy
+    assert brain._scan_state["strategy_hash"] == "new_hash"
+
+    call_args = brain._notifier._broadcast_ws.call_args
+    data = call_args[0][1]
+    assert "strategy" in data["changes"]

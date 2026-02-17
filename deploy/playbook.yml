@@ -129,6 +129,7 @@
         rsync_opts:
           - "--exclude=__pycache__"
       tags: [sync]
+      notify: reload config
 
     - name: Sync statistics files
       synchronize:
@@ -137,13 +138,14 @@
         rsync_opts:
           - "--exclude=__pycache__"
       tags: [sync]
+      notify: reload config
 
     - name: Sync config files
       synchronize:
         src: "{{ project_root }}/config/"
         dest: "{{ deploy_dir }}/config/"
       tags: [sync]
-      notify: restart container
+      notify: reload config
 
     - name: Sync monitoring config
       synchronize:
@@ -151,7 +153,6 @@
         dest: "{{ deploy_dir }}/monitoring/"
         delete: true
       tags: [sync]
-      notify: restart container
 
     - name: Fix ownership on mounted volumes (container runs as uid 1000)
       file:
@@ -167,7 +168,7 @@
         - "{{ deploy_dir }}/statistics/archive"
       tags: [sync]
 
-    - name: Sync build files
+    - name: Sync container config (Dockerfile + docker-compose)
       copy:
         src: "{{ item.src }}"
         dest: "{{ deploy_dir }}/{{ item.dest }}"
@@ -175,7 +176,14 @@
       loop:
         - { src: "{{ project_root }}/Dockerfile", dest: "Dockerfile" }
         - { src: "{{ project_root }}/docker-compose.yml", dest: "docker-compose.yml" }
-        - { src: "{{ project_root }}/pyproject.toml", dest: "pyproject.toml" }
+      tags: [sync]
+      notify: restart container
+
+    - name: Sync pyproject.toml (triggers image rebuild)
+      copy:
+        src: "{{ project_root }}/pyproject.toml"
+        dest: "{{ deploy_dir }}/pyproject.toml"
+        mode: "0644"
       tags: [sync]
       notify: rebuild container
 
@@ -325,6 +333,9 @@
 
     - name: restart container
       command: docker compose -f {{ deploy_dir }}/docker-compose.yml up -d --force-recreate
+
+    - name: reload config
+      command: docker kill --signal=HUP trading-brain
 
     - name: reload caddy
       systemd:

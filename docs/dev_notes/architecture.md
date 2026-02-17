@@ -572,3 +572,54 @@ region = "us-east5"
 ```
 
 Both use identical message format. Clean swap via config flag.
+
+## Live Config Reload (Session AD)
+
+The system supports zero-downtime config reload via SIGHUP or `/reload` Telegram command.
+
+### Signal Flow
+
+```
+SIGHUP / /reload
+   │
+   ▼
+scan_state["reload_requested"] = True
+   │
+   ▼ (keep-alive loop, between iterations — never interrupts scan/trade)
+_reload_config()
+   │
+   ├── 1. load_config() from disk
+   │      └── On parse error → abort, notify error, keep old config
+   │
+   ├── 2. Check immutable fields → refuse with reason
+   │
+   ├── 3. Apply safe fields (under _trade_lock)
+   │      ├── risk → RiskManager.reload_config()
+   │      ├── notifications → Notifier.reload_notification_config()
+   │      ├── orchestrator → reschedule cron job if start time changed
+   │      ├── fees → reschedule fee check if interval changed
+   │      ├── data, AI models, Kraken fees, slippage, log level, allowed_user_ids
+   │      └── In-place mutation of Config dataclass (all component references see new values)
+   │
+   ├── 4. Strategy hot-reload (outside trade lock)
+   │      └── Compare code hash → load_strategy() + initialize() + restore state
+   │
+   └── 5. Notify: config_reloaded event (changes/refused/errors)
+```
+
+### Concurrency Safety
+
+- `_trade_lock` is acquired during the config update phase (step 3)
+- The reload runs on the main asyncio event loop between keep-alive iterations
+- It can never interrupt a scan (separate scheduled job) or trade execution
+- Multiple rapid SIGHUPs coalesce (boolean flag — only one reload runs)
+
+### Deployment Tiers
+
+| Tier | Changed | Command | Downtime |
+|------|---------|---------|----------|
+| 1 | config/, strategy/, statistics/ | `deploy/deploy.sh` → SIGHUP | Zero |
+| 2 | src/, docker-compose.yml | `deploy/deploy.sh` → restart | ~5 seconds |
+| 3 | pyproject.toml | `deploy/deploy.sh` → rebuild | 15-20 min |
+
+The Dockerfile is deps-only (no `COPY src/`). Application code is volume-mounted (`./src:/app/src:ro`). Image rebuilds only when pip dependencies change.
