@@ -173,3 +173,15 @@ while running:
 ## Grafana library panels lost on volume wipe (Session X)
 **Problem**: Library panels are stored in Grafana's **internal database**, not on disk. Converting inline panels to library panel references (Session V) made the dashboard dependent on Grafana's state. Wiping the volume (fresh deploy) lost all 63 library panels — dashboard showed "Unable to load library panel" for every panel.
 **Fix**: `monitoring/build_dashboard.py` script converts all library panel references back to inline definitions. Dashboard is now fully self-contained. Run `python3 monitoring/build_dashboard.py` to regenerate.
+
+## VPS file ownership blocks rsync (Session AD)
+**Problem**: Ansible's initial file sync creates files owned by macOS UID 501 (the local user), not the VPS `trading` user (UID 1000). Subsequent rsync from `deploy.sh` runs as `trading` but silently fails to overwrite 501-owned files. The script reports "X files changed" but files are never actually updated.
+**Fix**: Run `sudo chown -R trading:trading /srv/trading-brain/` on VPS. Future deploys use `deploy.sh` which runs as `trading`, creating correctly-owned files. Only happens after initial Ansible setup or if someone manually copies files.
+
+## Docker legacy builder chokes on multiline RUN (Session AD)
+**Problem**: VPS uses Docker's legacy builder (no buildx). A `RUN pip install $(python3 -c "...\n...")` with newlines in the Python script causes each line to be parsed as a Dockerfile instruction. `import tomllib` becomes "unknown instruction: import".
+**Fix**: Collapse multiline Python to single line: `python3 -c "import tomllib; deps=..."`. Or install buildx on VPS.
+
+## rsync --itemize-changes output format (Session AD)
+**Problem**: rsync uses `<fcst....` prefix for files being sent TO the remote (not `>` as one might expect). A grep pattern of `'^[>c]'` misses all file transfers and reports "No changes" even when files differ.
+**Fix**: Use `'^[<>c*]'` to match all transfer types: `<` (sent), `>` (received), `c` (local change), `*` (messages like `*deleting`).

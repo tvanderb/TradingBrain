@@ -1,6 +1,6 @@
 # Trading Brain: System Goal, Roadmap & Risk Analysis
 
-> Created: 2026-02-08 | Updated: 2026-02-17 | Status: Deployed on VPS, paper trading
+> Created: 2026-02-08 | Updated: 2026-02-17 | Status: Deployed on VPS, paper trading, 264/264 tests
 
 ---
 
@@ -51,8 +51,8 @@
 | AI client (Anthropic + Vertex, token tracking, retry) | Working |
 | Orchestrator (nested loops, candidates, reflection, predictions) | Working |
 | Reporter (daily/weekly summaries) | Working |
-| Telegram bot (15 commands, /fund, /outlook, /ask, /orchestrate) | Working |
-| Notifier (19 event types, dual dispatch, signal drought) | Working |
+| Telegram bot (16 commands, /fund, /outlook, /ask, /orchestrate, /reload) | Working |
+| Notifier (26 event types, dual dispatch, signal drought, config_reloaded) | Working |
 | Data API (20 REST endpoints, WebSocket, activity stream) | Working |
 | Statistics modules (market + trade performance) | Working |
 | Truth benchmarks (28 metrics, cached) | Working |
@@ -62,7 +62,8 @@
 | Observability (Prometheus /metrics, Loki, Grafana 53-panel dashboard) | Working |
 | Activity log (unified timeline, REST + WS endpoints) | Working |
 | Main (lifecycle, scheduler, restart safety L1-L9) | Working |
-| Integration tests | **253/253 all green** |
+| Live config reload (SIGHUP + /reload, 3-tier deploy) | Working |
+| Integration tests | **264/264 all green** |
 
 All previously known issues from 11 audit rounds (Sessions 10-H) have been resolved. See progress.md for detailed fix history.
 
@@ -97,7 +98,7 @@ All previously known issues from 11 audit rounds (Sessions 10-H) have been resol
 
 **7. Token Cost Creep** — LOW RISK
 - Even "no change" nights cost ~$0.30-0.50. Budget $22-45/month.
-- Token tracking built in. `/tokens` shows usage. Budget limits enforced.
+- Token tracking built in. Daily limit enforced. Usage visible via `/ask` or API.
 
 **8. Paper vs Live Divergence** — MEDIUM RISK
 - Paper simulates slippage but real slippage may be worse on low-liquidity pairs.
@@ -134,9 +135,9 @@ All previously known issues from 11 audit rounds (Sessions 10-H) have been resol
 ## Future Implementation Roadmap
 
 ### Phase 0: Statistics Shell & Orchestrator Upgrade — COMPLETE
-All 9 implementation steps complete (Sessions 5-9). Then 11 audit sessions hardened the system. Deployed to VPS. 253/253 tests passing.
+All 9 implementation steps complete (Sessions 5-9). Then 11 audit sessions hardened the system. Deployed to VPS. 264/264 tests passing.
 
-### Phase 1: Paper Validation (Weeks 1-4) — IN PROGRESS
+### Phase 1: Paper Validation — IN PROGRESS (started 2026-02-12)
 **Goal**: Prove the system works end-to-end. First trades. First orchestration cycles.
 
 - [x] Run paper trading 24/7 on VPS
@@ -145,25 +146,24 @@ All 9 implementation steps complete (Sessions 5-9). Then 11 audit sessions harde
 - [x] Candidate strategy system (Session T)
 - [x] Institutional learning system — predictions + reflection (Session W)
 - [x] Decision feedback loop (Session AB)
-- [ ] First successful orchestration cycle with strategy changes
+- [x] Live config reload + 3-tier deploy (Session AD)
 - [ ] 10+ paper trades completed
-- [ ] 5+ orchestration cycles completed
-- [ ] Observe strategy evolution (v001 → v002 → ...)
+- [ ] 5+ orchestration cycles with strategy changes
+- [ ] Observe strategy evolution and candidate promotions
 - [ ] Gather baseline performance data
 
-**Exit criteria**: System has completed 10+ paper trades and 5+ orchestration cycles
+**Exit criteria**: System has completed 10+ paper trades and 5+ orchestration cycles with strategy changes
 
-### Phase 2: Strategy Maturation (Weeks 5-8)
+### Phase 2: Strategy Maturation
 **Goal**: Strategy stabilizes from frequent iteration to measured improvement.
 
 - Review strategy document after 1 month of reflections
 - Analyze win/loss patterns across market conditions
-- First quarterly document distillation
 - Expanded analysis capabilities
 
 **Exit criteria**: Positive expectancy over 30+ trades, strategy stabilizing
 
-### Phase 3: Go Live (Months 3-4)
+### Phase 3: Go Live
 **Goal**: Deploy with real money, smallest viable positions.
 
 - Live mode with $200 real capital
