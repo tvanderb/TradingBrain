@@ -316,7 +316,7 @@ class TradingBrain:
             # Check manual orchestration trigger
             if self._scan_state.get("orchestrate_requested"):
                 self._scan_state["orchestrate_requested"] = False
-                asyncio.create_task(self._nightly_orchestration())
+                asyncio.create_task(self._nightly_orchestration(trigger="manual"))
 
     def _on_ws_done(self, task: asyncio.Task) -> None:
         """Handle WebSocket task completion — log any unexpected errors."""
@@ -325,6 +325,18 @@ class TradingBrain:
         exc = task.exception()
         if exc:
             log.error("websocket.task_failed", error=str(exc), type=type(exc).__name__)
+
+    def _get_effective_cycle_times(self) -> list[tuple[int, int]]:
+        """Return list of (hour, minute) tuples for orchestration scheduling."""
+        orch = self._config.orchestrator
+        if orch.cycle_times:
+            times = []
+            for ct in orch.cycle_times:
+                h, m = ct.split(":")
+                times.append((int(h), int(m)))
+            return times
+        # Legacy fallback
+        return [(orch.start_hour, orch.start_minute)]
 
     def _setup_jobs(self) -> None:
         """Configure all scheduled jobs."""
@@ -364,13 +376,14 @@ class TradingBrain:
             id="daily_reset", name="Daily Reset",
         )
 
-        # Nightly orchestration
-        self._scheduler.add_job(
-            self._nightly_orchestration,
-            CronTrigger(hour=self._config.orchestrator.start_hour,
-                        minute=self._config.orchestrator.start_minute),
-            id="orchestration", name="Nightly Orchestration",
-        )
+        # Orchestration cycles
+        for i, (hour, minute) in enumerate(self._get_effective_cycle_times()):
+            self._scheduler.add_job(
+                self._nightly_orchestration,
+                CronTrigger(hour=hour, minute=minute),
+                id=f"orchestration_{i}",
+                name=f"Orchestration ({hour:02d}:{minute:02d})",
+            )
 
         # Weekly report
         self._scheduler.add_job(
@@ -451,23 +464,24 @@ class TradingBrain:
             old_orch = old.orchestrator
             new_orch = new_config.orchestrator
             if vars(old_orch) != vars(new_orch):
-                reschedule = (old_orch.start_hour != new_orch.start_hour or
-                              old_orch.start_minute != new_orch.start_minute)
                 old.orchestrator = new_config.orchestrator
                 changes.append("orchestrator")
                 log.info("reload.updated", field="orchestrator")
-                # Reschedule orchestration job if start time changed
-                if reschedule and self._scheduler:
+                # Reschedule orchestration jobs
+                if self._scheduler:
                     try:
-                        self._scheduler.reschedule_job(
-                            "orchestration",
-                            trigger=CronTrigger(
-                                hour=new_orch.start_hour,
-                                minute=new_orch.start_minute,
-                            ),
-                        )
+                        for job in self._scheduler.get_jobs():
+                            if job.id.startswith("orchestration_"):
+                                self._scheduler.remove_job(job.id)
+                        for i, (hour, minute) in enumerate(self._get_effective_cycle_times()):
+                            self._scheduler.add_job(
+                                self._nightly_orchestration,
+                                CronTrigger(hour=hour, minute=minute),
+                                id=f"orchestration_{i}",
+                                name=f"Orchestration ({hour:02d}:{minute:02d})",
+                            )
                         log.info("reload.orchestration_rescheduled",
-                                 hour=new_orch.start_hour, minute=new_orch.start_minute)
+                                 cycle_times=self._config.orchestrator.cycle_times)
                     except Exception as e:
                         log.warning("reload.reschedule_failed", error=str(e))
 
@@ -1453,17 +1467,13 @@ class TradingBrain:
         if self._activity:
             await self._activity.system("Daily reset: counters cleared")
 
-    async def _nightly_orchestration(self) -> None:
-        """Run the nightly AI review cycle with timeout enforcement."""
-        # Enforce end_hour window (e.g., 3 hours from start_hour to end_hour)
-        window_hours = self._config.orchestrator.end_hour - self._config.orchestrator.start_hour
-        if window_hours <= 0:
-            window_hours += 24  # Handle wrap-around (e.g., start=23, end=2)
-        timeout_seconds = window_hours * 3600
+    async def _nightly_orchestration(self, trigger: str = "scheduled") -> None:
+        """Run the AI review cycle with timeout enforcement."""
+        timeout_seconds = self._config.orchestrator.max_cycle_duration_hours * 3600
 
         try:
             report = await asyncio.wait_for(
-                self._orchestrator.run_nightly_cycle(), timeout=timeout_seconds,
+                self._orchestrator.run_nightly_cycle(trigger=trigger), timeout=timeout_seconds,
             )
 
             # Reload strategy if it was changed
@@ -1516,9 +1526,10 @@ class TradingBrain:
 
             await self._notifier.daily_summary(report)
         except asyncio.TimeoutError:
-            log.error("orchestration.timeout", window_hours=window_hours)
+            max_hours = self._config.orchestrator.max_cycle_duration_hours
+            log.error("orchestration.timeout", max_hours=max_hours)
             await self._notifier.system_error(
-                f"Orchestration timed out after {window_hours}h window"
+                f"Orchestration timed out after {max_hours}h"
             )
         except Exception as e:
             log.error("orchestration.failed", error=str(e))

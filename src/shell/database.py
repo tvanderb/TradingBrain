@@ -451,6 +451,8 @@ MIGRATIONS = [
      "ALTER TABLE candidate_trades ADD COLUMN max_adverse_excursion REAL"),
     # Session AB: Decision feedback loop — store execution outcome
     ("orchestrator_log", "outcome", "ALTER TABLE orchestrator_log ADD COLUMN outcome TEXT"),
+    # Session AE: Multi-action cycles — group log rows by cycle
+    ("orchestrator_log", "cycle_id", "ALTER TABLE orchestrator_log ADD COLUMN cycle_id TEXT"),
 ]
 
 

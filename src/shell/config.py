@@ -88,9 +88,11 @@ class TelegramConfig:
 
 @dataclass
 class OrchestratorConfig:
-    start_hour: int = 3
-    start_minute: int = 30
-    end_hour: int = 6
+    start_hour: int = 3                          # Legacy fallback
+    start_minute: int = 30                       # Legacy fallback
+    end_hour: int = 6                            # Legacy fallback (unused if cycle_times set)
+    cycle_times: list[str] = field(default_factory=list)  # e.g. ["03:30", "15:30"]
+    max_cycle_duration_hours: float = 2.5
     max_revisions: int = 12             # inner loop: code quality iterations
     max_strategy_iterations: int = 9    # outer loop: Opus strategy direction
     max_candidates: int = 3             # max simultaneous candidate strategy slots
@@ -195,6 +197,8 @@ def load_config() -> Config:
         config.orchestrator.start_hour = orch.get("start_hour", config.orchestrator.start_hour)
         config.orchestrator.start_minute = orch.get("start_minute", config.orchestrator.start_minute)
         config.orchestrator.end_hour = orch.get("end_hour", config.orchestrator.end_hour)
+        config.orchestrator.cycle_times = orch.get("cycle_times", config.orchestrator.cycle_times)
+        config.orchestrator.max_cycle_duration_hours = orch.get("max_cycle_duration_hours", config.orchestrator.max_cycle_duration_hours)
         config.orchestrator.max_revisions = orch.get("max_revisions", config.orchestrator.max_revisions)
         config.orchestrator.max_strategy_iterations = orch.get("max_strategy_iterations", config.orchestrator.max_strategy_iterations)
         config.orchestrator.max_candidates = orch.get("max_candidates", config.orchestrator.max_candidates)
@@ -299,6 +303,18 @@ def _validate_config(config: Config) -> None:
     if hasattr(config, 'api') and config.api.enabled:
         if not (1 <= config.api.port <= 65535):
             errors.append(f"api.port must be 1-65535, got {config.api.port}")
+
+    # Orchestrator cycle_times validation
+    import re as _re
+    for ct in config.orchestrator.cycle_times:
+        if not _re.fullmatch(r"\d{2}:\d{2}", ct):
+            errors.append(f"cycle_times entry must be HH:MM format, got '{ct}'")
+        else:
+            h, m = int(ct[:2]), int(ct[3:])
+            if not (0 <= h <= 23):
+                errors.append(f"cycle_times hour must be 00-23, got '{ct}'")
+            if not (0 <= m <= 59):
+                errors.append(f"cycle_times minute must be 00-59, got '{ct}'")
 
     # L6: Timezone validity
     try:

@@ -718,3 +718,47 @@ async def test_manager_heartbeat_logging():
         await db.close()
     finally:
         os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_candidate_context_enhanced_fields():
+    """get_context_for_orchestrator includes running_hours and total_scans."""
+    from src.candidates.manager import CandidateManager
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        await mgr.initialize()
+
+        # Create a candidate
+        await mgr.create_candidate(
+            slot=1,
+            code=VALID_STRATEGY_CODE,
+            version="v_test_context",
+            description="test enhanced context",
+        )
+
+        # Insert a scan_result so total_scans > 0
+        await db.execute(
+            "INSERT INTO scan_results (timestamp, symbol, price) VALUES (datetime('now', 'utc'), 'BTC/USD', 50000.0)"
+        )
+        await db.commit()
+
+        context = await mgr.get_context_for_orchestrator()
+        slot1 = context[0]
+
+        assert slot1["slot"] == 1
+        assert "running_hours" in slot1
+        assert isinstance(slot1["running_hours"], float)
+        assert slot1["running_hours"] >= 0
+        assert "total_scans" in slot1
+        assert slot1["total_scans"] >= 1
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)

@@ -65,7 +65,7 @@ STRATEGY_DOC_PATH = (
 # Layer 1 (Identity) + Fund Mandate + Layer 2 (System Understanding)
 # Concatenated at runtime in _analyze(). See discussions.md Sessions 7-8.
 
-LAYER_1_IDENTITY = """You are the fund manager for a crypto trading fund. You normally operate nightly — reviewing performance, analyzing markets, and deciding whether to modify the trading strategy or your analysis tools. The investor can also trigger your cycle manually at any time via a Telegram command. Use the CURRENT TIME header to determine whether this is a scheduled nightly run or a manual daytime trigger. Each observation is keyed by calendar date — if you run multiple times in one day, only the latest observation is kept.
+LAYER_1_IDENTITY = """You are the fund manager for a crypto trading fund. You review performance, analyze markets, and decide whether to modify the trading strategy or your analysis tools. Each observation is keyed by calendar date — if you run multiple times in one day, only the latest observation is kept.
 
 ## Your Character
 
@@ -152,7 +152,7 @@ The backtester simulates the most recent 30 days of trading at 1h resolution. SL
 
 **Data context**: At every simulation timestamp, the strategy sees up to 365 days of daily candles and 365 days of hourly candles as lookback for indicator warmup (e.g., 50-period or 200-period daily EMAs work fine). The 30-day limit applies only to 5m candles (Kraken API constraint) and the simulation window itself.
 
-**Purpose**: The backtest is a sanity gate, not a performance proof. 30 days produces too few trades for statistical significance on swing strategies. Its job is to verify: (1) the strategy code runs without errors, (2) it actually generates signals and trades, (3) it doesn't produce catastrophic drawdowns. The real performance evaluation happens during the candidate's forward paper test on live market data.
+**Purpose**: The backtest is a sanity gate, not a performance proof. 30 days produces too few trades for statistical significance on swing strategies. It can confirm the code runs, generates signals, and doesn't produce catastrophic drawdowns. It cannot prove an edge exists. Candidates that pass the backtest enter forward paper testing on live market data.
 
 What the backtester does:
 - Simulates MARKET orders with configurable slippage and taker fees.
@@ -221,20 +221,26 @@ doc_flag to 1 with a brief flag_reason.
 ### Response Format
 Respond in JSON:
 {{
-    "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
-    "reasoning": "Your analysis and the basis for your decision",
-    "specific_changes": "What to build (CREATE_CANDIDATE only)",
-    "strategy_characterization": "Brief characterization of the strategy's approach and target conditions (CREATE_CANDIDATE only). Stored in the version archive for future reference — e.g. 'Multi-timeframe momentum strategy targeting trending markets with ATR-based position sizing'",
-    "slot": null,
-    "replace_slot": null,
-    "evaluation_duration_days": null,
-    "position_handling": null,
+    "decisions": [
+        {{
+            "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
+            "slot": null,
+            "replace_slot": null,
+            "specific_changes": "What to build (CREATE_CANDIDATE only)",
+            "strategy_characterization": "Brief characterization (CREATE_CANDIDATE only)",
+            "evaluation_duration_days": null,
+            "position_handling": null
+        }}
+    ],
+    "reasoning": "Your analysis and the basis for your decisions",
     "cross_reference_findings": "Findings from comparing market conditions to trade outcomes",
     "market_observations": "Notable market observations from this cycle",
     "doc_flag": null,
     "flag_reason": null,
     "predictions": []
-}}"""
+}}
+
+You may include multiple decisions in a single cycle. They execute sequentially — a CANCEL frees a slot before a subsequent CREATE fills it. Common patterns: CANCEL + CREATE (swap a candidate), multiple CANCELs (clear underperformers). If you have nothing to change, a single NO_CHANGE decision is fine."""
 
 CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading strategy.
 
@@ -417,24 +423,18 @@ Respond in JSON:
 
 BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trading strategy before it enters a candidate slot for forward testing.
 
-**What this backtest tells you:**
-The backtest simulates 30 days of trading. At each timestamp, the strategy sees up to 365 days of daily and hourly candles for indicator context — long-lookback indicators (50 EMA, 200 SMA, etc.) work fine. The 30-day simulation window is too short for statistically significant performance evaluation on swing strategies. Treat this as a sanity check, not a performance proof.
+**What the backtest is:**
+30 days of simulated trading at 1h resolution. At each timestamp, the strategy sees up to 365 days of daily and hourly candles for indicator warmup. The 30-day simulation window is too short for statistically significant performance evaluation on swing strategies.
 
-**Your job as reviewer — approve if the strategy:**
-1. Actually generates trades (zero trades = automatic reject, the strategy is broken or too restrictive)
-2. Runs without errors or obvious implementation bugs
-3. Doesn't produce catastrophic drawdowns (e.g., 50%+ loss)
-4. Shows reasonable trade mechanics (stops fire, exits work, position sizing correct)
+**What it can confirm:** Code runs without errors. Strategy generates signals and trades. Trade mechanics work (stops fire, exits execute, position sizing correct). No catastrophic drawdowns.
 
-**Do NOT reject for:**
-- Low trade count (expected in 30 days for swing strategies — even 3-5 trades is enough to pass)
-- Mediocre win rate or Sharpe ratio (30-day sample is too small to judge edge)
-- Modest losses (a strategy that trades and loses modestly is more informative than one that never trades)
-- Known backtester limitations: no order book depth, no market impact, no realistic fill latency
+**What it cannot confirm:** Edge exists. Win rate or Sharpe are meaningful (30-day sample too small). Forward performance.
 
-**The real evaluation happens next:** Approved strategies enter a candidate slot for forward paper testing with live market data. That's where you judge actual performance over 7-14+ days. The backtest just confirms the code works and the strategy is viable.
+**Known limitations:** No order book depth, no market impact, no realistic fill latency.
 
-**If rejecting:** Provide specific, actionable revision instructions. You are the fund manager directing a developer. Focus on WHY zero trades occurred (which filter is too restrictive? data access issue?) and what concrete change to make.
+**After approval:** Strategy enters a candidate slot for forward paper testing with live market data (7-14+ days). That's where actual performance is evaluated.
+
+**If rejecting:** Provide specific, actionable revision instructions. Focus on WHY zero trades occurred (which filter is too restrictive? data access issue?) and what concrete change to make.
 
 **CRITICAL — IO Contract reference (for accurate revision instructions):**
 When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
@@ -670,6 +670,26 @@ class Orchestrator:
                         return None
         return None
 
+    @staticmethod
+    def _normalize_decisions(parsed: dict) -> dict:
+        """Normalize response to always have a decisions list.
+
+        Handles backward compatibility: if LLM returns old single-decision
+        format, wraps it in a list.
+        """
+        if "decisions" in parsed and isinstance(parsed["decisions"], list):
+            return parsed  # Already new format
+        # Old format: single decision — move action-specific fields into a decisions list
+        action_fields = {
+            "decision", "slot", "replace_slot", "specific_changes",
+            "strategy_characterization", "evaluation_duration_days", "position_handling",
+        }
+        single = {k: parsed.pop(k) for k in list(parsed.keys()) if k in action_fields}
+        if not single.get("decision"):
+            single["decision"] = "NO_CHANGE"
+        parsed["decisions"] = [single]
+        return parsed
+
     async def _store_thought(
         self,
         step: str,
@@ -713,15 +733,15 @@ class Orchestrator:
         except Exception as e:
             log.warning("orchestrator.store_thought_failed", step=step, error=str(e))
 
-    async def run_nightly_cycle(self) -> str:
-        """Execute the full nightly orchestration cycle. Returns report summary."""
+    async def run_nightly_cycle(self, trigger: str = "scheduled") -> str:
+        """Execute the full orchestration cycle. Returns report summary."""
         if self._cycle_lock.locked():
             log.warning("orchestrator.already_running")
             return "Orchestrator: Skipped — cycle already in progress."
         async with self._cycle_lock:
-            return await self._run_nightly_cycle_locked()
+            return await self._run_nightly_cycle_locked(trigger=trigger)
 
-    async def _run_nightly_cycle_locked(self) -> str:
+    async def _run_nightly_cycle_locked(self, trigger: str = "scheduled") -> str:
         self._running = True
         self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info("orchestrator.cycle_start", cycle_id=self._cycle_id)
@@ -759,44 +779,56 @@ class Orchestrator:
             context = await self._gather_context()
 
             # 2. Opus analysis
-            decision = await self._analyze(context)
+            decision = await self._analyze(context, trigger=trigger)
 
-            # 3. Execute decision
-            decision_type = str(decision.get("decision") or "NO_CHANGE").strip().upper()
+            # 3. Normalize and execute decisions
+            parsed = self._normalize_decisions(decision)
+            decisions_list = parsed["decisions"]
+            reports = []
             deployed_version = None
 
-            if decision_type == "NO_CHANGE":
-                report = f"Orchestrator: No changes. {decision.get('reasoning', '')}"
-            elif decision_type in ("MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE"):
-                report = await self._execute_analysis_change(decision, context)
-            elif decision_type == "CREATE_CANDIDATE":
-                report = await self._create_candidate(decision, context)
-            elif decision_type == "CANCEL_CANDIDATE":
-                report = await self._cancel_candidate(decision)
-            elif decision_type == "PROMOTE_CANDIDATE":
-                report = await self._promote_candidate(decision)
-                if "promoted" in report.lower():
-                    ver_row = await self._db.fetchone(
-                        "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
-                    )
-                    deployed_version = ver_row["version"] if ver_row else None
-            else:
-                log.warning("orchestrator.unknown_decision_type", decision_type=decision_type)
-                report = f"Orchestrator: Unknown decision '{decision_type}' — treated as NO_CHANGE."
+            for action in decisions_list:
+                action_type = str(action.get("decision") or "NO_CHANGE").strip().upper()
 
-            # 4. Store daily observations and predictions
-            await self._store_observation(decision)
-            await self._store_predictions(decision)
+                if action_type == "NO_CHANGE":
+                    reports.append("No changes.")
+                elif action_type in ("MARKET_ANALYSIS_UPDATE", "TRADE_ANALYSIS_UPDATE"):
+                    reports.append(await self._execute_analysis_change(action, context))
+                elif action_type == "CREATE_CANDIDATE":
+                    reports.append(await self._create_candidate(action, context))
+                elif action_type == "CANCEL_CANDIDATE":
+                    reports.append(await self._cancel_candidate(action))
+                elif action_type == "PROMOTE_CANDIDATE":
+                    rpt = await self._promote_candidate(action)
+                    reports.append(rpt)
+                    if "promoted" in rpt.lower():
+                        ver_row = await self._db.fetchone(
+                            "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
+                        )
+                        deployed_version = ver_row["version"] if ver_row else None
+                else:
+                    log.warning("orchestrator.unknown_decision_type", decision_type=action_type)
+                    reports.append(f"Unknown decision '{action_type}'.")
 
-            # 5. Log orchestration
-            await self._log_orchestration(decision, deployed_version=deployed_version, outcome=report)
+                # Log each action
+                await self._log_orchestration(action, deployed_version=deployed_version, outcome=reports[-1])
+
+            report = " | ".join(reports) if len(reports) > 1 else (reports[0] if reports else "No actions.")
+
+            # 4. Store observations and predictions (once per cycle, from top-level response)
+            await self._store_observation(parsed)
+            await self._store_predictions(parsed)
 
             # 6. Data maintenance
             await self._data_store.run_nightly_maintenance()
 
-            log.info("orchestrator.cycle_complete", decision=decision.get("decision"))
+            # Build decision type summary for notification
+            decision_types = ", ".join(
+                str(a.get("decision") or "NO_CHANGE").strip().upper()
+                for a in decisions_list
+            )
+            log.info("orchestrator.cycle_complete", decisions=decision_types)
             if self._notifier:
-                # Gather context for enriched notification
                 ver_row = await self._db.fetchone(
                     "SELECT version FROM strategy_versions WHERE deployed_at IS NOT NULL ORDER BY deployed_at DESC LIMIT 1"
                 )
@@ -804,7 +836,7 @@ class Orchestrator:
                 cand_count = len(self._candidate_manager.get_active_slots()) if self._candidate_manager else 0
                 max_cands = self._config.orchestrator.max_candidates
                 await self._notifier.orchestrator_cycle_completed(
-                    decision_type,
+                    decision_types,
                     strategy_version=strat_ver,
                     candidate_count=cand_count,
                     max_candidates=max_cands,
@@ -1123,7 +1155,7 @@ class Orchestrator:
             "since_last_cycle": since_last_cycle,
         }
 
-    async def _build_time_context(self) -> str:
+    async def _build_time_context(self, trigger: str = "scheduled") -> str:
         """Build a timestamp header for Opus prompts."""
         from zoneinfo import ZoneInfo
 
@@ -1152,10 +1184,35 @@ class Orchestrator:
         else:
             last_line = "Last orchestration: none (first cycle)"
 
+        # Fund age from ground truth
+        first_scan = await self._db.fetchone(
+            "SELECT MIN(created_at) as first_scan FROM scan_results"
+        )
+        if first_scan and first_scan["first_scan"]:
+            try:
+                started = datetime.strptime(
+                    first_scan["first_scan"][:19], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+                fund_age_days = (now_utc - started).days
+                fund_age_line = f"Fund age: {fund_age_days} days (started {started.strftime('%Y-%m-%d')})"
+            except (ValueError, TypeError):
+                fund_age_line = "Fund age: unknown"
+        else:
+            fund_age_line = "Fund age: 0 days (no scans yet)"
+
+        # Cycles today
+        cycles_row = await self._db.fetchone(
+            "SELECT COUNT(DISTINCT cycle_id) as count FROM orchestrator_log WHERE date = date('now')"
+        )
+        cycles_today = ((cycles_row["count"] or 0) if cycles_row else 0) + 1
+
         return (
             f"## CURRENT TIME\n"
             f"Local ({self._config.timezone}): {now_local.strftime('%Y-%m-%d %H:%M')} {tz_abbrev}\n"
             f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC\n"
+            f"Trigger: {trigger}\n"
+            f"{fund_age_line}\n"
+            f"Cycles today: {cycles_today} (including this one)\n"
             f"{last_line}"
         )
 
@@ -1206,9 +1263,9 @@ class Orchestrator:
 
         return "\n".join(lines)
 
-    async def _analyze(self, context: dict) -> dict:
+    async def _analyze(self, context: dict, trigger: str = "scheduled") -> dict:
         """Opus analyzes performance and decides on action."""
-        time_context = await self._build_time_context()
+        time_context = await self._build_time_context(trigger=trigger)
 
         # Build since-last-cycle section (empty string if first run)
         since = context.get("since_last_cycle")
@@ -1217,7 +1274,7 @@ class Orchestrator:
         prompt = f"""{time_context}
 {since_section}
 
-Current fund state for nightly review.
+Current fund state for review.
 
 ---
 
@@ -2346,9 +2403,10 @@ The orchestrator wants to change this module because: {changes}"""
 
         await self._db.execute(
             """INSERT INTO orchestrator_log
-               (date, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd, outcome)
-               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (date, cycle_id, action, analysis, changes, strategy_version_from, strategy_version_to, tokens_used, cost_usd, outcome)
+               VALUES (date('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
+                self._cycle_id,
                 decision.get("decision", "UNKNOWN"),
                 json.dumps(decision, default=str),
                 decision.get("specific_changes", ""),

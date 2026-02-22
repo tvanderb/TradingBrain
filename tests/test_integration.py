@@ -8502,14 +8502,22 @@ async def test_reload_config_acquires_trade_lock():
 
 @pytest.mark.asyncio
 async def test_reload_config_reschedules_orchestration():
-    """_reload_config reschedules orchestration job when start time changes."""
+    """_reload_config reschedules orchestration jobs when config changes."""
     from src.shell.config import load_config
     from src.shell.risk import RiskManager
     from src.telegram.notifications import Notifier
 
     config = load_config()
 
+    # Mock scheduler with jobs that have orchestration_ prefix
+    mock_job1 = MagicMock()
+    mock_job1.id = "orchestration_0"
+    mock_job2 = MagicMock()
+    mock_job2.id = "orchestration_1"
+    mock_other = MagicMock()
+    mock_other.id = "scan"
     scheduler = MagicMock()
+    scheduler.get_jobs.return_value = [mock_job1, mock_job2, mock_other]
 
     brain = MagicMock()
     brain._config = config
@@ -8525,20 +8533,23 @@ async def test_reload_config_reschedules_orchestration():
     brain._db = MagicMock()
 
     new_config = load_config()
-    new_config.orchestrator.start_hour = 5
+    new_config.orchestrator.cycle_times = ["04:00", "16:00"]
 
     # Use a stable hash to prevent strategy reload from also calling reschedule_job
     brain._scan_state["strategy_hash"] = "stable"
 
     from src.main import TradingBrain
+    # Bind the real _get_effective_cycle_times method to our mock brain
+    brain._get_effective_cycle_times = TradingBrain._get_effective_cycle_times.__get__(brain, TradingBrain)
     with patch("src.main.load_config", return_value=new_config):
         with patch("src.main.get_code_hash", return_value="stable"):
             await TradingBrain._reload_config(brain)
 
-    scheduler.reschedule_job.assert_called()
-    # Find the orchestration reschedule among all calls
-    orch_calls = [c for c in scheduler.reschedule_job.call_args_list if c[0][0] == "orchestration"]
-    assert len(orch_calls) == 1
+    # Old orchestration jobs should be removed
+    scheduler.remove_job.assert_any_call("orchestration_0")
+    scheduler.remove_job.assert_any_call("orchestration_1")
+    # New jobs should be added (2 cycle times)
+    assert scheduler.add_job.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -8580,3 +8591,122 @@ async def test_reload_config_reloads_strategy():
     call_args = brain._notifier._broadcast_ws.call_args
     data = call_args[0][1]
     assert "strategy" in data["changes"]
+
+
+# --- Multi-Action Decisions ---
+
+def test_normalize_decisions_new_format():
+    """_normalize_decisions passes through already-normalized format."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    parsed = {
+        "decisions": [
+            {"decision": "CANCEL_CANDIDATE", "slot": 1},
+            {"decision": "CREATE_CANDIDATE", "slot": 1, "specific_changes": "new strategy"},
+        ],
+        "reasoning": "swap candidate",
+    }
+    result = Orchestrator._normalize_decisions(parsed)
+    assert len(result["decisions"]) == 2
+    assert result["decisions"][0]["decision"] == "CANCEL_CANDIDATE"
+    assert result["decisions"][1]["decision"] == "CREATE_CANDIDATE"
+    assert result["reasoning"] == "swap candidate"
+
+
+def test_normalize_decisions_old_format():
+    """_normalize_decisions wraps old single-decision format into a list."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    parsed = {
+        "decision": "CREATE_CANDIDATE",
+        "slot": 2,
+        "specific_changes": "build something",
+        "strategy_characterization": "momentum",
+        "reasoning": "we need change",
+    }
+    result = Orchestrator._normalize_decisions(parsed)
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["decision"] == "CREATE_CANDIDATE"
+    assert result["decisions"][0]["slot"] == 2
+    assert result["decisions"][0]["specific_changes"] == "build something"
+    # Top-level non-action fields should remain
+    assert result["reasoning"] == "we need change"
+    # Action fields should be removed from top level
+    assert "decision" not in result
+    assert "slot" not in result
+
+
+def test_normalize_decisions_empty():
+    """_normalize_decisions defaults to NO_CHANGE when decision is missing."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    parsed = {"reasoning": "nothing to do"}
+    result = Orchestrator._normalize_decisions(parsed)
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["decision"] == "NO_CHANGE"
+
+
+# --- Config cycle_times Validation ---
+
+def test_config_cycle_times_valid():
+    """Valid cycle_times pass validation."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.orchestrator.cycle_times = ["03:30", "15:30"]
+    # Should not raise
+    _validate_config(config)
+
+
+def test_config_cycle_times_invalid_format():
+    """Invalid cycle_times format is rejected."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.orchestrator.cycle_times = ["3:30"]  # Missing leading zero
+    with pytest.raises(ValueError, match="HH:MM"):
+        _validate_config(config)
+
+
+def test_config_cycle_times_invalid_hour():
+    """Invalid hour in cycle_times is rejected."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.orchestrator.cycle_times = ["25:00"]
+    with pytest.raises(ValueError, match="hour must be 00-23"):
+        _validate_config(config)
+
+
+def test_config_cycle_times_invalid_minute():
+    """Invalid minute in cycle_times is rejected."""
+    from src.shell.config import _validate_config, Config
+
+    config = Config()
+    config.orchestrator.cycle_times = ["03:75"]
+    with pytest.raises(ValueError, match="minute must be 00-59"):
+        _validate_config(config)
+
+
+def test_config_cycle_times_empty_uses_legacy():
+    """Empty cycle_times falls back to legacy start_hour/start_minute."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = MagicMock()
+    brain._config.orchestrator.cycle_times = []
+    brain._config.orchestrator.start_hour = 3
+    brain._config.orchestrator.start_minute = 30
+    times = brain._get_effective_cycle_times()
+    assert times == [(3, 30)]
+
+
+def test_config_cycle_times_parses():
+    """cycle_times are correctly parsed into (hour, minute) tuples."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = MagicMock()
+    brain._config.orchestrator.cycle_times = ["03:30", "15:30"]
+    times = brain._get_effective_cycle_times()
+    assert times == [(3, 30), (15, 30)]

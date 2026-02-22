@@ -134,7 +134,7 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         return f"Paper test {status}: {version} ({trades} trades, ${pnl:+.2f})"
 
     if event_name == "orchestrator_cycle_started":
-        return "Nightly orchestration cycle started"
+        return "Orchestration cycle started"
 
     if event_name == "orchestrator_cycle_completed":
         decision = data.get("decision_type", "?")
@@ -530,8 +530,8 @@ class Notifier:
     ) -> None:
         data: dict = {"decision_type": decision_type}
         lines = [
-            "\U0001F319 Nightly Cycle Complete",
-            f"Decision: {decision_type}",
+            "\U0001F504 Cycle Complete",
+            f"Actions: {decision_type}",
         ]
         parts = []
         if strategy_version:

@@ -392,6 +392,21 @@ class CandidateManager:
                     status["created_at"] = row["created_at"]
                     status["evaluation_duration_days"] = row["evaluation_duration_days"]
                     status["description"] = row["description"]
+                    # Pre-compute temporal awareness
+                    try:
+                        created = datetime.strptime(
+                            row["created_at"][:19], "%Y-%m-%d %H:%M:%S"
+                        ).replace(tzinfo=timezone.utc)
+                        running_hours = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+                        status["running_hours"] = round(running_hours, 1)
+                    except (ValueError, TypeError):
+                        status["running_hours"] = None
+                    # Total scans since creation
+                    scan_row = await self._db.fetchone(
+                        "SELECT COUNT(*) as count FROM scan_results WHERE created_at >= ?",
+                        (row["created_at"],),
+                    )
+                    status["total_scans"] = scan_row["count"] if scan_row else 0
                 # Add total signal count for this candidate
                 sig_row = await self._db.fetchone(
                     "SELECT COUNT(*) as count FROM candidate_signals WHERE candidate_slot = ?",
