@@ -1,0 +1,1605 @@
+# Build Progress Archive: Sessions C through AD (2026-02-10 to 2026-02-17)
+
+This archive preserves the full per-session build detail. For current system status, see `../progress.md`.
+
+---
+
+## Session C (2026-02-10) — Audit Findings Fix (63 actionable items)
+
+5-agent audit produced 75 findings across 5 reports (core, orchestrator, shell, API, tests). After deduplication (5 duplicates) and false positive removal (7 items), **63 fixes were applied across 5 phases**.
+
+### Phase 1: Critical Safety (8 fixes)
+- `asyncio.Lock` for trade execution serialization (scan loop, position monitor, emergency stop, conditional orders)
+- Reconciliation processes fills for orphaned orders
+- `_handle_sl_tp_trigger` handles list results (multi-close)
+- Post-fill cash validation with critical log warning
+- Risk counter restoration from DB on restart (daily trades, PnL, consecutive losses)
+- TOCTOU refresh: portfolio_value updated after each signal execution
+- `trade_value = 0.0` init at top of `check_signal()`
+- Post-timeout fill check in `_confirm_fill()` (final query before raising)
+
+### Phase 2: Security Hardening (8 fixes)
+- Sandbox blocks `getattr/setattr/delattr/globals/vars/dir` calls
+- Sandbox blocks dunder attribute chains (`__class__.__bases__.__subclasses__`)
+- `load_strategy()` validates via sandbox before importing
+- Analysis sandbox aligned with strategy sandbox (all forbidden imports/calls/dunders)
+- ReadOnlyDB blocks `LOAD_EXTENSION`
+- ReadOnlyDB strips null bytes to prevent bypass
+- Backtest module import wrapped in 10s timeout
+- Analysis module `analyze()` wrapped in 30s timeout
+
+### Phase 3: Medium Fixes (25 fixes)
+- Clamp `close_fraction` to 1.0
+- No slippage for paper LIMIT orders (buy + sell)
+- Symmetric limit price auto-calculation for sells
+- Scheduler pause/resume during emergency stop
+- `_daily_start_value` refresh in daily reset
+- Scan results only updated for executed symbols
+- Price flush to DB before daily snapshot
+- Bounded date range for daily trades query
+- WebSocket price staleness tracking (`price_age()`)
+- `get_candles()` dual-branch refactored to single clean path
+- `datetime.now()` → UTC in data_store aggregation
+- Commit after special migration backfill
+- Decision type normalization (`.strip().upper()`)
+- Token budget threshold 50K → 200K
+- Backtester recalculates `total_value` after each trade
+- Backtester daily loss halt simulation
+- WebSocket token error messages unified
+- `/ask` prompt injection mitigation
+- `/ask` rate limiting (30s cooldown)
+- Non-blocking Telegram notification dispatch
+- Unauthorized Telegram access logging
+- `daily_tokens_used` public property on AIClient
+
+### Phase 4: Low + Cosmetic (15 fixes)
+- Intent downgrade fix in MODIFY
+- Failed signals recorded in audit trail
+- Strategy state restore after hot-reload
+- Pass `dict(markets)` copy to thread executor
+- `get_spread` returns 1.0 for zero-bid
+- Config validates `max_daily_trades`, `rollback_consecutive_losses`, `fee.check_interval_hours`
+- `PAIR_REVERSE` extended names (XXBTZUSD, XETHZUSD, XXDGUSD, etc.)
+- `datetime.utcnow()` → `datetime.now(timezone.utc)` in commands
+- `/v1/performance` result limit (365 max)
+- Concurrent WebSocket broadcast via `asyncio.gather`
+- Duplicate comment numbering fix
+- MODIFY signal `__post_init__` warns on non-zero `size_pct`
+- Concurrent orchestration guard (`_running` flag)
+- `/ask` input length limit (500 chars)
+
+### Phase 5: New Tests (16 tests)
+- `test_risk_counters_restored_on_restart` — DB counter restoration
+- `test_sandbox_blocks_getattr_bypass` — getattr() blocked
+- `test_sandbox_blocks_dunder_access` — dunder chain blocked
+- `test_loader_validates_before_load` — sandbox before import
+- `test_analysis_sandbox_aligned` — set subset check
+- `test_readonly_db_blocks_load_extension` — LOAD_EXTENSION blocked
+- `test_readonly_db_blocks_null_byte_bypass` — null byte stripping
+- `test_daily_reset_updates_start_value` — start value refresh
+- `test_websocket_price_staleness` — price_age() tracking
+- `test_pair_reverse_extended_names` — XXBTZUSD mapping
+- `test_spread_zero_bid` — 1.0 return for zero bid
+- `test_performance_endpoint_limit` — 365-day limit
+- `test_ask_rate_limiting` — cooldown tracking
+- `test_config_validates_daily_trades` — validation check
+- `test_modify_signal_warns_on_size_pct` — __post_init__ doesn't crash
+- `test_ai_client_daily_tokens_property` — public property
+
+### Result: **107/107 tests passing** (was 91/91)
+
+### Files Modified (19 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `strategy/sandbox.py`, `strategy/loader.py`, `statistics/sandbox.py`, `statistics/readonly_db.py`, `orchestrator/orchestrator.py`, `orchestrator/ai_client.py`, `shell/kraken.py`, `shell/data_store.py`, `shell/database.py`, `shell/config.py`, `shell/contract.py`, `telegram/commands.py`, `telegram/notifications.py`, `api/websocket.py`, `api/routes.py`, `strategy/backtester.py`, `tests/test_integration.py`
+
+---
+
+## Session D (2026-02-10) — Final Audit & Fixes
+
+### Audit: 28 Findings (3 Critical, 12 Medium, 13 Low)
+5-agent audit focused on "does it do what it's supposed to do, free of bugs."
+
+### Critical Fixes (3)
+- **C1**: Emergency stop now acquires `_trade_lock`, pauses both scan + position_monitor jobs
+- **C2**: Partial fill at timeout returns partial result instead of raising TimeoutError
+- **C3**: Backtester parity — BUY averaging-in, CLOSE-all semantics, max_drawdown halt simulation
+
+### Medium Fixes (12)
+- **M1**: Daily loss limit uses start-of-day value (fixed reference) not current portfolio (moving target)
+- **M2**: AI usage endpoint uses correct dict keys (`used`, `models`)
+- **M3**: Config fee validation uses correct attribute name
+- **M4**: datetime.fromisoformat calls add UTC timezone info
+- **M5**: Candle storage uses INSERT OR REPLACE (not IGNORE) so updated data replaces stale
+- **M6**: ReadOnlyDB uses name-mangled `__conn` + `__getattr__` blocks access
+- **M7**: Kraken nonce computation moved inside rate_lock (atomic)
+- **M8**: Spread formula uses `(ask-bid)/ask` (standard) not `/bid`
+- **M9**: Orchestrator sends cycle_completed notification on early budget return
+- **M10**: Paper test `ends_at` uses UTC
+- **M11**: Backtester day boundary detection moved BEFORE trading (correct start-of-day value)
+- **M12**: Removed stale XXLMZUSD from PAIR_REVERSE
+
+### Low Fixes (13)
+- **L1**: `get_event_loop()` → `get_running_loop()` (deprecation)
+- **L3**: Position monitor checks WS price staleness, falls back to REST for stale (>5min)
+- **L4**: All naive `datetime.now()` → `datetime.now(timezone.utc)` in reconcile/conditional/emergency/shutdown
+- **L5**: MODIFY with default intent=DAY no longer downgrades SWING/POSITION positions
+- **L6**: `_confirm_fill` uses wall-clock time (monotonic deadline) instead of accumulated sleep
+- **L7**: SL/TP order inserts include `placed_at` timestamp
+- **L8**: Risk counter restore uses UTC timestamps
+- **L9**: `store_candles` returns `len(rows)` (reliable) instead of cursor.rowcount
+- **L11**: JSON extractor only processes backslashes inside strings
+- **L12**: `get_ohlc` since parameter uses `is not None` check (allows since=0)
+- **L13**: SL/TP trigger reads position's actual intent (not hardcoded Intent.DAY)
+
+### New Tests (11)
+- `test_backtester_close_all_no_tag` — CLOSE without tag closes all positions
+- `test_backtester_buy_averaging_in` — Multiple BUYs for same symbol allowed
+- `test_backtester_drawdown_halt` — Max drawdown halts new entries
+- `test_backtester_day_boundary_start_value` — Day start value set before trading
+- `test_modify_no_intent_downgrade` — MODIFY with default intent preserves SWING
+- `test_json_extractor_backslash_outside_string` — Backslash handling correctness
+- `test_spread_uses_ask_denominator` — Spread formula verification
+- `test_readonly_db_conn_access_blocked` — Connection access blocked
+- `test_nonce_inside_rate_lock` — Nonce inside lock verified
+- `test_position_monitor_staleness_check` — Staleness detection exists
+- `test_data_store_rowcount_uses_len` — Reliable row count
+
+### Test Fixes (3)
+- `test_readonly_db_blocks_load_extension` — Updated regex to match new error message
+- `test_risk_counters_restored_on_restart` — Uses UTC timestamps to match risk manager
+- `test_api_server_endpoints` — Mock uses correct dict keys (`used`, `models`)
+
+### Result: **118/118 tests passing** (was 107/107)
+
+### Files Modified (10 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `routes.py`, `config.py`, `commands.py`, `data_store.py`, `readonly_db.py`, `kraken.py`, `orchestrator.py`, `backtester.py`, `tests/test_integration.py`
+
+---
+
+## Session E (2026-02-10) — Final End-to-End Audit
+
+### Audit Scope
+5 parallel audit agents covering the entire codebase:
+1. Core trading loop (main.py)
+2. Portfolio and risk management
+3. Orchestrator and strategy
+4. Shell infrastructure
+5. API, Telegram, and test coverage
+
+### Raw Findings: ~65 across all agents
+After deduplication and false positive triage: **18 actionable findings**
+
+### False Positives Dismissed (12)
+- Paper mode fee basis (correct by construction)
+- Position averaging qty (self-dismissed)
+- MODIFY intent logic (intentionally designed in Session D)
+- /ask rate limit race (Telegram processes updates sequentially)
+- API portfolio null (portfolio always initialized first)
+- AI client null in daily_reset (constructor always succeeds)
+- Paper test started_at (SQLite DEFAULT works)
+- Cash negative after fill (by design)
+- Unsafe list indexing Kraken (guards exist)
+- Consecutive loss counter (correct)
+- Fee format validation (Kraken API is consistent)
+- Record exchange fill missing regime (always None since Session 18)
+
+### Fixes Applied (18 findings)
+
+#### Critical (3)
+- **C1**: Paper test `ends_at` format mismatch — `isoformat()` → `strftime()` + `datetime('now', 'utc')`
+- **C2**: `_broadcast_ws` exception kills Telegram — wrapped in try/except
+- **C3**: Paper test trade query missing upper bound — added `closed_at <= ends_at`
+
+#### Medium (9)
+- **M1**: Risk counter timezone — `initialize()` now accepts `tz_name`, uses configured timezone
+- **M2**: Backtester max_position_pct — added to `RiskLimits`, enforced in backtester
+- **M3**: `datetime.now()` → `datetime.now(timezone.utc)` in portfolio.py (15 locations)
+- **M4**: Bootstrap API timeout — 30s per `get_ohlc()` call via `asyncio.wait_for()`
+- **M5**: Concurrent orchestration guard — `asyncio.Lock` replaces bare boolean
+- **M6**: DB connection cleanup — `except/raise` closes connection on migration error
+- **M7**: Daily reset under trade lock — `_daily_reset()` acquires `self._trade_lock`
+- **M8**: `_broadcast_ws` try/except (part of C2 fix)
+- **M9**: Candle cutoffs use `strftime()` to match stored naive timestamps
+
+#### Low (6)
+- **L1**: Halt notifications deduplicated per scan cycle (`halt_notified` flag)
+- **L2**: Backtester SL/TP slippage clarified (SL triggers are market orders — correct)
+- **L3**: Partial close logs note about remaining SL/TP
+- **L4**: Observation INSERT OR REPLACE documented, uses `date('now', 'utc')`
+- **L5**: P&L variable names clarified (`net_pnl`, `gross_pnl`, `fees_total`)
+- **L6**: `_send_long()` catches Telegram API errors
+
+### P&L Investigation
+User reported production paper trades showing same open/close price. Traced full price flow:
+- Paper BUY: uses current WS price + slippage
+- Paper CLOSE: uses current WS price - slippage (different scan cycle = different price)
+- Current code is correct — issue was in older production version (stale prices)
+
+### New Tests (12)
+- `test_paper_test_timestamp_format` — strftime + UTC in query
+- `test_paper_test_trade_query_upper_bound` — closed_at filter
+- `test_broadcast_ws_error_handling` — try/except in broadcast
+- `test_orchestrator_cycle_lock` — asyncio.Lock exists
+- `test_risk_initialize_accepts_timezone` — tz_name parameter
+- `test_backtester_max_position_pct` — position pct enforcement
+- `test_daily_reset_under_trade_lock` — trade_lock in daily_reset
+- `test_database_connect_cleanup_on_error` — connection cleanup
+- `test_candle_cutoff_uses_strftime` — no timezone suffix
+- `test_portfolio_uses_utc_timestamps` — UTC in portfolio
+- `test_halt_notification_deduplication` — halt_notified flag
+- `test_send_long_error_handling` — telegram error catching
+
+### Result: **130/130 tests passing** (was 118/118)
+
+### Files Modified (12 source + 1 test)
+`main.py`, `portfolio.py`, `risk.py`, `contract.py`, `orchestrator.py`, `backtester.py`, `database.py`, `data_store.py`, `notifications.py`, `commands.py`, `tests/test_integration.py`
+
+### Post-Fix Audit Round 1 (6 findings, all fixed)
+- **F1**: Fee schedule `INSERT` → `DELETE+INSERT` (prevent duplicate rows)
+- **F2**: `/positions` Telegram now uses in-memory positions + `scan_state` live prices
+- **F3**: `/ask` rate limit moved to after successful AI call
+- **F4**: Multi-close signal audit trail joins all tags with comma
+- **F5**: SL/TP display shows "N/A" when unset instead of "$0.00"
+- **F6**: Unauthorized Telegram log rate-limited to 1 per 60s
+
+## Session F (2026-02-10) — Final Audit Round 2
+
+### Audit Scope
+5 parallel audit agents — 8th audit round, looking for extremely subtle issues.
+
+### Raw Findings: ~18 across all agents
+After triage: **13 actionable, 2 not actionable**
+
+### Fixes Applied (13 findings)
+
+#### Critical (1)
+- **F1**: Paper test `closed_at` (isoformat 'T') vs `ends_at` (strftime ' ') — string comparison drops final-day trades. Fixed: `datetime(closed_at) <= datetime(?)` normalizes both formats.
+
+#### Medium (8)
+- **F2**: Live partial fill on exit: SL/TP canceled but not re-placed for remaining qty. Fixed: re-place SL/TP after partial fill.
+- **F3**: BUY average-in: cancel old exchange SL/TP before placing new ones, use total position qty.
+- **F4**: Partial fill at timeout: cancel remaining unfilled order on Kraken after processing partial.
+- **F5**: Backtester BUY-with-tag overwrites position. Fixed: average in (matches live behavior).
+- **F6**: Backtester clamps oversized signals. Fixed: reject instead (matches live risk manager).
+- **F7**: Thread-safety: `analyze()` in executor thread while callbacks run on event loop. Fixed: `_analyzing` flag skips callbacks during executor run.
+- **F8**: Sandbox: `operator.attrgetter` bypasses AST dunder checks. Fixed: `operator` added to FORBIDDEN_IMPORTS in both sandboxes.
+- **F9**: ReadOnlyDB: PRAGMA function-call syntax `PRAGMA foo(value)` bypasses regex. Fixed: `[=(]` in pattern.
+
+#### Low (4)
+- **F10**: ReadOnlyDB `__getattr__` can't block name-mangled access — defense shifted to sandbox (blocks `__dict__`, `__getattribute__`, `operator`, `getattr`).
+- **F11**: FORBIDDEN_DUNDERS now includes `__getattribute__` and `__dict__` in both sandboxes.
+- **F12**: Strategy versions API query: `ORDER BY COALESCE(deployed_at, '0') DESC` puts NULLs last.
+- **F13**: `test_ask_rate_limiting` rewritten to actually verify second call is blocked.
+
+### Not Actionable (2)
+- Daily snapshot without trade lock (self-correcting, tiny window)
+- Test gaps (WS auth, chunking, API positions) — nice to have, no crash risk
+
+### Result: **130/130 tests passing**
+
+### Files Modified (10 source + 1 test)
+`main.py`, `portfolio.py`, `orchestrator.py`, `backtester.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `commands.py`, `tests/test_integration.py`
+
+## Session G (2026-02-10) — Audit Round 9
+
+### Audit Scope
+5 parallel audit agents — 9th audit round. User requested extreme thoroughness.
+
+### Raw Findings: 18 across all agents
+After triage: **17 actionable, 1 false positive**
+
+### False Positive (1)
+- `/v1/trades` returns open trades — trades table only has closed positions (inserted at close time)
+
+### Fixes Applied (17 findings)
+
+#### Critical (1)
+- **G1**: `validate_strategy` has no timeout — infinite loop in AI-generated code hangs entire event loop. Fixed: `concurrent.futures.ThreadPoolExecutor` with 10s timeout on `exec_module`, 15s on `initialize()`+`analyze()`.
+
+#### Medium (8)
+- **G2**: `_analyzing` flag cleared prematurely on strategy timeout while background thread still runs. Fixed: on timeout, `asyncio.shield` prevents future cancellation; background task clears flag when thread finishes.
+- **G3**: Partial SELL leaves exchange SL/TP with stale (too-large) qty. Fixed: always cancel+re-place SL/TP for remaining qty after partial sell (not just when `sl_tp_canceled`).
+- **G4**: BUY average-in without explicit SL/TP skips exchange order qty update. Fixed: check position's existing SL/TP (not just signal's) to determine if exchange orders need updating.
+- **G5**: `"decision": null` in AI JSON crashes cycle (`None.strip()`). Fixed: `str(decision.get("decision") or "NO_CHANGE")`.
+- **G6**: Non-integer `risk_tier`/`suggested_tier` from AI crashes with TypeError. Fixed: `int()` with try/except fallback.
+- **G7**: `schema` variable scoped inside market analysis try-block — cascading NameError if market analysis fails. Fixed: moved `schema = get_schema_description()` before both try blocks.
+- **G8**: Name-mangled `_ReadOnlyDB__conn` bypasses sandbox AST check. Fixed: regex `_\w+__\w+` blocks all name-mangled attribute access in both sandboxes.
+- **G9**: Negative `limit` query parameter bypasses row cap (`LIMIT -1` = all rows in SQLite). Fixed: `max(1, ...)` on all three endpoints.
+
+#### Low (8)
+- **G10**: `_check_conditional_orders` hardcodes `Intent.DAY` instead of using `result["intent"]`. Fixed.
+- **G11**: Signals skipped for invalid price leave no audit trail. Fixed: INSERT into signals with `rejected_reason='invalid_price'`.
+- **G12**: BUY average-in blocked by `max_positions` when not creating new position. Fixed: added `is_new_position` parameter to `check_signal()`.
+- **G13**: Backtest `RiskLimits` missing `max_position_pct` from config. Fixed: passed through.
+- **G14**: `truth.py` strategy version query returns NULL `deployed_at` rows first. Fixed: `WHERE deployed_at IS NOT NULL`.
+- **G15**: `rollback_daily_loss_pct` not validated in config. Fixed: added validation.
+- **G16**: WebSocket `_listen` crashes on non-dict JSON messages (AttributeError). Fixed: added to exception handler.
+- **G17**: `cmd_health` has no error handling around `compute_truth_benchmarks`. Fixed: try/except with user-facing error message.
+
+### Result: **130/130 tests passing**
+
+### Files Modified (12 source)
+`main.py`, `portfolio.py`, `risk.py`, `orchestrator.py`, `sandbox.py` (strategy), `sandbox.py` (statistics), `readonly_db.py`, `routes.py`, `truth.py`, `config.py`, `kraken.py`, `commands.py`
+
+## Session H (2026-02-11) — Audit Round 10
+
+### Audit Scope
+5 parallel audit agents — 10th audit round across all sessions. User demanded thoroughness given each prior round continued to find issues. Each agent received the complete cumulative list of ~170 prior fixes to avoid re-reports.
+
+### Raw Findings: 16 across all agents
+After triage: **12 production fixes + 4 test coverage gaps**
+
+### Production Fixes
+
+#### Medium (6)
+
+- **H1**: Scan loop strategy callbacks catch only `TypeError`, not `(TypeError, RuntimeError)`.
+  - Position monitor and `_check_conditional_orders` already catch both, but the scan loop's `on_position_closed` and `on_fill` fallback calls (lines 688-691, 698-701 of main.py) only catch `TypeError`. If the AI-rewritten strategy raises `RuntimeError` from the fallback call, the exception propagates out of the result processing loop, skipping P&L recording, rollback checks, and peak updates for remaining results.
+  - **Fix**: Match the position monitor pattern — outer `except (TypeError, RuntimeError)`, inner try/except `(TypeError, RuntimeError)` with `pass`.
+
+- **H2**: `snapshot_daily` uses bare local date strings against UTC ISO timestamps.
+  - `closed_at` stores full UTC ISO like `'2026-02-11T03:00:00+00:00'`. Query compares against `'2026-02-11'` and `'2026-02-12'`. For US/Eastern (UTC-5), trades closed between midnight-5am UTC (which is 7pm-midnight Eastern previous day) have a UTC date that's one day ahead of the local date. These trades get attributed to the wrong local day in the daily snapshot.
+  - **Impact**: ~5 hours/day of trades attributed to wrong day in `daily_performance` table.
+  - **Fix**: Convert local day boundaries to full UTC ISO timestamps for query comparison.
+
+- **H3**: `risk.initialize` daily counter restoration has same timezone boundary mismatch.
+  - Same root cause as H2. After restart, `_daily_trades` and `_daily_pnl` may include trades from the previous local day or exclude trades from the current local day.
+  - **Fix**: Same approach — convert local day start to UTC ISO for the query.
+
+- **H4**: Analysis module routing uses raw un-normalized decision type.
+  - `_execute_analysis_change` reads `decision.get("decision", "")` directly (line 1087), without the `.strip().upper()` normalization applied at line 427. If the AI returns `"Market_Analysis_Update"` (mixed case), the routing to `_execute_analysis_change` works (line 437 uses the normalized value), but inside that method the module selection comparison fails, causing it to rewrite `trade_performance` instead of `market_analysis`.
+  - **Fix**: Apply same normalization: `str(decision.get("decision") or "").strip().upper()`.
+
+- **H5**: Analysis sandbox `exec_module` has no timeout.
+  - Strategy sandbox was fixed in Session G (G1) with ThreadPoolExecutor timeout for `exec_module`. The analysis sandbox at line 154 of `statistics/sandbox.py` still calls `exec_module` directly with no timeout. An infinite loop at module level in AI-generated analysis code hangs the orchestrator.
+  - **Fix**: Add ThreadPoolExecutor with 10s timeout, matching strategy sandbox.
+
+- **H6**: Candle aggregation boundary-hour data loss.
+  - When the retention cutoff lands mid-hour (which it almost always does), `aggregate_5m_to_1h` creates a partial hourly candle from pre-cutoff 5m candles, then deletes them. Next night, the remaining 5m candles for that same hour are aggregated into a new hourly candle, and `INSERT OR REPLACE` overwrites the previous partial. The first batch's OHLCV data is permanently lost.
+  - **Impact**: ~9 corrupted hourly candles per night (1 per symbol).
+  - **Fix**: Snap the cutoff to the nearest hour boundary (for 5m→1h) and day boundary (for 1h→daily).
+
+#### Low (6)
+
+- **H7**: Emergency stop doesn't update risk manager daily P&L/trade counters.
+  - After emergency stop closes all positions, `_risk._daily_pnl` still shows 0. New BUYs after scheduler resumes may pass daily loss limit check despite the fund having exceeded it.
+  - **Fix**: Capture result from `execute_signal` and call `risk.record_trade_result()`.
+
+- **H8**: `_close_qty` missing `close_fraction` clamp.
+  - `record_exchange_fill` clamps `close_fraction = min(filled_volume / pos["qty"], 1.0)` but `_close_qty` at line 677 doesn't. If Kraken fills slightly more than requested (rounding), `close_fraction > 1.0` causes minor P&L error.
+  - **Fix**: `close_fraction = min(qty / pos["qty"], 1.0)`.
+
+- **H9**: Backtester no daily loss halt check after BUY fees.
+  - After SELL/CLOSE the backtester checks daily loss halt, but after BUY it doesn't. Accumulated fees from many BUYs could push daily PnL past the halt threshold without triggering it.
+  - **Fix**: Add daily PnL check after BUY, matching SELL/CLOSE pattern.
+
+- **H10**: `asyncio.get_event_loop()` deprecated in Python 3.14.
+  - Two occurrences in orchestrator.py `_run_backtest`. Should be `get_running_loop()`.
+  - **Fix**: Replace both occurrences.
+
+- **H11**: `prune_old_data` uses `.isoformat()` vs SQLite `datetime('now')` format.
+  - Cutoff strings have `T` separator and `+00:00` suffix; DB timestamps use space separator and no suffix. SQLite string comparison causes ~24h over-deletion.
+  - **Fix**: Use `.strftime("%Y-%m-%d %H:%M:%S")` instead of `.isoformat()`.
+
+- **H12**: `cmd_thought` chunked sends have no error handling.
+  - Unlike `_send_long`, the `cmd_thought` message sending has no try/except. A Telegram API failure during multi-chunk sends causes an unhandled exception.
+  - **Fix**: Wrap in try/except matching `_send_long` pattern.
+
+### Test Coverage Gaps (4 new tests)
+
+- **T1**: `/v1/positions` with actual position data — verifies unrealized P&L computation, tag extraction, SL/TP formatting.
+- **T2**: `/v1/portfolio` and `/v1/risk` with non-trivial state — verifies computed drawdown, daily PnL percentage.
+- **T3**: WebSocket auth rejection (wrong token → 401) and max client limit (→ 503).
+- **T4**: Rate limit test verifies `_last_ask_time` is set after successful call (not manually injected).
+
+### Files to Modify
+- `src/main.py` — H1 (callbacks), H7 (emergency stop risk counters)
+- `src/shell/portfolio.py` — H2 (snapshot_daily timezone), H8 (close_fraction clamp)
+- `src/shell/risk.py` — H3 (initialize timezone)
+- `src/orchestrator/orchestrator.py` — H4 (decision normalize), H10 (get_running_loop)
+- `src/statistics/sandbox.py` — H5 (exec_module timeout)
+- `src/shell/data_store.py` — H6 (aggregation boundary), H11 (prune format)
+- `src/strategy/backtester.py` — H9 (BUY halt check)
+- `src/telegram/commands.py` — H12 (cmd_thought error handling)
+- `tests/test_integration.py` — T1, T2, T3, T4, risk counter test UTC fix
+
+### Implementation Results
+- **All 12 production fixes applied** (H1-H12)
+- **4 new tests written** (T1-T4)
+- **1 existing test fixed**: `test_risk_counters_restored_on_restart` — updated to use UTC timestamps matching H3's timezone-aware query
+- **Tests: 134/134 passing** (was 130/130)
+
+## Session I (2026-02-11) — Audit Round 11
+
+### Audit Scope
+5 parallel Opus audit agents — 11th round. Each received full ~180 prior fix list to avoid re-reports.
+
+### Raw Findings: 28 across all agents
+After triage: **1 critical, 11 medium, 13 low, 3 test gaps** = 25 production fixes + 3 tests
+
+### Critical (1)
+
+- **I1**: Sandbox escape via transitive `src.*` imports. `import src.shell.config; src.shell.config.os.system("cmd")` bypasses all checks. Root `src` not in FORBIDDEN_IMPORTS, dotted chain doesn't match FORBIDDEN_ATTRS.
+  - **Impact**: Arbitrary code execution from AI-generated strategy/analysis code.
+  - **Fix**: Add `src` to FORBIDDEN_IMPORTS in both sandboxes, add allowlist for `src.shell.contract` and `src.strategy.skills.*`.
+
+### Medium (11)
+
+- **I2**: Reconciled exit fills (`_reconcile_orders`) don't call `risk.record_trade_result()` — risk counters stale after restart with pending fills.
+- **I3**: `record_exchange_fill` partial fill doesn't re-place SL/TP for remaining qty (unlike `_close_qty` which does).
+- **I4**: Backtester SELL always closes full position — ignores `size_pct` partial sells. Live system computes partial qty.
+- **I5**: Backtester rejects average-in BUY at max_positions — tag resolved AFTER the check, so explicit-tag average-ins blocked.
+- **I6**: Backtester BUY cash check doesn't include fee — `trade_value > cash` should be `trade_value + fee > cash`. Can drive cash negative.
+- **I7**: `SystemExit`/`KeyboardInterrupt` escapes sandbox `except Exception` — crashes entire process. `raise SystemExit(0)` is plain syntax, not blocked.
+- **I8**: Analysis loader (`statistics/loader.py`) has no sandbox validation before `exec_module` — inconsistent with strategy loader which validates first.
+- **I9**: `scan_results` table never pruned — ~2,592 rows/day, ~946K/year unbounded growth.
+- **I10**: `_close_qty` and `record_exchange_fill` return exit-only `fee` in result dict, but PnL uses `total_fee` (entry+exit). Notifications underreport fees.
+- **I11**: `/health` Total Return uses `paper_balance_usd` in live mode — wrong baseline. Live portfolio starts from exchange balance, not paper config.
+- **I12**: Strategy handler returns double-encoded JSON columns (`backtest_result`, `paper_test_result`, etc.) — consumers must parse twice.
+
+### Low (13)
+
+- **I13**: `scan_results` update loop uses wrong signal's action/confidence when multiple signals target same symbol.
+- **I14**: Portfolio `initialize` restores stale cash from snapshot — mid-day crash leaves cash from last 23:59 snapshot while positions are current.
+- **I15**: `reset_daily` doesn't unhalt daily-loss halt — persists forever, requires manual `/unhalt`. Problematic for autonomous system.
+- **I16**: Backtester no daily trade count limit simulation (`max_daily_trades` not enforced).
+- **I17**: Backtester no consecutive-loss halt simulation (`rollback_consecutive_losses` not enforced).
+- **I18**: `orchestrator_observations` INSERT OR REPLACE never replaces — UNIQUE includes `cycle_id` which is always unique.
+- **I19**: `_run_backtest` no timeout on `Strategy()` instantiation after `exec_module`.
+- **I20**: `orchestrator_log` table never pruned — slow growth but unbounded.
+- **I21**: `KrakenREST.private()` mutates caller's `data` dict by adding `nonce` key.
+- **I22**: WebSocket `_listen` accepts NaN/inf prices — `float("NaN")` is truthy, passes `if price` check.
+- **I23**: `_place_exchange_sl_tp` no guard against near-zero qty below Kraken minimums.
+- **I24**: Sandbox detection via module `__name__` — different names in sandbox/backtest/production.
+- **I25**: Dead `last_error` variable in `ai_client.py`.
+
+### Test Coverage Gaps (3)
+
+- **T1**: No tests for REST query param filtering (since/until/symbol/action).
+- **T2**: No test for `cmd_thought` with actual data or chunking.
+- **T3**: No test for error_middleware 500 response.
+
+### Dismissed (3)
+- Fee format ambiguity — docs issue, shell code handles correctly
+- cmd_thought chunk sizing — cosmetic
+- Price fallback 0 default — truthy `or` chain correctly rejects
+
+### Files to Modify
+- `src/strategy/sandbox.py` — I1 (transitive src imports), I7 (SystemExit)
+- `src/statistics/sandbox.py` — I1 (transitive src imports), I7 (SystemExit)
+- `src/statistics/loader.py` — I8 (validate before exec)
+- `src/main.py` — I2 (reconcile risk counters), I13 (scan_results signal)
+- `src/shell/portfolio.py` — I3 (partial SL/TP re-place), I10 (fee→total_fee), I14 (cash reconciliation), I15 (unhalt daily-loss)
+- `src/shell/risk.py` — I15 (reset_daily unhalt)
+- `src/strategy/backtester.py` — I4 (partial SELL), I5 (average-in max_positions), I6 (fee in cash check), I16 (daily trades), I17 (consecutive losses)
+- `src/shell/data_store.py` — I9 (scan_results prune), I20 (orchestrator_log prune)
+- `src/telegram/commands.py` — I11 (/health live baseline)
+- `src/api/routes.py` — I12 (JSON decode strategy columns)
+- `src/orchestrator/orchestrator.py` — I18 (observations UNIQUE), I19 (Strategy() timeout)
+- `src/shell/kraken.py` — I21 (data dict copy), I22 (NaN/inf guard)
+- `src/orchestrator/ai_client.py` — I25 (dead variable)
+- `tests/test_integration.py` — T1, T2, T3, new tests for I1/I5/I7
+- `src/shell/contract.py` — RiskLimits: added max_daily_trades + rollback_consecutive_losses fields
+- `src/shell/portfolio.py` — I23 (near-zero qty guard)
+
+### Implementation Results (25 fixes + 3 tests)
+
+**All 25 production fixes applied:**
+- I1 (CRITICAL): `ALLOWED_SRC_IMPORTS` allowlist in both sandboxes — blocks transitive `src.*` but allows `src.shell.contract` + `src.strategy.skills.*`
+- I2: `_reconcile_orders` now calls `risk.record_trade_result(pnl)` after exit fills
+- I3: `record_exchange_fill` partial fill now re-places SL/TP for remaining qty
+- I4: Backtester SELL now supports partial sells with `size_pct` + close_fraction fee apportionment
+- I5: Backtester resolves tag BEFORE max_positions check — average-in no longer blocked
+- I6: Backtester BUY cash check includes fee: `trade_value + fee > cash`
+- I7: Both sandbox `except Exception` → `except BaseException` (catches SystemExit)
+- I8: `statistics/loader.py` validates analysis module before `exec_module`
+- I9: `prune_old_data()` now prunes `scan_results` (30d) and `orchestrator_log` (1yr)
+- I10: `_close_qty` + `record_exchange_fill` return `total_fee` (entry+exit) in result dict
+- I11: `/health` Total Return accounts for capital events (deposits/withdrawals)
+- I12: Strategy handler parses JSON string columns (`backtest_result`, `paper_test_result`) before response
+- I13: scan_results update uses `executed_symbols` dict with correct per-symbol signal data
+- I14: Portfolio `initialize` does first-principles cash reconciliation from DB
+- I15: `reset_daily()` auto-unhalts daily-loss halts (matches autonomous fund design)
+- I16: Backtester enforces `max_daily_trades` limit per day
+- I17: Backtester enforces `rollback_consecutive_losses` halt (persists across days)
+- I18: Skipped — `INSERT OR REPLACE` on `date` column works correctly with existing UNIQUE constraint
+- I19: `_run_backtest` wraps both `exec_module` AND `Strategy()` instantiation in timeout
+- I20: `prune_old_data()` prunes `orchestrator_log` (>1yr old entries)
+- I21: `KrakenREST.private()` copies caller's `data` dict before mutating
+- I22: WebSocket `_listen` guards with `math.isfinite(price)` to reject NaN/inf
+- I23: `_place_exchange_sl_tp` returns early if `qty <= 0.000001`
+- I24: Skipped — not actionable (module __name__ detection is an edge case)
+- I25: Removed dead `last_error` variable from `ai_client.py`
+
+**Contract change:** `RiskLimits` dataclass now includes `max_daily_trades` (default=20) and `rollback_consecutive_losses` (default=15). Both main.py and orchestrator.py pass config values.
+
+**3 new tests:**
+- `test_sandbox_blocks_transitive_src_imports` — verifies `src.shell.config` blocked, `src.shell.contract` allowed, `src.strategy.skills.*` allowed
+- `test_backtester_daily_trade_count_and_consecutive_loss_halt` — verifies daily trade count limit bounds the strategy
+- `test_websocket_nan_price_ignored` — verifies `math.isfinite` guard and `price_age()` behavior
+
+**1 test updated:** `test_execute_sell_live_fill_confirmation` — expects `total_fee` (entry+exit) instead of exit-only fee
+
+**Tests: 137/137 passing** (was 134/134)
+
+## Session J (2026-02-11) — Alignment + Orchestrator Awareness Fixes
+
+**Context**: Two audits (alignment + orchestrator awareness) identified systemic issues limiting fund performance and orchestrator decision quality. This session addresses the highest-impact items across 6 phases.
+
+### Phase 1: Close-Reason Tracking (Foundation)
+Every trade close now records WHY it was closed:
+- **DB migration**: `trades.close_reason` TEXT column
+- **Values**: `signal`, `stop_loss`, `take_profit`, `emergency`, `reconciliation`
+- **Threaded through**: `_close_qty()`, `record_exchange_fill()`, `execute_signal()`, `_execute_sell()`, `_execute_close()`
+- **6 caller sites updated** in `main.py`: scan loop (default), SL/TP trigger, conditional orders, emergency stop (×2), reconciliation
+- 3 new tests: `test_close_reason_signal_default`, `test_close_reason_emergency`, `test_close_reason_stop_loss`
+
+### Phase 2: Backtester LIMIT Order Simulation
+Previously LIMIT orders filled regardless of whether price would reach them:
+- **BUY LIMIT**: Only fills when candle `low ≤ limit_price`, uses maker fee
+- **SELL LIMIT**: Only fills when candle `high ≥ limit_price`, uses maker fee
+- **BacktestResult**: New `limit_orders_attempted` / `limit_orders_filled` fields
+- **summary()** includes limit fill rate when > 0
+- Added `_get_maker_fee()` helper
+- 2 new tests: `test_backtester_limit_buy_fills_when_low_reaches`, `test_backtester_limit_buy_skips_when_low_above`
+
+### Phase 3: Backtester Per-Symbol Spread
+Previously hardcoded `spread=0.001` for all symbols:
+- Now calculates median intrabar spread `(high - low) / close` from last 100 candles
+- Falls back to 0.001 if < 10 candles available
+- 1 new test: `test_backtester_per_symbol_spread`
+
+### Phase 4: Truth Benchmark Expansion
+7 new fund-quality metrics in `truth.py`:
+- `profit_factor` — gross wins / gross losses
+- `close_reason_breakdown` — `{reason: count}` dict
+- `avg_trade_duration_hours` — from opened_at/closed_at
+- `best_trade_pnl_pct` / `worst_trade_pnl_pct`
+- `sharpe_ratio` / `sortino_ratio` — from daily_performance snapshots
+- 1 new test: `test_truth_benchmarks_expanded`
+
+### Phase 5: Paper Test Minimum Trade Count
+Previously a paper test could pass with just 1 trade:
+- **Config**: `OrchestratorConfig.min_paper_test_trades` (default=5), loaded from TOML
+- **Evaluation**: `trade_count < min_trades` → status=`inconclusive` (not deployed)
+- **Result JSON**: Includes `min_required` for transparency
+- Updated existing `test_paper_test_full_pipeline` to insert enough trades
+- 1 new test: `test_paper_test_inconclusive_below_minimum`
+
+### Phase 6: Orchestrator Prompt Update
+LAYER_2_SYSTEM significantly expanded:
+- **Close-reason tracking**: Full description of values and operational significance
+- **Paper vs Live execution**: Explicit differences (slippage, SL/TP mechanism, fill timeout, reconciliation)
+- **Backtester capabilities & limitations**: LIMIT simulation, per-symbol spread, what it CAN'T do
+- **Strategy regime caveat**: Strategy's opinion, not ground truth
+- **Sandbox restrictions**: Complete blocked modules/attributes list
+- **Available skills library**: All 7 indicator functions with signatures
+- **Risk counter persistence**: Consecutive loss counter persists across days
+- **Truth benchmarks**: Updated to full metric list including new ones
+- **Additional independent processes**: Conditional order monitor (live only)
+
+CODE_GEN_SYSTEM additions:
+- Per-pair `maker_fee_pct`/`taker_fee_pct` on SymbolData
+- LIMIT orders → maker fees
+- Skills library import pattern
+- `limit_price` in Signal fields
+
+`_analyze()` system constraints now include:
+- `rollback_consecutive_losses` threshold
+- `min_paper_test_trades` threshold
+
+1 new test: `test_prompt_content_accuracy`
+
+**Tests: 146/146 passing** (was 137/137, +9 new)
+
+## Session K (2026-02-11) — Remove Skills Library + Expand Strategy Toolkit
+
+### Context
+First live orchestrator cycle (3:30 AM) failed — all 3 code generation attempts imported `from src.strategy.skills.indicators import ...` which fails at runtime because `strategy/skills/` is not importable from the sandbox's perspective. Rather than fix import paths, decided to remove the skills library entirely (every function was a trivial wrapper around pandas/ta) and expand the available toolkit.
+
+### Changes
+
+**Phase 1: Delete Skills Library**
+- Deleted `strategy/skills/` directory (indicators.py, __init__.py)
+- Removed `src.strategy.skills` from `ALLOWED_SRC_IMPORTS` in sandbox.py
+- Updated error messages: "only src.shell.contract allowed"
+
+**Phase 2: Add scipy Dependency**
+- Added `scipy>=1.12` to pyproject.toml
+
+**Phase 3: Update Orchestrator Prompts**
+- LAYER_2_SYSTEM: Removed "Available Skills Library" subsection entirely. Updated sandbox section with comprehensive available imports list (pandas, numpy, ta, scipy, stdlib modules, src.shell.contract).
+- CODE_GEN_SYSTEM: Replaced imports section with expanded toolkit. Added `ta` library category guide (ta.trend, ta.momentum, ta.volatility, ta.volume with examples). Added scipy.stats/signal/optimize usage examples. Added stdlib modules list. Added OpenPosition/ClosedTrade to contract imports.
+
+**Phase 4: Update Tests**
+- Deleted `test_compute_indicators` (function no longer exists)
+- Updated `test_sandbox_blocks_transitive_src_imports`: skills import now correctly blocked
+- Updated `test_prompt_content_accuracy`: removed skills assertions, added scipy/ta.trend/ta.momentum assertions
+
+**Tests: 145/145 passing** (was 146, -1 deleted test)
+
+## Session L (2026-02-11) — Restart Safety: Fix All 9 Landmines (L1-L9)
+
+### Context
+First live deployment revealed L1 actively corrupting data: portfolio showed $103.01 when it should be ~$99.91. The `daily_performance` table was empty (no snapshot yet), so `portfolio.initialize()` fell back to `config.paper_balance_usd` ($100) as `starting` — but cash was already initialized to $100, and position costs weren't deducted. The $3 DOGE position value appeared as phantom profit. All 9 restart safety landmines were fixed.
+
+### Changes by Landmine
+
+**L1 (Critical) — Paper Cash Reset Fix** (`src/shell/portfolio.py`)
+- New `system_meta` table stores `paper_starting_capital` on first boot
+- Config changes no longer retroactively rewrite the cash baseline
+- Cash ALWAYS reconciles from first principles: `starting_capital + deposits + total_pnl - position_costs`
+- Removed conditional snapshot-based path — formula runs unconditionally in paper mode
+- Added `positions` property on PortfolioTracker
+
+**L2 — Risk Halt Evaluation on Startup** (`src/shell/risk.py`, `src/main.py`)
+- New `evaluate_halt_state()` method checks drawdown, consecutive losses, daily loss, and rollback triggers
+- Called after portfolio+risk init, before any trading starts
+- Sends Telegram alert if system starts halted
+
+**L3 — Orphaned Position Detection** (`src/main.py`)
+- After portfolio init, compares position symbols vs config symbols
+- Logs error + sends Telegram alert for unmonitored positions
+
+**L4 — Strategy Fallback + Paused Mode** (`src/strategy/loader.py`, `src/main.py`, `src/orchestrator/orchestrator.py`)
+- `load_strategy_with_fallback(db)`: filesystem → DB (latest `strategy_versions.code`) → None
+- Paused mode: if strategy fails to load, scan loop + position monitor disabled; nightly orchestration still runs
+- Orchestrator stores strategy source code in `strategy_versions.code` column on deploy
+
+**L5 — Analysis Module Health Check** (`src/main.py`)
+- Logs warning if analysis module files are missing on startup
+
+**L6 — Extended Config Validation** (`src/shell/config.py`)
+- Timezone validity (`ZoneInfo` try/catch)
+- Symbol format (must contain `/` and end with `USD`)
+- Trade size consistency (`default_trade_pct <= max_trade_pct <= max_position_pct`)
+
+**L7 — Live Mode Fail-Fast** (`src/shell/portfolio.py`)
+- Changed `log.warning` to `raise RuntimeError` when Kraken balance fetch fails in live mode
+
+**L8 — Transactional Special Migration** (`src/shell/database.py`)
+- Wrapped positions table recreation in `BEGIN IMMEDIATE` / `COMMIT` with rollback on error
+- Crash between DROP and INSERT no longer loses position data
+
+**L9 — Docker Convenience** (`docker-compose.yml`, `deploy/restart.sh`)
+- Added `.env` reload warning comment to docker-compose.yml
+- Created `deploy/restart.sh` helper (`docker compose up -d --force-recreate` + tail logs)
+
+### Database Changes
+- New `system_meta` table (key-value store for persistent settings)
+- New `strategy_versions.code` column (TEXT, stores strategy source for DB fallback)
+- Both added as schema/migration — backward compatible
+
+**Tests: 161/161 passing** (+16 new tests)
+
+## Session M (2026-02-11) — Activity Log: Unified Fund Timeline
+
+### Goal
+Add a unified chronological timeline so "what happened overnight?" can be answered from a single source instead of cross-referencing 5+ tables and Docker logs.
+
+### What Was Built
+
+**Phase 1: Database + Core Class**
+- New `activity_log` SQLite table (id, timestamp, category, severity, summary, detail)
+- Indexes on `timestamp` and `(category, timestamp)` for filtered queries
+- 90-day retention via `prune_old_data()` in DataStore
+- New `src/shell/activity.py`: `ActivityLogger` class (DB write + WS push + structlog)
+  - Convenience methods: `trade()`, `risk()`, `system()`, `scan()`, `orch()`, `strategy()`
+  - Query methods: `recent(limit)` (chronological), `query(limit, since, until, category, severity)`
+- `ActivityWebSocketManager` class: dedicated WS for activity stream, backfills 20 on connect
+
+**Phase 2: Notifier Hook**
+- 18-event mapping `_EVENT_ACTIVITY` (event → category + severity)
+- `_format_activity()` function: one-line human-readable summaries per event type
+- `scan_complete` with 0 signals returns `None` → skipped (no noise)
+- Hook in `_dispatch()`: auto-logs all Notifier events to activity log
+- Wrapped in try/except — activity log failures never break notifications
+
+**Phase 3: API Endpoints**
+- REST: `GET /v1/activity` — filtered query (limit, since, until, category, severity)
+  - Validates category against `{TRADE, RISK, SYSTEM, SCAN, ORCH, STRATEGY}`
+  - Validates severity against `{info, warning, error}`
+  - Detail JSON parsed for response
+- WebSocket: `/v1/activity/live` — streams activity entries, auth via `?token=`, backfills 20
+- Auth middleware updated to skip both WS paths
+- `create_app()` returns 3-tuple now: `(app, ws_manager, activity_ws)`
+
+**Phase 4: Wiring + Direct Writes**
+- `ActivityLogger` created after DB connect, wired to Notifier and BotCommands
+- `activity_ws` wired to ActivityLogger after API server setup
+- 12 direct writes for lifecycle events not going through Notifier:
+  - Strategy load success/failure, halt on startup, orphaned positions
+  - Fee refresh, daily snapshot, daily reset, strategy reloaded
+  - Emergency stop initiated/complete/incomplete, order reconciliation
+
+**Phase 5: /ask Integration**
+- `BotCommands` accepts `activity_logger` parameter
+- `/ask` injects last 30 activity entries into Haiku context (~2.5K tokens)
+- Format: `[HH:MM:SS] CATEGORY | summary` — compact timeline
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/shell/activity.py` | **NEW** (~170 lines) |
+| `src/shell/database.py` | MODIFY (table + 2 indexes) |
+| `src/shell/data_store.py` | MODIFY (90-day pruning) |
+| `src/telegram/notifications.py` | MODIFY (event map + formatter + dispatch hook) |
+| `src/api/server.py` | MODIFY (activity WS + 3-tuple return + auth skip) |
+| `src/api/routes.py` | MODIFY (activity_handler + route) |
+| `src/main.py` | MODIFY (wiring + 12 direct writes) |
+| `src/telegram/commands.py` | MODIFY (activity_logger param + /ask context) |
+| `tests/test_integration.py` | MODIFY (6 existing tests updated for 3-tuple, 10 new tests) |
+
+**Tests: 171/171 passing** (+10 new tests)
+
+## Session N — Observability Stack (Loki + Prometheus + Grafana)
+
+### Context
+No centralized dashboard for monitoring fund health, system performance, or historical trends. Logs went to Docker json-file driver (lost on rotation), metrics existed only in-memory. Added a full self-hosted observability stack.
+
+### Phase 1: Prometheus `/metrics` Endpoint
+- **New file**: `src/api/metrics.py` (~85 lines)
+- Custom `CollectorRegistry` (avoids pytest conflicts with global default)
+- 12 gauges: portfolio value, cash, position count, peak, drawdown%, daily trades, daily P&L, consecutive losses, halted, fees today, per-position value/PnL (with symbol+tag labels)
+- `tb_system_info` Info metric with mode + version labels
+- Auth skipped for `/metrics` (Prometheus convention, Docker-network only)
+- aiohttp gotcha: `charset must not be in content_type argument` — set Content-Type via `resp.headers` directly
+- Added `prometheus-client>=0.21` to pyproject.toml
+
+### Phase 2: Docker Compose — 3 New Services
+- **Loki** (grafana/loki:3.4): Log aggregation, 512m limit
+- **Prometheus** (prom/prometheus:v3.2): Metrics scraping at 30s intervals, 90d/500MB retention, 256m limit
+- **Grafana** (grafana/grafana:11.5): Dashboard UI, 192m limit
+- trading-brain logging driver changed from `json-file` to `loki`
+- Memory budget: ~1.46GB total (fits 2GB VPS with ~500MB headroom)
+
+### Phase 3: Grafana Provisioning
+- Auto-provisioned datasources (Prometheus + Loki)
+- Auto-provisioned dashboard with 4 rows:
+  - **Fund Overview**: Portfolio value timeseries, cash stat, positions stat, drawdown gauge (red >30%), halted indicator
+  - **Risk & Trading**: Daily P&L timeseries, daily trades, consecutive losses, fees
+  - **Positions**: Per-position value table, per-position P&L bar chart
+  - **Logs**: Loki log panel with JSON parsing
+
+### Phase 4: Deployment Updates
+- Ansible: monitoring directory creation, monitoring config sync, Loki Docker driver install (idempotent), firewall port 3000
+- Caddy: Grafana reverse proxy on `:3000`
+- env.j2: `GRAFANA_ADMIN_PASSWORD` variable added
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/api/metrics.py` | **NEW** (~85 lines) |
+| `src/api/server.py` | MODIFY (import + auth skip + route) |
+| `pyproject.toml` | MODIFY (prometheus-client dep) |
+| `docker-compose.yml` | MODIFY (3 new services + Loki log driver + volumes) |
+| `monitoring/prometheus.yml` | **NEW** |
+| `monitoring/grafana/provisioning/datasources/datasources.yml` | **NEW** |
+| `monitoring/grafana/provisioning/dashboards/dashboards.yml` | **NEW** |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | **NEW** |
+| `deploy/playbook.yml` | MODIFY (monitoring dirs + sync + Loki driver + firewall) |
+| `deploy/templates/Caddyfile.j2` | MODIFY (Grafana proxy) |
+| `deploy/templates/env.j2` | MODIFY (Grafana password) |
+| `tests/test_integration.py` | MODIFY (3 new tests) |
+
+### Deployment Fixes (post-commit)
+- **Loki Docker driver**: Version-specific tags (3.4.0, 3.6.0) don't exist — must use `latest`
+- **Prometheus image**: `v3.2` doesn't exist, need exact `v3.2.1`
+- **Grafana password**: `$` signs in password interpreted by Docker Compose — escaped with `replace('$', '$$')` in Jinja2
+- **Caddy port conflict**: Caddy and Grafana both on :3000 — removed Caddy proxy, Grafana binds `0.0.0.0:3000` directly
+- **Loki label mismatch**: Docker Compose `service` → Loki label `compose_service` (not `service`)
+- **Log formatting**: Added `line_format` template to Loki query for single-line log display
+- **SSH firewall**: Playbook missing `ufw allow 22/tcp` — locked out after fresh deploy. Added SSH rule.
+- **VPS rebuilt**: Previous VPS SSH locked out (no console paste), rebuilt fresh Hetzner instance
+
+**Tests: 174/174 passing** (+3 new tests)
+
+## Session O (2026-02-12) — Grafana Dashboard Overhaul & Metrics Expansion
+
+### Goal
+Expand the `/metrics` Prometheus endpoint from 13 gauges to 41 gauges and overhaul the Grafana dashboard from 12 panels to 53 panels across 8 rows.
+
+### Changes
+
+**Phase 1: Metrics Expansion (`src/api/metrics.py`)**
+- Added 28 new Prometheus gauges:
+  - **21 truth benchmark gauges**: total return %, win rate, trade count, wins/losses, net P&L, fees, avg win/loss, expectancy, profit factor, Sharpe/Sortino ratios, max drawdown, avg duration, best/worst trade %, signal act rate, total signals/scans, strategy version count
+  - **3 AI gauges**: daily cost, tokens used, token budget %
+  - **4 system/scan gauges**: scan age seconds, uptime seconds, per-symbol prices (labeled), portfolio allocation %
+- Added truth benchmark cache (5-minute TTL via `time.monotonic()`) to avoid repeated DB queries on 30s Prometheus scrapes
+- Profit factor infinity guard: `float("inf")` → 0 for Prometheus compatibility
+
+**Phase 2: Scan Timing (`src/main.py`)**
+- Added `last_scan_at` key (UTC datetime) alongside existing `last_scan` HH:MM:SS string — non-breaking, enables scan age calculation in metrics handler
+
+**Phase 3: Orchestrator Structlog (`src/orchestrator/orchestrator.py`)**
+- `_store_thought()`: Emits `orchestrator.thought_stored` with step, model, display (summary), detail (full JSON). Code generation steps show `[GENERATED CODE]` placeholder.
+- `_store_observation()`: Emits `orchestrator.observation_stored` with cycle_id, market summary (300 chars), strategy assessment (300 chars)
+- These appear in Loki and are filterable in the new Orchestrator Spool Grafana panel
+
+**Phase 4: Dashboard Overhaul (`monitoring/grafana/.../trading-brain.json`)**
+- **Row 1 — Fund Overview** (7 panels): Portfolio+Peak timeseries, Cash, Total Return, Net P&L, Positions, Drawdown gauge, Halted
+- **Row 2 — Performance** (12 panels): Win Rate gauge, Trade Count, Profit Factor, Sharpe, Sortino, Expectancy, Wins, Losses, Best/Worst Trade, Avg Duration, All-Time Fees
+- **Row 3 — Risk & Daily** (7 panels): Daily P&L timeseries, Daily Trades, Consecutive Losses, Fees Today, Max Drawdown, Signal Act Rate, Allocation
+- **Row 4 — AI & System** (6 panels): AI Cost, Tokens Used, Token Budget gauge, Strategy Versions, Total Scans, Scan Age
+- **Row 5 — Market Prices** (9 panels): Per-symbol sparkline stats (BTC, ETH, SOL, XRP, DOGE, ADA, LINK, AVAX, DOT)
+- **Row 6 — Positions** (2 panels): Position Values table, Position P&L barchart
+- **Row 7 — Orchestrator Spool** (1 panel): Loki log panel filtering `orchestrator.*` events with `enableLogDetails: true`
+- **Row 8 — Application Logs** (1 panel): Full Loki log panel (unchanged query)
+- Dashboard version bumped to 2
+
+**Tests**
+- 5 new tests: truth benchmarks, AI usage, symbol prices, uptime, scan age
+- All follow existing pattern (TestClient + TestServer + temp DB)
+
+### Files Changed
+| File | Action |
+|------|--------|
+| `src/api/metrics.py` | REWRITE (28 new gauges + truth cache) |
+| `src/main.py` | MODIFY (+1 line: `last_scan_at`) |
+| `src/orchestrator/orchestrator.py` | MODIFY (+2 structlog emissions) |
+| `monitoring/grafana/.../trading-brain.json` | REWRITE (53 panels, 8 rows) |
+| `tests/test_integration.py` | MODIFY (+5 new tests) |
+
+**Tests: 179/179 passing** (+5 new tests)
+
+### Deployment
+- Committed as `d6e7c3b`
+- Deployed via Ansible (`playbook.yml --tags "sync,build,start,verify"`)
+- All 4 services confirmed running: trading-brain, Prometheus, Loki, Grafana
+- Grafana auto-querying Loki every 30s with new dashboard panels — all `status=ok`
+
+### Post-Deploy Fixes
+- **Trade qty display**: `:.4f` → `:.8f` in `_format_activity()` — BTC trades at small capital showed `0.0000` (4 decimals insufficient for satoshi-level quantities)
+- **Fees lost on restart**: `_fees_today` was initialized to `0.0` and never restored from DB. Added restoration in `portfolio.initialize()` — sums `trades.fees` for today's closed trades + `positions.entry_fee` for positions opened today. Follows same pattern as `risk.initialize()` counter restoration.
+
+### Gotchas
+- **Prometheus `float("inf")`**: Gauge `.set()` can't hold infinity — profit factor mapped to 0 when infinite (wins with no losses)
+- **Truth cache cross-test contamination**: New metrics tests must clear `_truth_cache` in setup/teardown to avoid stale data from previous tests
+- **`_fees_today` not surviving restarts**: Unlike risk counters, portfolio fees had no DB restoration — showed $0.00 after container restart even when trades occurred
+
+## Session P (2026-02-12) — Manual Orchestration Trigger
+
+### Context
+Orchestration cycle only runs on nightly cron schedule. No way to manually trigger — needed after config changes or to re-run after failures (e.g., truncation-caused failure). Orchestrator already has `asyncio.Lock` concurrency safety, so manual trigger is safe.
+
+### Design
+Hybrid approach: `/orchestrate` command checks lock directly for immediate feedback, but uses `scan_state` signaling so `main.py`'s `_nightly_orchestration()` handles timeout, strategy reload, and notifications — no duplicated logic.
+
+### Changes
+- **`src/telegram/commands.py`**: Added `self._orchestrator` init + `set_orchestrator()` method, `/orchestrate` in help text, `cmd_orchestrate()` — checks auth, checks `_cycle_lock.locked()`, sets `scan_state["orchestrate_requested"]`
+- **`src/main.py`**: Calls `set_orchestrator()` after orchestrator creation; keep-alive loop checks `orchestrate_requested` flag and fires `asyncio.create_task(self._nightly_orchestration())`
+- **`src/telegram/bot.py`**: Registered `"orchestrate"` command handler
+- **`tests/test_integration.py`**: 2 new tests — trigger success + already-running rejection
+
+**Tests: 181/181 passing** (+2 new tests)
+
+## Session Q (2026-02-12) — Trade Observability (Loki + Prometheus + Grafana)
+
+### Context
+Trades stored in DB and exposed via REST, but Grafana dashboard only showed aggregate metrics — no per-trade detail, no close-reason breakdown, no per-symbol breakdown. Enriched existing logging and added bounded Prometheus gauges.
+
+### Changes
+
+**Step 1 — Structlog enrichment** (`src/shell/portfolio.py`):
+- `portfolio.sell` now includes `close_reason` field
+- `portfolio.exchange_fill` now includes `close_reason` and `intent` fields
+
+**Step 2 — Emergency close logging gap** (`src/main.py`):
+- Added `notifier.trade_executed(r)` in `_emergency_stop()` loop — was the only trade path that silently skipped all notification (Telegram, WebSocket, activity log, structlog)
+
+**Step 3 — Per-symbol trade count** (`src/shell/truth.py`):
+- New `trades_by_symbol` benchmark: `{symbol: count}` dict from closed trades
+- Bounded cardinality: max 9 symbols (12-pair cap)
+
+**Step 4 — Prometheus gauges** (`src/api/metrics.py`):
+- `tb_trades_by_reason{reason=...}`: Trade count by close reason (5 labels max)
+- `tb_trades_by_symbol{symbol=...}`: Trade count by symbol (9 labels max)
+- Total: 14 new series max, populated from truth cache
+
+**Step 5 — Grafana dashboard** (`monitoring/grafana/.../trading-brain.json`):
+- New "Trade Log" row (ID 900) between Positions and Orchestrator Spool
+- Panel 901: Trade Event Log (Loki logs — shows buy/sell/exchange_fill with all fields)
+- Panel 902: Trades by Close Reason (bar gauge, Prometheus)
+- Panel 903: Trades by Symbol (bar gauge, Prometheus)
+
+**Step 6 — Tests** (`tests/test_integration.py`):
+- `test_metrics_trades_by_reason`: Inserts trades with signal/stop_loss reasons, verifies gauge output
+- `test_metrics_trades_by_symbol`: Inserts trades for BTC/ETH, verifies gauge output
+
+**Tests: 183/183 passing** (+2 new tests)
+
+## Session R — Backtest Overhaul: Multi-Timeframe, No Gate, Opus Reviews
+
+### Context
+First live orchestration cycle (2026-02-12) revealed three problems:
+1. Backtester used only 5m candles (30d) and resampled — production gives native 1h (1yr) + 1d (7yr)
+2. Hard >15% drawdown gate auto-rejected without Opus seeing results
+3. No feedback loop — backtest results never went back to Opus for reasoning
+
+### Changes
+
+**`src/strategy/backtester.py`:**
+- `BacktestResult` enriched: `start_date`, `end_date`, `total_days`, `timeframe_mode` fields
+- New `detailed_summary()` method — full metrics with period for AI review
+- `summary()` now includes period when date metadata available
+- `run()` refactored: format detection routes `dict[str, DataFrame]` → `_run_single()`, `dict[str, tuple]` → `_run_multi()`
+- New `_run_multi()`: Iterates at 1h resolution using native 5m/1h/1d DataFrames. SL/TP uses 5m sub-bars within each hour for precision. No resampling. Spread from 1h candles.
+- All existing tests route through `_run_single()` unchanged (zero behavior change)
+
+**`src/orchestrator/orchestrator.py`:**
+- `_run_backtest()` return type: `tuple[bool, str]` → `tuple[bool, str, BacktestResult | None]`
+- Multi-TF fetch: 5m (8640 bars) + 1h (8760) + 1d (2555) per symbol
+- Hard drawdown gate REMOVED — no more auto-rejection
+- New `BACKTEST_REVIEW_SYSTEM` prompt — labels limitations, asks Opus to decide deploy/reject
+- New `_review_backtest()` method — calls Opus with backtest results, returns deploy decision
+- Wired into `_execute_change()`: after crash-free backtest, Opus reviews → deploy or revision loop
+- `LAYER_2_SYSTEM` updated: pipeline description + backtester capabilities reflect multi-TF + review step
+
+**`tests/test_integration.py`:**
+- `test_backtester_multi_timeframe_runs`: Verifies tuple format triggers `_run_multi()`, date metadata populated
+- `test_backtester_result_date_metadata`: Verifies single-TF mode populates start/end dates correctly
+
+**Tests: 185/185 passing** (+2 new tests)
+
+## Session S — Bootstrap Backfill + Orchestrator Loop Redesign
+
+### Context
+After Session R's first live orchestration cycle, two problems surfaced:
+1. **Shallow historical data**: Bootstrap skip thresholds too low — 1h skips at 200 candles (~8 days), 1d at 30 candles (~1 month). Backtester only works with ~30 days of data.
+2. **Flat retry loop**: When Opus rejects backtest results, rejection text is appended to Sonnet's prompt and the same flat loop continues. Opus never re-analyzes — just accumulates error text.
+
+### Changes
+
+**`src/main.py` — Bootstrap backfill thresholds:**
+- 5m: 1000 → 8000 (skip at ~28 days, close to 30d retention)
+- 1h: 200 → 8000 (skip at ~333 days, close to 1y retention)
+- 1d: 30 → 2000, lookback 365 → 2555 days (7 year lookback, skip at ~5.5 years)
+
+**`src/shell/config.py` — New config field:**
+- `OrchestratorConfig.max_strategy_iterations = 3` — outer loop limit
+- Wired in `load_config()` and `settings.example.toml`
+
+**`src/orchestrator/orchestrator.py` — Nested loop redesign:**
+- `_execute_change()` restructured: inner loop (code quality) + outer loop (strategy direction)
+- Inner loop: Sonnet generates → sandbox → Opus code review → break on approval
+- Outer loop: Backtest approved code → Opus reviews results → deploy or redirect
+- `attempt_history` tracks prior iterations — Opus sees what's been tried
+- `original_changes` preserved — Opus's `revision_instructions` replaces (not appends to) `changes`
+- `BACKTEST_REVIEW_SYSTEM` prompt: added `revision_instructions` field + guidance for rejections
+- `_review_backtest()`: new `attempt_history` parameter, "Previous Attempts" section in prompt
+- `LAYER_2_SYSTEM`: pipeline description updated to reflect two-loop structure
+
+**`tests/test_integration.py`:**
+- `test_orchestrator_outer_loop_iterates`: Mocks 2 outer iterations (reject then approve), verifies call counts, thought spool, and deployment
+
+**Tests: 186/186 passing** (+1 new test)
+
+## Session T (2026-02-12) — Candidate Strategy System
+
+### Context
+After the first live orchestration cycle, a design flaw was identified: when a strategy is deployed, it immediately becomes the active trading strategy AND simultaneously enters a "paper test." In live mode, this means real money is at risk while the strategy is supposedly being "tested." The paper test concept was broken.
+
+### Design
+Replace paper-test-on-active-strategy model with a **candidate strategy system**:
+- Up to 3 candidate strategies run in paper simulation alongside the active strategy
+- Each candidate mirrors the fund's portfolio at creation time and trades independently
+- Opus decides when to create, evaluate, cancel, or promote candidates
+- No risk tiers — Opus chooses evaluation duration freely
+- On promotion, Opus decides whether to keep or close fund positions
+
+### New Files Created
+- `src/candidates/__init__.py` — Package init
+- `src/candidates/runner.py` — CandidateRunner: per-slot paper simulation engine
+- `src/candidates/manager.py` — CandidateManager: lifecycle management for all slots
+- `tests/test_candidates.py` — 13 new tests
+
+### Files Modified
+
+**`src/shell/database.py`:**
+- 3 new tables: `candidates`, `candidate_positions`, `candidate_trades`
+- 3 new indexes
+
+**`src/shell/config.py`:**
+- Added `max_candidates = 3` to OrchestratorConfig
+- Removed `min_paper_test_trades`
+- Added 3 candidate notification config fields
+
+**`config/settings.example.toml`:**
+- Updated `[orchestrator]` section with `max_candidates`
+
+**`src/strategy/loader.py`:**
+- Added `hash_code_string()` helper
+
+**`src/orchestrator/orchestrator.py` (largest change):**
+- New decision types: CREATE_CANDIDATE, CANCEL_CANDIDATE, PROMOTE_CANDIDATE
+- Removed: STRATEGY_TWEAK, STRATEGY_RESTRUCTURE, STRATEGY_OVERHAUL, risk tiers
+- Removed: `_execute_change()`, `_evaluate_paper_tests()`, `_terminate_running_paper_tests()`
+- Added: `_create_candidate()` (reuses nested loop pipeline), `_cancel_candidate()`, `_promote_candidate()`
+- Added: `set_close_all_callback()`, `set_scan_state()`, `_pick_candidate_slot()`
+- LAYER_2_SYSTEM prompt: replaced risk tier/paper test sections with candidate system description
+- BACKTEST_REVIEW_SYSTEM: updated deployment context to reference candidate slots
+- New response format with slot, replace_slot, evaluation_duration_days, position_handling fields
+
+**`src/main.py`:**
+- CandidateManager created and initialized at startup
+- Wired into orchestrator with close_all_callback and scan_state
+- Candidate scans run after active strategy in `_scan_loop`
+- Candidate SL/TP checked in `_position_monitor`
+- `_close_all_positions_for_promotion()` method for clean-slate promotions
+- Strategy hot-reload via `strategy_reload_needed` flag
+
+**`src/telegram/commands.py`:**
+- Added `cmd_candidates()` handler
+- Added `set_candidate_manager()` method
+
+**`src/telegram/bot.py`:**
+- Registered "candidates" command handler
+
+**`src/telegram/notifications.py`:**
+- 3 new events: candidate_created, candidate_canceled, candidate_promoted
+- 3 new Notifier methods + _format_activity cases
+
+**`src/api/metrics.py`:**
+- 5 per-candidate Prometheus gauges (value, pnl, trades, win_rate, active)
+
+**`src/api/routes.py`:**
+- Added `GET /v1/candidates` endpoint
+
+**`src/api/server.py`:**
+- Added `candidate_manager` parameter to `create_app()`
+
+**`tests/test_integration.py`:**
+- Updated 4 tests for new decision types
+- Removed 5 dead paper test tests
+
+**`tests/test_candidates.py` (new):**
+- 6 CandidateRunner tests: paper_fills, sl_tp, risk_limits, portfolio_snapshot, modify_signal, get_status
+- 7 CandidateManager tests: create, cancel, promote, recover, replace_slot, persist_state, context_for_orchestrator
+
+**Tests: 194/194 passing** (186 - 5 removed + 13 new)
+
+## Session U (2026-02-13) — Candidate Observability + Bug Fixes
+
+### Context
+First live orchestrator cycle deployed a candidate to slot 1. Running for hours but producing zero logs — no way to know it's alive except querying DB or `/candidates`. Two bugs discovered: stats zeroing after persist, and silent scanning.
+
+### Bug Fix: Stats Zeroing After Persist
+**Root cause**: `_trades` served double duty — persist buffer AND stats source. `get_new_trades()` clears it, destroying stats for `get_status()` and `_build_portfolio()`.
+
+**Fix**: Added `_all_trades` list that accumulates ALL trades and is never cleared during normal operation. `get_status()` and `_build_portfolio()` now read from `_all_trades`. `_trades` becomes persist-only buffer. Recovery path in `manager.py` also sets `_all_trades`.
+
+### Scan Heartbeat
+Added `_scan_counts` dict to CandidateManager. Every 10 scans, emits `candidate.heartbeat` structlog with slot, scan count, positions, and total value. Counts reset on cancel/promote.
+
+### Candidate Trade Notifications
+- 2 new Notifier methods: `candidate_trade_executed(slot, trade)`, `candidate_stop_triggered(slot, trade)`
+- 2 new `_EVENT_ACTIVITY` entries mapping to `("CANDIDATE", "info")` / `("CANDIDATE", "warning")`
+- 2 new `_format_activity` handlers with `[C{slot}]` prefix
+- 2 new `NotificationConfig` fields (both default True)
+- `CANDIDATE` added to valid activity categories in `routes.py`
+- `candidate()` convenience method on ActivityLogger
+
+### Wiring
+- `CandidateManager.set_notifier()` setter, called in `main.py` after manager init
+- `run_scans()`: dispatches `candidate_trade_executed` for each trade
+- `check_sl_tp()`: dispatches both `candidate_stop_triggered` and `candidate_trade_executed`
+
+### Files Modified
+- `src/candidates/runner.py` — `_all_trades` list, stats read from it
+- `src/candidates/manager.py` — `_notifier`, `_scan_counts`, heartbeat, trade dispatch, SL/TP dispatch
+- `src/telegram/notifications.py` — 2 methods, 2 event entries, 2 format handlers
+- `src/shell/config.py` — 2 NotificationConfig fields
+- `src/shell/activity.py` — `candidate()` convenience method
+- `src/api/routes.py` — `CANDIDATE` in valid categories
+- `src/main.py` — 1 line: `set_notifier()`
+
+### Tests Added (7 new)
+- `test_runner_stats_survive_persist` — stats intact after get_new_trades()
+- `test_manager_notifies_on_trade` — candidate_trade_executed dispatched
+- `test_manager_notifies_on_sl_tp` — both stop_triggered and trade_executed dispatched
+- `test_manager_heartbeat_logging` — structlog heartbeat after 10 scans
+- `test_candidate_trade_dispatch` — notifier activity log with [C1] prefix
+- `test_candidate_stop_dispatch` — notifier stop event with CANDIDATE category
+- `test_candidate_activity_format` — _format_activity for candidate events
+
+**Tests: 201/201 passing** (194 + 7 new)
+
+## Session V (2026-02-13) — Grafana Library Panels + Orchestrator Text Panels
+
+### Context
+Dashboard needed orchestrator analysis visibility. User wanted to experiment with layouts and convert all panels to reusable library components.
+
+### Library Panel Conversion
+- Converted all 60 existing dashboard panels to Grafana library panels via `POST /api/library-elements`
+- Each panel gets a stable UID: `tb-lib-{panel_id}`
+- Dashboard JSON rewritten to reference library panels with `libraryPanel: {uid, name}` instead of inline definitions
+- Script created on VPS to automate creation and dashboard rewrite
+
+### Orchestrator Analysis Library Panels (8 new)
+Created 8 Loki-backed text panels for orchestrator data, all with `showTime: false` for clean text display:
+
+| Panel | LogQL Source | Data Field |
+|-------|-------------|------------|
+| Market Outlook | `orchestrator.observation_stored` | `market` |
+| Strategy Assessment | `orchestrator.observation_stored` | `assessment` |
+| Cross-Reference Findings | `orchestrator.thought_stored` (step=analysis) | `detail.cross_reference_findings` |
+| Latest Decision | `orchestrator.cycle_complete` | `decision` |
+| Specific Changes | `orchestrator.thought_stored` (step=analysis) | `detail.specific_changes` |
+| Backtest Summary | `orchestrator.backtest_complete` | `summary` |
+| Code Review | `orchestrator.thought_stored` (step=candidate_review) | `detail.approved/feedback/issues` |
+| Backtest Review | `orchestrator.thought_stored` (step=backtest_review) | `detail.deploy/reasoning/concerns` |
+
+**Double JSON parsing technique**: For nested fields inside `detail` (which is a JSON string), LogQL chains two `| json` operators: `| line_format "{{.detail}}" | json | line_format "{{.cross_reference_findings}}"`
+
+### Dashboard Layout Evolution
+- v5: User's redesign — Market Prices at top, 3w×3h stats, everything inline
+- v6: Library panel references replace inline definitions
+- v7: User's final layout — 3 orchestrator text panels at top (Market Outlook 8w×8h, Strategy Assessment 16w×14h, Cross-Reference Findings 8w×6h), everything else in collapsed rows
+
+### Three Dashboard Variations (built, then deleted by user request)
+Built "Data Wall" (Bloomberg-style), "Story Flow" (narrative), and "Three Column" layouts — all 60+ panels each. User rejected all three in favor of their own iteration.
+
+### Key Lessons
+- **Provisioned dashboards**: Cannot be updated via Grafana API — must restart Grafana to re-provision from disk
+- **VPS deployment**: SCP to `/tmp/` then `sudo cp` to `/srv/trading-brain/` (permission issue)
+- **Grafana port**: 3001 on host, mapped to 3000 in container
+- **Always verify syncs**: MD5 checksums caught a stale file copy
+
+### Files Modified
+- `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` — Library panel references + orchestrator panels at top
+
+**Tests: 201/201 passing** (unchanged — Grafana JSON only)
+
+## Session W (2026-02-14) — Institutional Learning System
+
+### Context
+The strategy document (Layer 3 — Institutional Memory) was read every nightly cycle but never written to. Daily observations went to DB on a rolling window but nothing graduated to durable institutional knowledge. The orchestrator's judgment didn't compound over time. Design details in `architecture.md` Institutional Learning System section.
+
+### What Was Built
+
+**Phase 1 — Database Schema**
+- 4 new tables: `predictions`, `strategy_doc_versions`, `candidate_signals`, `candidate_daily_performance`
+- 5 new indexes
+- 7 migrations: 3 columns on `orchestrator_observations` (strategy_version, doc_flag, flag_reason), `max_adverse_excursion` on positions, candidate_positions, trades, candidate_trades
+
+**Phase 2 — MAE (Max Adverse Excursion) Tracking**
+- Tracks worst drawdown from entry while position is open
+- Fund positions: `update_prices()`, `refresh_prices()`, `_execute_buy()`, `_close_qty()`, `record_exchange_fill()`, `snapshot_daily()`
+- Candidate positions: `check_sl_tp()`, `_build_portfolio()`, `_execute_buy()`, `_close_position()`
+- Persistence: `persist_state()` (positions + trades), `initialize()` (recovery)
+
+**Phase 3 — Candidate Data Parity**
+- Signal capture in `CandidateRunner.run_scan()` — builds signal records with acted_on/rejected_reason
+- `get_new_signals()` returns and clears pending signals
+- `CandidateManager.persist_state()` writes signals to `candidate_signals` and daily snapshots to `candidate_daily_performance`
+- Fixed `strategy_regime=None` across `main.py` signal processing (4 SQL tuples + 1 keyword arg)
+
+**Phase 4 — Prediction Storage**
+- Added prediction guidance to `LAYER_2_SYSTEM` prompt + `doc_flag`/`flag_reason`/`predictions` fields to JSON schema
+- `_store_predictions()` method extracts and validates predictions from decision JSON
+- `_get_current_strategy_version()` helper for observation context
+- `_store_observation()` now includes strategy_version, doc_flag, flag_reason; pruning changed from 30d to 14d
+
+**Phase 5 — Reflection System**
+- `REFLECTION_USER_TEMPLATE` constant: 14-section template with full Layer A + Layer B evidence
+- `_should_reflect()`: True if >=14 days since last reflection OR never reflected with >=7 observations
+- `_gather_reflection_context()`: Queries all narrative + evidence data from DB
+- `_archive_strategy_doc()`: Archives current doc to `strategy_doc_versions` with incrementing version
+- `_reflect()`: Full flow — gather context, Opus call, archive old doc, write new doc, grade predictions by ID, store new predictions, update system_meta, notify
+- Reflection runs BEFORE nightly analysis so freshly updated strategy doc informs that night's decisions
+
+**Phase 6 — Strategy Document Template**
+- Replaced `strategy/strategy_document.md` with new 6-section structure: Strategy Design Principles, Strategy Lineage, Known Failure Modes, Market Regime Understanding, Prediction Scorecard, Active Predictions
+
+**Phase 7 — Observability**
+- Telegram: `reflection_completed` event + notification method
+- Config: `reflection_completed: bool = True` in NotificationConfig
+- Prometheus: 6 new gauges (predictions_total, predictions_ungraded, predictions_graded, prediction_accuracy, strategy_doc_version, days_since_reflection)
+- REST: `GET /v1/predictions` (with graded filter) + `GET /v1/strategy-doc/versions`
+
+**Phase 8 — Pruning**
+- `predictions`: 30 days after grading
+- `candidate_signals`: 30 days after candidate resolved
+- `candidate_daily_performance`: same lifecycle
+- `strategy_doc_versions`: explicitly NOT pruned (permanent archive)
+
+**Phase 9 — Tests**
+- 20 new tests in `tests/test_institutional_learning.py`
+- Updated `test_integration.py` schema check to include 4 new tables
+
+### Files Modified
+| File | Summary |
+|------|---------|
+| `src/shell/database.py` | 4 new tables, 5 indexes, 7 migrations |
+| `src/shell/portfolio.py` | MAE tracking throughout position lifecycle |
+| `src/candidates/runner.py` | Signal capture, MAE tracking, strategy_regime |
+| `src/candidates/manager.py` | Signal persistence, daily snapshots, MAE in persist/recovery |
+| `src/main.py` | Fixed strategy_regime=None (4 SQL tuples + 1 kwarg) |
+| `src/orchestrator/orchestrator.py` | Predictions, reflection system, prompt changes |
+| `strategy/strategy_document.md` | New 6-section template |
+| `src/telegram/notifications.py` | reflection_completed event |
+| `src/shell/config.py` | reflection_completed notification flag |
+| `src/shell/data_store.py` | Pruning for 3 new tables |
+| `src/api/routes.py` | 2 new REST endpoints |
+| `src/api/metrics.py` | 6 new Prometheus gauges |
+| `tests/test_institutional_learning.py` | 20 new tests |
+| `tests/test_integration.py` | Schema check updated |
+
+### Key Design Decisions
+- **Prediction grading by ID**: Reflection data includes prediction `id`, Opus returns `prediction_id` — avoids fragile claim-text matching
+- **Reflection before analysis**: Strategy doc updated first, then used in that night's analysis context
+- **Strategy doc rewrite (not append)**: Each reflection produces a complete rewrite, old versions permanently archived
+- **First reflection gating**: Won't reflect until >=7 observations exist (about 1 week of nightly cycles)
+
+**Tests: 221/221 passing** (201 existing + 20 new)
+
+### Post-Implementation Additions (Session W continued)
+
+**Grafana Dashboard — Institutional Learning Row**
+- Added datasource UIDs (`uid: prometheus`, `uid: loki`) to `datasources.yml`
+- New collapsed row "Institutional Learning" (id 1100) at y=18 with 7 inline panels:
+  - ID 1101-1103: Total Predictions, Ungraded, Graded (stat panels)
+  - ID 1104: Prediction Accuracy (gauge, percentunit, red/yellow/green thresholds)
+  - ID 1105: Strategy Doc Version (stat, blue)
+  - ID 1106: Days Since Reflection (stat, color thresholds at 10/14)
+  - ID 1107: Reflection Events (Loki logs panel)
+- New "Candidate Positions" table panel (id 1108) in Strategy Candidates row
+- Dashboard version bumped from 7 to 8
+
+**Configurable Reflection Period**
+- `orchestrator.reflection_interval_days` config option (default 7, was hardcoded 14)
+- Added to `OrchestratorConfig`, `load_config()`, `settings.example.toml`
+- Updated `_should_reflect()`, `_gather_reflection_context()` (10 SQL queries), `_gather_context()`, `_store_observation()` pruning, `REFLECTION_USER_TEMPLATE`, `_reflect()`
+
+**Manual Reflection Trigger — `/reflect_tonight`**
+- New Telegram command sets `reflect_tonight=1` in `system_meta`
+- Registered in `bot.py`, added to help text
+- Orchestrator checks flag in `_should_reflect()`, clears after reflection
+
+**Candidate Position Gauges**
+- 2 new Prometheus gauges: `tb_candidate_position_value_usd`, `tb_candidate_position_pnl_usd` (labels: slot, symbol, tag)
+- Populated in `metrics_handler()` from `runner.get_positions()`
+
+**Test Fixes**
+- `test_should_reflect_14_days` → renamed `test_should_reflect_interval` (5-day/8-day thresholds for new 7-day default)
+- Added `test_should_reflect_manual_trigger`
+- Updated `test_integration.py` schema check for 4 new tables
+
+### Files Modified (Additions)
+| File | Summary |
+|------|---------|
+| `monitoring/grafana/provisioning/datasources/datasources.yml` | Added explicit UIDs |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | 8 new panels, version 8 |
+| `src/shell/config.py` | `reflection_interval_days` in OrchestratorConfig |
+| `config/settings.example.toml` | `reflection_interval_days = 7` |
+| `src/orchestrator/orchestrator.py` | Configurable interval throughout, reflect_tonight flag |
+| `src/telegram/commands.py` | `/reflect_tonight` command |
+| `src/telegram/bot.py` | Handler registration |
+| `src/api/metrics.py` | 2 new candidate position gauges |
+| `tests/test_institutional_learning.py` | Fixed interval test, added manual trigger test |
+
+**Tests: 222/222 passing** (221 + 1 new manual trigger test)
+
+## Session X (2026-02-14) — Library Panel De-conversion
+
+### Context
+After wiping the Grafana volume for a fresh deploy, all 63 library panels were lost — they're stored in Grafana's internal database, not on disk. Dashboard showed "Unable to load library panel" errors for every panel.
+
+### Root Cause
+Session V converted 60 inline panels → library panels via `POST /api/library-elements`, then replaced inline definitions in the JSON with `libraryPanel: {uid, name}` references. This made the dashboard dependent on Grafana's internal state.
+
+### Fix
+Created `monitoring/build_dashboard.py` — a Python script that:
+1. Extracts the pre-Session-V dashboard from git (`a5b8007^`) with all 53 panels inline
+2. Loads the current dashboard (63 library refs + 8 Session W inline panels)
+3. Builds a `panel_id → full_definition` mapping from the old file
+4. Builds 4 panels from scratch (3 orchestrator text panels + 1 candidate log — new in Session V, not in old file)
+5. Walks the current dashboard, replacing every `libraryPanel` reference with the full inline definition
+6. Normalizes datasource UIDs: `PBFA97CFB590B2093` → `prometheus`, `P8E80F9AEF21F6940` → `loki`
+7. Normalizes Loki labels: `container=` → `compose_service=` (from Docker logging config)
+8. Writes version 9 to `trading-brain.json`
+
+### Result
+- 71 total inline panels, 0 library refs
+- Dashboard is fully self-contained — survives volume resets, Grafana reinstalls, VPS migrations
+- Script is rerunnable from repo root: `python3 monitoring/build_dashboard.py`
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `monitoring/build_dashboard.py` | **NEW** — dashboard generator script |
+| `monitoring/grafana/provisioning/dashboards/json/trading-brain.json` | Regenerated — all panels inline, version 9 |
+
+**Tests: 222/222 passing** (unchanged — Grafana JSON only)
+
+## Session Y (2026-02-16) — Telegram Interface Redesign
+
+### Context
+19 commands and 24 notification types. Commands flat and some redundant. Notifications sparse plain text — hard to scan on mobile. Goal: consolidate commands, enrich notifications with emoji + portfolio context, add signal drought detection.
+
+### Changes
+
+#### Command Consolidation (19→15)
+- **Removed**: `/status`, `/daily_performance`, `/strategy`, `/tokens`, `/thought`
+- **Created**: `/fund` (merged `/health` + `/status` — mode, portfolio, trade stats, uptime)
+- **Renamed**: `/reflect_tonight` → `/reflect`
+- **Merged**: `/thought` into `/thoughts` (2-arg form shows full AI response)
+- **Redesigned**: `/help` — grouped with emojis (📊 Fund, 🔭 Intelligence, 💬 Interactive, ⚙️ Control)
+
+#### Notification Enrichment
+- All notifications get emoji prefix for visual anchoring on mobile
+- **BUY**: Entry, size %, SL/TP with distance %, intent, portfolio context
+- **SELL/CLOSE**: Exit/entry, P&L absolute + %, hold duration, close reason, portfolio/cash
+- **stop_triggered**: Trigger/entry, P&L, hold duration, portfolio context via `context` kwarg
+- **signal_rejected**: Confidence, size_pct
+- **risk_halt**: Daily P&L, position count
+- **system_online**: Mode, strategy version, cash, status
+- **system_shutdown**: Portfolio value, positions
+- **orchestrator_cycle_started**: Suppressed from Telegram (WS + activity only)
+- **orchestrator_cycle_completed**: Strategy version, candidate count
+- **candidate_canceled**: Reason
+- **candidate_promoted**: Position handling (kept/closed)
+- **reflection_completed**: Graded breakdown (✓✗?)
+- **NEW**: `signal_drought` — fires after 24h of 0 signals
+
+#### Portfolio Return Dict Enrichment
+- BUY: Added `stop_loss`, `take_profit`, `size_pct` to return
+- SELL/CLOSE: Added `entry_price`, `opened_at` to return
+- `record_exchange_fill`: Added `entry_price`, `opened_at` to return
+
+#### Call Site Enrichment
+- 5 `trade_executed` sites enriched with portfolio_value, position_count, max_positions, cash
+- 2 `stop_triggered` sites enriched with entry, P&L, hold, portfolio context
+- 4 `risk_halt` sites enriched with daily_pnl, position_count
+- 3 `rollback_alert` sites enriched with portfolio_value
+- system_online, system_shutdown, signal_rejected, scan_complete — all enriched
+- orchestrator.py: candidate_canceled + candidate_promoted + orchestrator_cycle_completed enriched
+
+#### Signal Drought Detection
+- Tracks `last_signal_time`, `drought_alerted`, `scan_count` in scan_state
+- After 24h of 0 executed signals: sends `signal_drought` notification (one-shot until reset)
+- Resets on next executed signal
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `src/shell/portfolio.py` | Return dict enrichment (BUY: SL/TP/size_pct, SELL: entry/opened_at) |
+| `src/shell/config.py` | Added `signal_drought: bool = True` to NotificationConfig |
+| `src/telegram/commands.py` | Command consolidation, /fund, /help redesign, /thoughts merge |
+| `src/telegram/bot.py` | Handler registrations 19→15 |
+| `src/telegram/notifications.py` | Full notification enrichment, signal_drought, cycle_started suppression |
+| `src/main.py` | Call site enrichment, signal drought tracking |
+| `src/orchestrator/orchestrator.py` | Enriched candidate/cycle notifications |
+| `docs/dev_notes/notification_guidelines.md` | **NEW** — notification design spec |
+| `tests/test_integration.py` | Updated 3 existing tests + 8 new tests |
+
+**Tests: 230/230 passing** (222 existing + 8 new)
+
+## Session Y-fix (2026-02-16) — Orchestrator Feedback Loop Fix
+
+### Context
+First two live orchestrator cycles failed. Investigation revealed two bugs.
+
+### Bug 1: Stale Decision Context in Feedback Loop (Critical)
+- Code review prompt passed original `decision` dict even after backtest reviewer gave `revision_instructions`
+- Sonnet followed revised instructions, Opus code reviewer compared against stale original → rejected valid code
+- **Fix**: Code review now receives `inner_changes` (current instructions). Backtest review receives `current_changes` kwarg.
+
+### Bug 2: orchestrator_cycle_completed Default (Config)
+- `orchestrator_cycle_completed` defaulted to `False` in NotificationConfig (grouped with high-frequency events)
+- Runs once per day — should default True
+- **Fix**: Moved to True defaults group
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `src/orchestrator/orchestrator.py` | Code review uses `inner_changes`, backtest review accepts `current_changes` kwarg |
+| `src/shell/config.py` | `orchestrator_cycle_completed: bool = True` |
+
+## Session Z (2026-02-16) — System Prompt Audit & Backtest Window Clarification
+
+### Context
+Second manual orchestrator cycle failed across all 3 outer iterations. Backtest reviewer hallucinated wrong IO contract names (`reason=` instead of `reasoning=`, `.hourly` instead of `.candles_1h`, `Intent.SCALP` which doesn't exist) in revision_instructions, poisoning subsequent code generation.
+
+### Full Audit
+Cross-referenced every system prompt against actual implementation: `contract.py`, `sandbox.py`, `backtester.py`, `portfolio.py`, `risk.py`, `runner.py`, `manager.py`, `main.py`, `truth.py`.
+
+**Results**: 2 critical, 10 medium, 3 low — all 15 fixed. All 15 fixed.
+
+### Fixes Applied
+**Critical (C1, C2)** — applied in Y-fix session:
+- BACKTEST_REVIEW_SYSTEM: Added IO contract reference (field names, Signal kwargs, enum values)
+- CODE_REVIEW_SYSTEM: Added Signal constructor params, Action/Intent enum values
+
+**CODE_GEN_SYSTEM (M1, M2, M3, M4, L1, L3)**:
+- M1: Added `.side` ("long"), `.opened_at` (datetime) to OpenPosition description
+- M2: Added `.side`, `.qty`, `.opened_at`, `.closed_at` to ClosedTrade description
+- M3: Added "Optional StrategyBase methods" section: `on_fill()`, `on_position_closed()`, `get_state()`/`load_state()`, `scan_interval_minutes`
+- M4: Added full RiskLimits field list with defaults
+- L1: Added "Execution timeout" section (30-second limit in production)
+- L3: Clarified MODIFY size_pct: "size_pct is ignored for MODIFY"
+
+**CODE_REVIEW_SYSTEM (M5, M6, M7)**:
+- M5: Added ClosedTrade attributes (11 fields)
+- M6: Added RiskLimits attributes with defaults
+- M7: Added optional method signatures with fallback note
+
+**LAYER_2_SYSTEM (M8, M9, M10, L2)**:
+- M8: Fixed scan_results: "price and spread per symbol per scan" (was "raw indicator values")
+- M9: Added `promotion` to close_reason list
+- M10: Clarified candidate execution: "max_positions, max_trade_pct clamping enforced per candidate" + "no halt states"
+- L2: Rewrote backtester section to explicitly state practical window (up to 1 year of 1h data bootstrapped from Kraken, 30 days of 5m for SL/TP precision)
+
+### Backtest Window: 30 Days with Full 5m Precision
+Original design doc proposed expanding to 90 days. Investigation revealed code already fetched 365 days of 1h data. However, 5m data (critical for SL/TP trigger ordering) only covers 30 days — running backtests beyond 30 days means degraded SL/TP precision.
+- **Decision**: Lock backtest to 30 days, aligned with 5m availability. Full precision throughout.
+- `_run_backtest()` limits: 1h `8760→720`, 1d `2555→30`
+- LAYER_2_SYSTEM updated to state 30-day window with full 5m precision
+
+### Strategy Characterization at Archive Time
+- New `strategy_characterization` field in CREATE_CANDIDATE response format
+- Orchestrator writes brief description of approach + target conditions
+- Stored in `strategy_versions.description`, visible in version history context
+- On PROMOTE_CANDIDATE: characterization carried forward from candidate's original version record
+- Future: may expand to multi-step research pipeline when sufficient history exists
+
+### Tests: 230/230 passing
+
+---
+
+## Session AA (2026-02-16) — /ask Context Enrichment
+
+### Context
+Live system running on VPS. Earlier this session: fixed observations dedup bug (UNIQUE(date) constraint), added manual trigger awareness to orchestrator prompt, removed duplicate candidate notifications. User then proposed stress-testing the `/ask` command by imagining 32 realistic investor questions and scoring them against what Haiku actually receives.
+
+### Problem
+The `/ask` command assembled only 6 context blocks for Haiku: portfolio summary (value/cash/count), risk state (daily P&L/halted/losses), 5 recent trades, latest observation, strategy version, and 30 activity log entries. Scoring 32 realistic questions against this context: **3 answerable, 12 partial, 17 fail.** Over half of reasonable investor questions hit a wall.
+
+Critical gaps:
+- **No open positions** — only position count, not symbols/entries/P&L/SL/TP
+- **No risk limits** — Haiku couldn't explain safety parameters
+- **No candidates** — couldn't explain what the orchestrator is testing
+- **No system architecture knowledge** — zero awareness of pairs, schedule, long-only restriction
+- **No close_reason on trades** — couldn't explain why exits happened
+- **No orchestrator reasoning** — only observation summary, not the thought spool
+
+### Solution
+
+**System prompt rewrite**: Added conciseness directive ("answer as briefly as accurate"), anti-hallucination reinforcement, command redirect guidance, and static system facts (pairs, long-only, Kraken, schedule, candidate system, available commands, Grafana).
+
+**6 new context blocks** (all from already-accessible objects):
+1. **Open positions**: symbol, tag, intent, qty, entry, current price, P&L%, SL, TP
+2. **Risk limits + drawdown**: config limits + current drawdown from peak
+3. **Candidates**: slot status, version, value, P&L, trades, win rate
+4. **System config**: mode, strategy version, status, symbol count
+5. **close_reason on trades**: added to existing trade query
+6. **Latest orchestrator thought**: most recent reasoning from thought spool (truncated 500 chars)
+
+**Re-score**: 3 Good → 18 Good. 17 Fail → 3 Fail. Remaining fails are historical aggregates (worst trade ever, total fees, uptime) — Haiku redirects to Grafana.
+
+### Design Decisions
+- **Conciseness wording**: "Answer as briefly as accurate — a single number or sentence is fine. Elaborate only when the user asks why, how, or to explain something." Distinguishes data questions from understanding questions.
+- **Thought truncation**: 500 chars keeps token cost low while giving Haiku the orchestrator's latest reasoning
+- **Static system facts in prompt**: Pairs, schedule, candidate system, long-only restriction — always true, cheap, unlocks many architectural questions
+- **Command redirects**: Haiku told to suggest /positions, /risk, /candidates, Grafana when those serve better than a text answer
+
+## Session AB (2026-02-16) — Orchestrator Decision Feedback Loop
+
+### Problem
+The orchestrator operates in "present-only" mode. Every cycle, Opus receives a comprehensive snapshot of current fund state but **no feedback about its own previous decisions**. It literally said *"The fact that I'm being triggered again suggests the previous cycle may not have successfully created the candidate. I need to actually execute this time."* — guessing whether its own action succeeded.
+
+Root causes:
+- `orchestrator_log` has full decision history but was **never queried** in `_gather_context()`
+- `activity_log` captures inter-cycle events but was **never queried** by the orchestrator
+- Decision outcomes (success/failure) were **not stored** — `_create_candidate()` returns a string but it wasn't persisted
+- Rejected signal breakdown exists in `signals` table (`acted_on`, `rejected_reason`) but was **never surfaced**
+- Candidate signal counts exist in `candidate_signals` table but were **not included** in candidate status
+
+### Solution
+Added a structured `## SINCE YOUR LAST CYCLE` section to the orchestrator's analysis prompt, pulling from existing data sources that were already populated but never queried.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `src/shell/database.py` | Added `outcome` column migration to `orchestrator_log` |
+| `src/orchestrator/orchestrator.py` | `_gather_since_last_cycle()` helper, `_format_since_last_cycle()` formatter, added to `_gather_context()`, inserted section into `_analyze()` prompt, `outcome` param to `_log_orchestration()` |
+| `src/candidates/manager.py` | Added `signal_count` to `get_context_for_orchestrator()` |
+| `tests/test_integration.py` | 6 new tests |
+| `docs/dev_notes/progress.md` | This entry |
+
+### Key Design Decisions
+- **Section placement**: After time context, before "Current fund state" — first thing orchestrator reads
+- **SCAN events excluded**: Too noisy (288/day). Activity log filtered to non-SCAN categories only.
+- **50 event limit**: Cap activity log entries to keep token usage reasonable
+- **Graceful first run**: Returns `None` if no prior cycle exists, section omitted entirely
+- **Static method for formatting**: `_format_since_last_cycle()` is pure function, easy to test
+
+### Test Results
+- **241/241 passing** (6 new tests)
+
+## Session AC (2026-02-16) — Data API Refactor
+
+### Problem
+The REST API (`src/api/routes.py`, 14 endpoints) accumulated inconsistencies over 20+ sessions: `SELECT *` throughout (fragile DB schema coupling), inconsistent `_pct` formatting (positions returns percentages, risk/trades return fractions), no date validation (invalid dates silently return empty results), a dead `paper_test` field, a `last_scan` key mismatch, and no REST access to orchestrator intelligence data.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `src/api/routes.py` | `_validate_datetime` helper, `Path` import, all 10 existing handlers refactored (explicit columns, pct normalization, date validation), `paper_test` removed from strategy endpoint, 6 new handlers added |
+| `tests/test_integration.py` | 12 new tests + 1 existing test updated (drawdown_pct assertion) |
+
+### Part A: Helpers
+- `_validate_datetime()` — validates ISO 8601 format, raises 400 with error envelope on failure
+- `from pathlib import Path` import for strategy doc file reading
+
+### Part B: Existing Handler Fixes (10 fixes)
+- **B1**: `system_handler` — `last_scan` now reads `last_scan_at` (datetime) and formats with `.isoformat()`
+- **B2**: `positions_handler` — explicit column list (9 columns)
+- **B3**: `trades_handler` — explicit columns (17), `pnl_pct * 100`, `max_adverse_excursion` rounded, date validation
+- **B4**: `performance_handler` — explicit columns (14), `max_drawdown_pct * 100`, `win_rate * 100`, date validation
+- **B5**: `risk_handler` — all limit `_pct` fields `* 100`, `daily_pnl_pct * 100`, `drawdown_pct * 100`
+- **B6**: `signals_handler` — explicit columns (13), `size_pct * 100`, date validation
+- **B7**: `strategy_handler` — removed `paper_test` query + response key, explicit columns on `strategy_versions`, added `tags`/`market_conditions` to JSON parse list
+- **B8**: `benchmarks_handler` — shallow copy before mutating, `win_rate`/`signal_act_rate`/`max_drawdown_pct`/`best_trade_pnl_pct`/`worst_trade_pnl_pct` all `* 100`
+- **B9**: `predictions_handler` — explicit column list (13)
+- **B10**: `activity_handler` — date validation on `since`/`until`
+
+### Part C: New Endpoints (6)
+- `GET /v1/decisions` — orchestrator decision history with JSON-parsed `analysis`, date filters
+- `GET /v1/thoughts` — cycle list with step_count, models aggregation
+- `GET /v1/thoughts/{cycle_id}` — steps in a cycle (response_length, no full_response), 404 on unknown
+- `GET /v1/thoughts/{cycle_id}/{step}` — full thought detail with parsed_result, 404
+- `GET /v1/strategy-doc` — reads live `strategy/strategy_document.md` file, returns content + length
+- `GET /v1/strategy-doc/versions/{version}` — version content from DB, 400 on non-integer, 404 on missing
+
+### Test Results
+- **253/253 passing** (12 new tests, 1 updated)
+
+## Session AD (2026-02-17) — Live Config Reload + Deployment Acceleration
+
+**Goal**: Four deployment tiers — from zero-downtime config reload to fast shell code deploys — plus a lightweight deploy script.
+
+### Dockerfile Refactor
+- Removed `COPY` for `src/`, `strategy/`, `statistics/`, `config/` — image is now deps-only
+- Pip dependencies parsed from `pyproject.toml` at build time (no `pip install .`)
+- Image only rebuilds when `pyproject.toml` changes
+
+### Docker Compose
+- Added `./src:/app/src:ro` volume mount — code deploys become rsync (seconds)
+
+### SIGHUP Handler + Config Reload (`src/main.py`)
+- `SIGHUP` signal handler sets `reload_requested` flag in `_scan_state`
+- Keep-alive loop checks flag between iterations — never interrupts scan/trade
+- `_reload_config()` method:
+  - **Safe fields** (updated under `_trade_lock`): risk, notifications, orchestrator (reschedules), fees (reschedules), data, AI models/limits, Kraken fee defaults, slippage, log level, allowed_user_ids
+  - **Refused fields** (logged with reason): mode, symbols, paper_balance_usd, db_path, telegram.bot_token/chat_id, kraken.api_key/secret_key, api.host/port
+  - **Strategy hot-reload**: checks code hash, reloads if changed
+  - Sends `config_reloaded` notification with changes/refused/errors
+
+### Component Reload Methods
+- `RiskManager.reload_config(config)` — simple attribute replacement
+- `Notifier.reload_notification_config(config)` — replaces Telegram filter
+- `Notifier.config_reloaded(changes, refused, errors)` — new notification event
+
+### `/reload` Telegram Command
+- Sets `reload_requested` flag (same as SIGHUP)
+- Added to Control group in `/help` (16 commands total)
+
+### Deploy Script (`deploy/deploy.sh`)
+- Reads SSH details from `deploy/inventory.yml`
+- Rsyncs all file groups, detects what changed
+- Picks minimum-downtime action:
+  - Tier 1: config/strategy/statistics → SIGHUP (zero downtime)
+  - Tier 2: src/docker-compose.yml → container restart (~5s)
+  - Tier 3: pyproject.toml → image rebuild (15-20 min)
+- `--dry-run` flag for preview
+
+### Ansible Playbook Updates
+- Split build sync: Dockerfile+compose → restart, pyproject.toml → rebuild
+- Config/strategy/statistics sync → `reload config` handler (SIGHUP)
+- Monitoring sync → no signal (volume-mounted)
+
+### Test Results
+- **264/264 passing** (11 new tests)

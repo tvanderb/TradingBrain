@@ -1,187 +1,73 @@
-# Technical Gotchas & Fixes
+# Technical Gotchas
 
-## Python 3.14 Local Import Scoping Bug
-**Problem**: `cannot access local variable 'asyncio' where it is not associated with a value` when a function has both local `import` statements (e.g., `import sys`) and references a module-level import (`asyncio`) inside `except` clauses.
-**Fix**: Move all imports to module level. Do NOT use local imports in functions that reference module-level imports in `except` blocks.
-**Hit in**: `orchestrator._run_backtest()` — had `import importlib.util / import sys / import tempfile` locally alongside `except asyncio.TimeoutError`.
+> Ongoing traps that affect development. One-time fixes have been pruned.
 
-## macOS Python 3.14 SSL Certificates
-**Problem**: `websockets` library fails with `[SSL: CERTIFICATE_VERIFY_FAILED]` on macOS
-**Fix**: Use certifi's CA bundle explicitly:
-```python
-import ssl, certifi
-ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-async with websockets.connect(url, ssl=ssl_ctx) as ws: ...
-```
-**Note for VPS**: Linux usually has system certs, but keep this fix as fallback
+## Kraken API
 
-## python-telegram-bot Empty Init
-**Problem**: First `pip install python-telegram-bot` sometimes installs with empty `telegram/__init__.py`
-**Fix**: `pip install --force-reinstall python-telegram-bot`
-**When**: Happens on first install, not consistent. May recur on VPS deployment.
+**Pair format divergence**: REST accepts `BTCUSD` but returns `XXBTZUSD`. WebSocket v2 uses `XBT/USD` for BTC, `XDG/USD` for DOGE. All others standard. `PAIR_REVERSE` dict handles mapping.
 
-## APScheduler Interval First Run
-**Problem**: `interval` trigger waits for one full interval before first execution (5 min wait for first scan)
-**Fix**: `scheduler.add_job(fn, "interval", minutes=5, next_run_time=datetime.now())`
-**Key**: Import `from datetime import datetime` — use `datetime.now()` not `datetime.utcnow()`
+**txid extraction**: `result["txid"]` may be an empty list, not None. Safe pattern: `(result.get("txid") or [None])[0]`.
 
-## Structlog Output Buffering
-**Problem**: JSON log lines don't appear in real-time when running as background process
-**Fix**: `PYTHONUNBUFFERED=1` environment variable before `python -m src.main`
+**Fee tiers**: Published rates (0.16/0.26%) are for higher volume. At $0 volume: 0.25% maker / 0.40% taker. Round-trip 0.65-0.80%.
 
-## WebSocket Infinite Retry Loop
-**Problem**: SSL failure causes endless reconnect attempts that never succeed
-**Fix**: Counter with 3-failure fallback to REST polling:
-```python
-ws_failures = 0
-while running:
-    try:
-        await ws_loop()
-        ws_failures = 0
-    except:
-        ws_failures += 1
-        if ws_failures >= 3:
-            await poll_fallback()
-            return
-```
+## SQLite
 
-## pyproject.toml Build Backend
-**Problem**: `setuptools.backends._legacy:_Backend` doesn't exist on Python 3.14
-**Fix**: Use `setuptools.build_meta` instead
+**`datetime('now')` is local**: Always use `datetime('now', 'utc')` for consistent timestamps.
 
-## Telegram Bot Conflict on Restart
-**Problem**: Restarting bot causes `Conflict: terminated by other getUpdates request` errors for ~30 seconds
-**Why**: Telegram's long-polling keeps old connection alive briefly
-**Fix**: This is transient — the library auto-retries and resolves itself. Add `drop_pending_updates=True` to `start_polling()` to avoid processing stale commands.
+**`isoformat()` vs SQLite format**: Python `isoformat()` produces `T` separator + `+00:00` suffix. SQLite datetime functions expect space separator, no suffix. Use `strftime('%Y-%m-%d %H:%M:%S')` for all SQLite datetime comparisons.
 
-## Kraken Fee Tiers vs Published Rates
-**Problem**: Published rates (0.16% maker / 0.26% taker) are for higher volume tiers
-**Reality**: At $0 30-day volume: 0.25% maker / 0.40% taker
-**Impact**: Round-trip cost is 0.65-0.80%, much higher than expected. Must factor into all trade decisions.
+**`LIMIT -1` returns ALL rows**: Documented SQLite behavior. Guard with `max(1, ...)` on user-supplied limits.
 
-## Kraken Pair Format
-**Problem**: Kraken REST API uses different pair names than standard format
-**Mapping**: `BTC/USD` -> `XBTUSD`, `ETH/USD` -> `ETHUSD`, `SOL/USD` -> `SOLUSD`
-**Note**: WebSocket v2 uses standard format (`BTC/USD`), REST uses Kraken format (`XBTUSD`)
+**Can't DROP CONSTRAINT**: Must recreate table to remove constraints. Position table migration requires DROP + CREATE + backfill, wrapped in `BEGIN IMMEDIATE` / `COMMIT`.
 
-## Multiple Instance Prevention
-**Problem**: Running `python3 -m src.main` multiple times (e.g. during testing) spawns duplicate bots. All instances poll the same Telegram token, causing `Conflict: terminated by other getUpdates request` errors and event loop starvation (missed 14/18 scheduled scans in 1.5 hours).
-**Fix**: PID lockfile at `data/brain.pid`. On startup, checks if PID is alive with `os.kill(pid, 0)`. Uses `ProcessLookupError` + `PermissionError` exceptions (NOT `ProcessNotFoundError` — that doesn't exist in Python). Auto-cleaned via `atexit` and explicit cleanup in `finally` block.
-**Note**: `pkill -f` may not terminate processes — use `kill -9 <pid>` if needed. After force-killing, also delete `brain.db-wal` and `brain.db-shm` (stale WAL files cause `disk I/O error`).
+## Python / asyncio
 
-## Ansible Handler Ordering (SSH Lockout)
-**Problem**: Ansible handlers run at END of play, AFTER all tasks. If you harden sshd_config and `notify: restart sshd`, the SSH verify task runs against the OLD config (passes), then the handler restarts sshd with the new config — if the new config is broken, you're locked out.
-**Fix**: Add `meta: flush_handlers` before any verify/connectivity-test tasks. Also run `sshd -t` before flushing to catch config errors while still connected.
-**Also**: `UsePAM no` breaks Debian's sshd (compiled against PAM). `ChallengeResponseAuthentication` is deprecated in OpenSSH 8.7+ — use `KbdInteractiveAuthentication` instead.
+**PID lockfile**: `ProcessLookupError` NOT `ProcessNotFoundError` (doesn't exist in Python). Also catch `PermissionError` (process exists but owned by another user).
 
-## Shell Escaping in Inline Python
-**Problem**: Running Python one-liners with `$` in f-strings gets eaten by bash substitution
-**Fix**: Use standalone `.py` test files instead of inline scripts
+**asyncio.Lock serializes all trade paths**: Scan loop, SL/TP triggers, conditional orders, emergency stop, reconciliation all go through `_trade_lock`. Any deadlock blocks everything. `_analyzing` flag guards strategy callbacks during executor thread.
 
-## Kraken WebSocket Pair Names
-**Problem**: WebSocket v2 uses different pair names than config format
-**Mapping**: `BTC/USD` → `XBT/USD`, `DOGE/USD` → `XDG/USD`. All others use standard format.
-**REST quirk**: REST accepts `BTCUSD` but returns `XXBTZUSD` in responses.
+**Python 3.14 local import scoping**: Functions with local `import` statements AND module-level import references in `except` blocks cause `cannot access local variable` errors. Move all imports to module level.
 
-## Kraken txid Extraction
-**Problem**: `result["txid"]` may be an empty list, not None
-**Fix**: `(result.get("txid") or [None])[0]` — handles both None and empty list
+## Sandbox
 
-## SQLite `datetime('now')` Is Local Time
-**Problem**: `datetime('now')` uses server timezone, not UTC
-**Fix**: Always use `datetime('now', 'utc')` for consistent timestamps
+**BaseException not Exception**: Strategy `except Exception` lets `SystemExit`/`KeyboardInterrupt` through. Sandbox catches `BaseException`.
 
-## SQLite Paper Test `ends_at` Format
-**Problem**: `datetime.isoformat()` includes timezone offset, which SQLite datetime functions don't handle
-**Fix**: Use `strftime('%Y-%m-%d %H:%M:%S')` format for all SQLite datetime comparisons
+**Transitive src imports**: `import src.shell.config; src.shell.config.os.system("cmd")` bypasses checks. `ALLOWED_SRC_IMPORTS` allowlist (`src.shell.contract` only).
 
-## SQLite LIMIT -1
-**Gotcha**: `LIMIT -1` returns ALL rows in SQLite (documented behavior). Useful but surprising.
+**Name-mangled attrs**: `_ReadOnlyDB__conn` bypasses AST checks. Regex `_\w+__\w+` blocks all name-mangled access.
 
-## SQLite Can't DROP CONSTRAINT
-**Gotcha**: No `ALTER TABLE DROP CONSTRAINT` in SQLite. Must recreate table to remove constraints.
-**Impact**: Position table migration (adding `tag` column) requires DROP + CREATE + backfill, wrapped in transaction.
+**ReadOnlyDB**: Strips null bytes from queries. Blocks `LOAD_EXTENSION`. PRAGMA function-call syntax `PRAGMA foo(value)` blocked by `[=(]` in pattern.
 
-## Sandbox: BaseException Not Exception
-**Problem**: Strategy code catching `Exception` still lets `SystemExit`/`KeyboardInterrupt` through
-**Fix**: Sandbox AST walk checks for `BaseException` catches. Also blocks `operator` module and name-mangled attributes (`_ClassName__attr`).
+## Docker / Deployment
 
-## asyncio.Lock Serializes All Trade Paths
-**Gotcha**: The trade lock (`self._trade_lock`) serializes ALL trade execution — scan loop signals, SL/TP triggers, conditional orders, emergency stop, reconciliation. Any deadlock blocks everything.
-**`_analyzing` flag**: Guards strategy callbacks from position monitor during executor thread. Must be set/cleared atomically.
+**`docker compose restart` doesn't re-read `.env`**: Must use `docker compose up -d --force-recreate`.
 
-## Docker `compose restart` Doesn't Re-Read `.env`
-**Problem**: `docker compose restart` restarts the container with the OLD environment. `.env` changes are NOT applied.
-**Fix**: Must use `docker compose up -d --force-recreate` or the `deploy/restart.sh` helper script.
+**VPS file ownership**: Ansible initial sync creates files owned by macOS UID 501. Run `sudo chown -R trading:trading /srv/trading-brain/`. Only after initial Ansible setup.
 
-## PID Lockfile on macOS
-**Problem**: Python has no `ProcessNotFoundError` exception
-**Fix**: Use `ProcessLookupError` for `os.kill(pid, 0)` checks. Also catch `PermissionError` (process exists but owned by another user).
+**Docker legacy builder multiline RUN**: Newlines in Python scripts become Dockerfile instructions. Collapse to single line or install buildx.
 
-## ReadOnlyDB Null-Byte Injection
-**Problem**: Null bytes in SQL queries can bypass text-based blocking
-**Fix**: `ReadOnlyDB` strips null bytes from all queries before validation. Also blocks `LOAD_EXTENSION`.
+**rsync --itemize-changes**: Use `'^[<>c*]'` to match all transfer types (`<` sent, `>` received, `c` local, `*` messages).
 
-## Telegram Bot Session Conflict
-**Problem**: If Telegram was polling from a previous instance, starting a new one causes ~10s of `Conflict: terminated by other getUpdates request`
-**Fix**: `telegram.waiting_for_session_release` with 10s delay on startup. `drop_pending_updates=True` in `start_polling()`.
+## Prometheus / Grafana
 
-## Paper Cash Phantom Profit (L1)
-**Problem**: If `daily_performance` is empty, portfolio fell back to `config.paper_balance_usd` as starting value. Changing config or having positions at startup caused phantom profit/loss.
-**Fix**: Store starting capital in `system_meta` table, always reconcile from first principles: `starting_capital + deposits + total_pnl - position_costs`.
+**`float("inf")` breaks Prometheus**: `profit_factor` can be infinite. Guard: `pf if pf != float("inf") else 0`.
 
-## Special Migration Crash Risk (L8)
-**Problem**: Positions table recreation (DROP → CREATE → INSERT) without explicit transaction. Crash between DROP and INSERT loses all position data.
-**Fix**: Wrap in `BEGIN IMMEDIATE` / `COMMIT` with rollback on error.
+**Truth cache cross-test contamination**: Tests sharing module-level `_truth_cache` need to clear `_truth_cache["data"] = None` in setup/teardown.
 
-## aiohttp Content-Type with charset (N1)
-**Problem**: `web.Response(content_type="text/plain; version=0.0.4; charset=utf-8")` raises `ValueError: charset must not be in content_type argument`. aiohttp parses charset separately.
-**Fix**: Create `web.Response(body=output)`, then set `resp.headers["Content-Type"]` directly to the full Prometheus content type string.
+**Library panels lost on volume wipe**: Stored in Grafana's internal DB, not on disk. All panels must be inline. Run `python3 monitoring/build_dashboard.py` to regenerate.
 
-## Loki Docker log driver version tags (N2)
-**Problem**: `docker plugin install grafana/loki-docker-driver:3.4.0` fails with "not found". Same for `3.6.0`. The Docker plugin registry doesn't publish semver tags.
-**Fix**: Always use `grafana/loki-docker-driver:latest`.
+**Provisioned dashboards**: Cannot update via Grafana API — must restart Grafana to re-provision from disk.
 
-## Docker Compose `$` in .env passwords (N3)
-**Problem**: Passwords containing `$` in `.env` cause Docker Compose warnings like `The "XOw80T" variable is not set` — `$` triggers variable interpolation.
-**Fix**: In Jinja2 templates, escape with `{{ password | replace('$', '$$') }}`.
+## Telegram
 
-## Loki Docker label name mapping (N4)
-**Problem**: Docker Compose `service` key maps to `compose_service` label in Loki, not `service`. LogQL query `{service="trading-brain"}` returns nothing.
-**Fix**: Use `{compose_service="trading-brain"}` in LogQL queries.
+**Bot session conflict on restart**: ~10s of `Conflict: terminated by other getUpdates request`. Transient — use `drop_pending_updates=True` in `start_polling()`.
 
-## UFW SSH lockout on fresh deploy (N5)
-**Problem**: Deployment playbook had firewall rules for ports 80, 443, 3000 but not 22. On a fresh VPS where `setup.yml` set the initial rules, subsequent `playbook.yml` runs could interact with UFW without ensuring SSH is allowed.
-**Fix**: Added explicit `ufw allow 22/tcp` rule to `playbook.yml`, placed before all other firewall rules.
+## aiohttp
 
-## Prometheus gauge can't hold infinity (O1)
-**Problem**: `profit_factor` can be `float("inf")` when there are wins but no losses. Calling `gauge.set(float("inf"))` silently produces invalid Prometheus output.
-**Fix**: Guard with `pf if pf != float("inf") else 0` before setting the gauge.
+**Content-Type with charset**: `web.Response(content_type="text/plain; ...")` raises ValueError. Set `resp.headers["Content-Type"]` directly for Prometheus output.
 
-## Truth cache cross-test contamination (O2)
-**Problem**: Metrics tests that insert trades into temp DBs share the module-level `_truth_cache` dict. A stale cache from a prior test causes assertions to fail.
-**Fix**: Clear `_truth_cache["data"] = None` in both setup and teardown of each metrics test.
+## Loki
 
-## _fees_today lost on restart (O3)
-**Problem**: `portfolio._fees_today` initialized to `0.0` at startup with no DB restoration. Container restart wipes the counter — Grafana "Fees Today" shows $0.0000 even after trades.
-**Fix**: Restore in `portfolio.initialize()` by summing `trades.fees` for today's closed trades + `positions.entry_fee` for positions opened today (same timezone-aware boundary as risk counter restoration).
+**Docker label mapping**: `service` → `compose_service` in LogQL. Query: `{compose_service="trading-brain"}`.
 
-## Trade quantity display too few decimals (O4)
-**Problem**: Activity log formatted qty with `:.4f` — BTC trades with small capital (e.g., $5 at $67K = 0.0000743 BTC) displayed as `0.0000`.
-**Fix**: Changed to `:.8f` (satoshi-level precision) in `_format_activity()` in `notifications.py`.
-
-## Grafana library panels lost on volume wipe (Session X)
-**Problem**: Library panels are stored in Grafana's **internal database**, not on disk. Converting inline panels to library panel references (Session V) made the dashboard dependent on Grafana's state. Wiping the volume (fresh deploy) lost all 63 library panels — dashboard showed "Unable to load library panel" for every panel.
-**Fix**: `monitoring/build_dashboard.py` script converts all library panel references back to inline definitions. Dashboard is now fully self-contained. Run `python3 monitoring/build_dashboard.py` to regenerate.
-
-## VPS file ownership blocks rsync (Session AD)
-**Problem**: Ansible's initial file sync creates files owned by macOS UID 501 (the local user), not the VPS `trading` user (UID 1000). Subsequent rsync from `deploy.sh` runs as `trading` but silently fails to overwrite 501-owned files. The script reports "X files changed" but files are never actually updated.
-**Fix**: Run `sudo chown -R trading:trading /srv/trading-brain/` on VPS. Future deploys use `deploy.sh` which runs as `trading`, creating correctly-owned files. Only happens after initial Ansible setup or if someone manually copies files.
-
-## Docker legacy builder chokes on multiline RUN (Session AD)
-**Problem**: VPS uses Docker's legacy builder (no buildx). A `RUN pip install $(python3 -c "...\n...")` with newlines in the Python script causes each line to be parsed as a Dockerfile instruction. `import tomllib` becomes "unknown instruction: import".
-**Fix**: Collapse multiline Python to single line: `python3 -c "import tomllib; deps=..."`. Or install buildx on VPS.
-
-## rsync --itemize-changes output format (Session AD)
-**Problem**: rsync uses `<fcst....` prefix for files being sent TO the remote (not `>` as one might expect). A grep pattern of `'^[>c]'` misses all file transfers and reports "No changes" even when files differ.
-**Fix**: Use `'^[<>c*]'` to match all transfer types: `<` (sent), `>` (received), `c` (local change), `*` (messages like `*deleting`).
+**Plugin version tags**: Semver tags don't exist. Always use `grafana/loki-docker-driver:latest`.

@@ -54,3 +54,4 @@ deploy/keys/
 
 # Claude
 .claude/
+.claude_context
