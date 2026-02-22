@@ -59,6 +59,7 @@ class NotificationConfig:
     paper_test_started: bool = False
     paper_test_completed: bool = False
     orchestrator_cycle_started: bool = False
+    orchestrator_observation: bool = False
     # Candidate events
     candidate_created: bool = True
     candidate_canceled: bool = True

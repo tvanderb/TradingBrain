@@ -45,6 +45,7 @@ _EVENT_ACTIVITY: dict[str, tuple[str, str]] = {
     "candidate_promoted":          ("STRATEGY", "info"),
     "candidate_trade_executed":    ("CANDIDATE", "info"),
     "candidate_stop_triggered":    ("CANDIDATE", "warning"),
+    "orchestrator_observation":     ("ORCH",      "info"),
     "reflection_completed":        ("ORCH",      "info"),
     "signal_drought":              ("SCAN",      "warning"),
     "config_reloaded":             ("SYSTEM",    "info"),
@@ -140,6 +141,14 @@ def _format_activity(event_name: str, data: dict) -> str | None:
         decision = data.get("decision_type", "?")
         return f"Orchestration complete: {decision}"
 
+    if event_name == "orchestrator_observation":
+        market = data.get("market_observations", "")
+        reasoning = data.get("reasoning", "")
+        summary_text = market or reasoning
+        if summary_text:
+            return f"Observation: {summary_text[:120]}"
+        return None
+
     if event_name == "daily_summary":
         summary = data.get("summary", "")
         return f"Daily summary: {summary[:120]}"
@@ -203,6 +212,11 @@ def _format_activity(event_name: str, data: dict) -> str | None:
     if event_name == "reflection_completed":
         graded = data.get("predictions_graded", 0)
         new = data.get("new_predictions", 0)
+        correct = data.get("correct")
+        if correct is not None:
+            incorrect = data.get("incorrect", 0)
+            uncertain = data.get("uncertain", 0)
+            return f"Reflection: {graded} graded ({correct}\u2713 {incorrect}\u2717 {uncertain}?), {new} new predictions"
         return f"Reflection: {graded} predictions graded, {new} new predictions"
 
     if event_name == "signal_drought":
@@ -545,6 +559,31 @@ class Notifier:
             lines.append(" | ".join(parts))
         await self._dispatch("orchestrator_cycle_completed", data, "\n".join(lines))
 
+    async def orchestrator_observation(
+        self,
+        market_observations: str,
+        reasoning: str,
+        cross_reference_findings: str,
+        *,
+        doc_flag: bool = False,
+        flag_reason: str = "",
+    ) -> None:
+        data: dict = {
+            "market_observations": market_observations[:2000],
+            "reasoning": reasoning[:2000],
+            "cross_reference_findings": cross_reference_findings[:2000],
+        }
+        lines = ["\U0001F9E0 Orchestrator Observation"]
+        if market_observations:
+            lines.append(f"Market: {market_observations[:300]}")
+        if cross_reference_findings:
+            lines.append(f"Cross-ref: {cross_reference_findings[:300]}")
+        if doc_flag:
+            data["doc_flag"] = True
+            data["flag_reason"] = flag_reason[:500]
+            lines.append(f"\u26A0\uFE0F Doc flag: {flag_reason[:200]}")
+        await self._dispatch("orchestrator_observation", data, "\n".join(lines))
+
     async def daily_summary(self, summary: str) -> None:
         await self._dispatch(
             "daily_summary",
@@ -680,6 +719,7 @@ class Notifier:
     async def reflection_completed(
         self, predictions_graded: int, new_predictions: int, summary: str,
         *, correct: int | None = None, incorrect: int | None = None, uncertain: int | None = None,
+        key_learnings: list[str] | None = None,
     ) -> None:
         data: dict = {
             "predictions_graded": predictions_graded,
@@ -689,10 +729,15 @@ class Notifier:
         lines = ["\U0001F52C Reflection Complete"]
         if correct is not None and incorrect is not None and uncertain is not None:
             data.update(correct=correct, incorrect=incorrect, uncertain=uncertain)
-            lines.append(f"Graded: {predictions_graded} predictions ({correct}\u2713 {incorrect}\u2717 {uncertain}?)")
+            lines.append(f"Graded: {predictions_graded} ({correct}\u2713 {incorrect}\u2717 {uncertain}?)")
         else:
             lines.append(f"Predictions graded: {predictions_graded}")
         lines.append(f"New predictions: {new_predictions}")
+        if key_learnings:
+            data["key_learnings"] = key_learnings[:10]
+            lines.append("Key learnings:")
+            for learning in key_learnings[:5]:
+                lines.append(f"  \u2022 {learning[:200]}")
         lines.append("Strategy doc updated")
         await self._dispatch("reflection_completed", data, "\n".join(lines))
 

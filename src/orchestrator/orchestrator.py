@@ -817,6 +817,15 @@ class Orchestrator:
 
             # 4. Store observations and predictions (once per cycle, from top-level response)
             await self._store_observation(parsed)
+            # Notify observation
+            if self._notifier:
+                await self._notifier.orchestrator_observation(
+                    market_observations=parsed.get("market_observations", ""),
+                    reasoning=parsed.get("reasoning", ""),
+                    cross_reference_findings=parsed.get("cross_reference_findings", ""),
+                    doc_flag=bool(parsed.get("doc_flag")),
+                    flag_reason=parsed.get("flag_reason") or "",
+                )
             await self._store_predictions(parsed)
 
             # 6. Data maintenance
@@ -2243,6 +2252,20 @@ The orchestrator wants to change this module because: {changes}"""
             )
             graded_count += 1
 
+        # Compute grade breakdown
+        correct = sum(1 for gp in graded if isinstance(gp, dict) and gp.get("grade", "").lower() == "correct")
+        incorrect = sum(1 for gp in graded if isinstance(gp, dict) and gp.get("grade", "").lower() == "incorrect")
+        uncertain = graded_count - correct - incorrect
+
+        # Extract key learnings from graded predictions
+        key_learnings: list[str] = []
+        for gp in graded:
+            if not isinstance(gp, dict):
+                continue
+            learning = gp.get("grade_learning", "")
+            if learning and learning.strip():
+                key_learnings.append(learning.strip()[:500])
+
         # 8. Store new predictions from reflection
         new_preds = parsed.get("predictions", [])
         new_pred_count = 0
@@ -2281,7 +2304,11 @@ The orchestrator wants to change this module because: {changes}"""
         # 10. Notify
         summary = parsed.get("reflection_summary", "Reflection complete")
         if self._notifier:
-            await self._notifier.reflection_completed(graded_count, new_pred_count, summary)
+            await self._notifier.reflection_completed(
+                graded_count, new_pred_count, summary,
+                correct=correct, incorrect=incorrect, uncertain=uncertain,
+                key_learnings=key_learnings,
+            )
 
         log.info("orchestrator.reflection_complete",
                  graded=graded_count, new_predictions=new_pred_count)

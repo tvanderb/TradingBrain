@@ -7541,7 +7541,7 @@ async def test_notifier_enriched_reflection():
     msg = call_kwargs.kwargs.get("text", "")
 
     assert "Reflection Complete" in msg
-    assert "4 predictions" in msg
+    assert "Graded: 4" in msg
     assert "Strategy doc updated" in msg
 
 
@@ -8710,3 +8710,164 @@ def test_config_cycle_times_parses():
     brain._config.orchestrator.cycle_times = ["03:30", "15:30"]
     times = brain._get_effective_cycle_times()
     assert times == [(3, 30), (15, 30)]
+
+
+# --- Session AF: Observation Notification + Enriched Reflection ---
+
+
+@pytest.mark.asyncio
+async def test_notifier_orchestrator_observation():
+    """orchestrator_observation dispatches with correct data and Telegram text."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    await notifier.orchestrator_observation(
+        market_observations="BTC consolidating near 65k support",
+        reasoning="Low volume suggests accumulation phase",
+        cross_reference_findings="On-chain metrics confirm reduced selling pressure",
+        doc_flag=True,
+        flag_reason="Strategy underperforming in low-vol regime",
+    )
+    await asyncio.sleep(0.05)
+
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+
+    assert "Orchestrator Observation" in msg
+    assert "Market:" in msg
+    assert "BTC consolidating" in msg
+    assert "Cross-ref:" in msg
+    assert "Doc flag:" in msg
+    assert "underperforming" in msg
+
+
+@pytest.mark.asyncio
+async def test_notifier_orchestrator_observation_activity():
+    """orchestrator_observation creates ORCH activity_log entry."""
+    from src.shell.database import Database
+    from src.shell.activity import ActivityLogger
+    from src.telegram.notifications import Notifier
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        logger = ActivityLogger(db)
+
+        notifier = Notifier(chat_id="123")
+        notifier.set_activity_logger(logger)
+
+        await notifier.orchestrator_observation(
+            market_observations="ETH showing strength",
+            reasoning="",
+            cross_reference_findings="",
+        )
+
+        rows = await db.fetchall("SELECT * FROM activity_log")
+        assert len(rows) == 1
+        assert rows[0]["category"] == "ORCH"
+        assert "Observation:" in rows[0]["summary"]
+        assert "ETH showing strength" in rows[0]["summary"]
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+def test_format_activity_orchestrator_observation():
+    """_format_activity handles orchestrator_observation event."""
+    from src.telegram.notifications import _format_activity
+
+    result = _format_activity("orchestrator_observation", {
+        "market_observations": "BTC at 65k support",
+        "reasoning": "some reasoning",
+    })
+    assert result is not None
+    assert result.startswith("Observation:")
+    assert "BTC at 65k" in result
+
+    # Empty observations return None
+    result_empty = _format_activity("orchestrator_observation", {
+        "market_observations": "",
+        "reasoning": "",
+    })
+    assert result_empty is None
+
+
+def test_format_activity_reflection_enriched():
+    """_format_activity shows grade breakdown when available."""
+    from src.telegram.notifications import _format_activity
+
+    result = _format_activity("reflection_completed", {
+        "predictions_graded": 5,
+        "new_predictions": 3,
+        "correct": 3,
+        "incorrect": 1,
+        "uncertain": 1,
+    })
+    assert result is not None
+    assert "5 graded" in result
+    assert "3\u2713" in result
+    assert "1\u2717" in result
+    assert "1?" in result
+    assert "3 new predictions" in result
+
+    # Without grade breakdown, falls back to simple format
+    result_simple = _format_activity("reflection_completed", {
+        "predictions_graded": 5,
+        "new_predictions": 3,
+    })
+    assert "5 predictions graded" in result_simple
+
+
+@pytest.mark.asyncio
+async def test_notifier_reflection_with_key_learnings():
+    """reflection_completed includes key_learnings in Telegram message and data."""
+    from src.telegram.notifications import Notifier
+
+    notifier = Notifier(chat_id="123")
+    mock_app = MagicMock()
+    mock_app.bot.send_message = AsyncMock()
+    notifier.set_app(mock_app)
+
+    ws_mock = MagicMock()
+    ws_mock.broadcast = AsyncMock()
+    notifier.set_ws_manager(ws_mock)
+
+    learnings = [
+        "SOL momentum signals were premature — volume confirmation needed",
+        "BTC range-bound predictions accurate in low-vol periods",
+    ]
+    await notifier.reflection_completed(
+        4, 2, "Strategy doc updated",
+        correct=2, incorrect=1, uncertain=1,
+        key_learnings=learnings,
+    )
+    await asyncio.sleep(0.05)
+
+    # Check Telegram message
+    call_kwargs = mock_app.bot.send_message.call_args
+    msg = call_kwargs.kwargs.get("text", "")
+    assert "Key learnings:" in msg
+    assert "SOL momentum" in msg
+    assert "BTC range-bound" in msg
+
+    # Check WS data includes key_learnings
+    ws_call = ws_mock.broadcast.call_args
+    ws_data = ws_call.args[0] if ws_call.args else ws_call.kwargs.get("data", {})
+    assert "key_learnings" in ws_data.get("data", {})
+    assert len(ws_data["data"]["key_learnings"]) == 2
+
+
+def test_notification_config_orchestrator_observation_default():
+    """orchestrator_observation defaults to False in NotificationConfig."""
+    from src.shell.config import NotificationConfig
+
+    nc = NotificationConfig()
+    assert nc.orchestrator_observation is False
