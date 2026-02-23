@@ -1,4 +1,4 @@
-"""AI Client — abstraction over Anthropic and Google Vertex APIs.
+"""AI Client — abstraction over Anthropic, Google Vertex, and OpenRouter APIs.
 
 Provides a unified interface for calling Claude models.
 Tracks token usage and costs.
@@ -20,17 +20,19 @@ log = structlog.get_logger()
 MODEL_COSTS = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
 }
 
 
 class AIClient:
-    """Unified AI client supporting Anthropic and Vertex providers."""
+    """Unified AI client supporting Anthropic, Vertex, and OpenRouter providers."""
 
     def __init__(self, config: AIConfig, db: Database) -> None:
         self._config = config
         self._db = db
-        self._client = None
+        self._client = None  # Anthropic SDK client (anthropic/vertex)
+        self._http = None    # httpx client (openrouter)
         self._daily_tokens_used: int = 0
 
     async def initialize(self) -> None:
@@ -44,6 +46,18 @@ class AIClient:
             )
             log.info("ai.initialized", provider="vertex",
                      project=self._config.vertex_project_id, region=self._config.vertex_region)
+        elif self._config.provider == "openrouter":
+            import httpx
+            self._http = httpx.AsyncClient(
+                base_url=self._config.openrouter_base_url,
+                headers={
+                    "Authorization": f"Bearer {self._config.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=300.0,
+            )
+            log.info("ai.initialized", provider="openrouter",
+                     base_url=self._config.openrouter_base_url)
         else:
             from anthropic import AsyncAnthropic
             self._client = AsyncAnthropic(
@@ -93,9 +107,6 @@ class AIClient:
         Returns:
             Response text
         """
-        if self._client is None:
-            raise RuntimeError("AI client not initialized — call initialize() first")
-
         model = model or self._config.sonnet_model
 
         # Check daily token budget
@@ -103,45 +114,20 @@ class AIClient:
             log.warning("ai.daily_limit_reached", used=self._daily_tokens_used, limit=self._config.daily_token_limit)
             raise RuntimeError("Daily token limit reached")
 
-        messages = [{"role": "user", "content": prompt}]
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-            "temperature": temperature,
-        }
-        if system:
-            kwargs["system"] = system
-
-        # Retry with exponential backoff for transient errors
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = await self._client.messages.create(**kwargs)
-                break
-            except Exception as e:
-                error_str = str(e).lower()
-                # Retry on transient errors (network, rate limit, server errors)
-                is_transient = any(k in error_str for k in ("timeout", "rate", "429", "500", "502", "503", "529", "overloaded", "connection"))
-                if not is_transient or attempt == max_retries - 1:
-                    raise
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                log.warning("ai.retry", attempt=attempt + 1, error=str(e), wait=wait)
-                await asyncio.sleep(wait)
-
-        # Extract text
-        text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                text += block.text
+        if self._config.provider == "openrouter":
+            text, input_tokens, output_tokens = await self._call_openrouter(
+                prompt, model, system, max_tokens, temperature,
+            )
+        else:
+            text, input_tokens, output_tokens = await self._call_anthropic(
+                prompt, model, system, max_tokens, temperature,
+            )
 
         # Track tokens
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
         total_tokens = input_tokens + output_tokens
         self._daily_tokens_used += total_tokens
 
-        # Calculate cost
+        # Calculate cost (use base model name for lookup)
         costs = MODEL_COSTS.get(model, {"input": 3.0, "output": 15.0})
         cost = (input_tokens * costs["input"] + output_tokens * costs["output"]) / 1_000_000
 
@@ -157,6 +143,93 @@ class AIClient:
                  output_tokens=output_tokens, cost=f"${cost:.4f}", purpose=purpose)
 
         return text
+
+    async def _call_anthropic(
+        self, prompt: str, model: str, system: str,
+        max_tokens: int, temperature: float,
+    ) -> tuple[str, int, int]:
+        """Call via Anthropic SDK (anthropic/vertex providers)."""
+        if self._client is None:
+            raise RuntimeError("AI client not initialized — call initialize() first")
+
+        messages = [{"role": "user", "content": prompt}]
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if system:
+            kwargs["system"] = system
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.messages.create(**kwargs)
+                break
+            except Exception as e:
+                error_str = str(e).lower()
+                is_transient = any(k in error_str for k in ("timeout", "rate", "429", "500", "502", "503", "529", "overloaded", "connection"))
+                if not is_transient or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                log.warning("ai.retry", attempt=attempt + 1, error=str(e), wait=wait)
+                await asyncio.sleep(wait)
+
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                text += block.text
+
+        return text, response.usage.input_tokens, response.usage.output_tokens
+
+    async def _call_openrouter(
+        self, prompt: str, model: str, system: str,
+        max_tokens: int, temperature: float,
+    ) -> tuple[str, int, int]:
+        """Call via OpenRouter (OpenAI-compatible chat completions)."""
+        if self._http is None:
+            raise RuntimeError("AI client not initialized — call initialize() first")
+
+        # OpenRouter model names: prefix with anthropic/ if needed
+        or_model = model if "/" in model else f"anthropic/{model}"
+
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": or_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = await self._http.post("/chat/completions", json=payload)
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    raise RuntimeError(f"OpenRouter {resp.status_code}: {resp.text[:200]}")
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except Exception as e:
+                error_str = str(e).lower()
+                is_transient = any(k in error_str for k in ("timeout", "rate", "429", "500", "502", "503", "overloaded", "connection"))
+                if not is_transient or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                log.warning("ai.retry", attempt=attempt + 1, error=str(e), wait=wait, provider="openrouter")
+                await asyncio.sleep(wait)
+
+        text = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+
+        return text, input_tokens, output_tokens
 
     async def ask_opus(self, prompt: str, system: str = "", max_tokens: int = 16384, purpose: str = "") -> str:
         """Shortcut for Opus model calls."""

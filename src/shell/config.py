@@ -27,7 +27,7 @@ class KrakenConfig:
 
 @dataclass
 class AIConfig:
-    provider: str = "anthropic"
+    provider: str = "anthropic"  # "anthropic", "vertex", or "openrouter"
     anthropic_api_key: str = ""
     sonnet_model: str = "claude-sonnet-4-5-20250929"
     opus_model: str = "claude-opus-4-6"
@@ -35,6 +35,8 @@ class AIConfig:
     daily_token_limit: int = 1500000
     vertex_project_id: str = ""
     vertex_region: str = "us-east5"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
 
 @dataclass
@@ -194,6 +196,9 @@ def load_config() -> Config:
         config.ai.vertex_project_id = vertex.get("project_id", config.ai.vertex_project_id)
         config.ai.vertex_region = vertex.get("region", config.ai.vertex_region)
 
+        openrouter = ai.get("openrouter", {})
+        config.ai.openrouter_base_url = openrouter.get("base_url", config.ai.openrouter_base_url)
+
         orch = settings.get("orchestrator", {})
         config.orchestrator.start_hour = orch.get("start_hour", config.orchestrator.start_hour)
         config.orchestrator.start_minute = orch.get("start_minute", config.orchestrator.start_minute)
@@ -260,6 +265,7 @@ def load_config() -> Config:
     config.kraken.api_key = os.getenv("KRAKEN_API_KEY", "")
     config.kraken.secret_key = os.getenv("KRAKEN_SECRET_KEY", "")
     config.ai.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    config.ai.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
     config.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     config.telegram.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 

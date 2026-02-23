@@ -508,7 +508,8 @@ class TradingBrain:
 
             # AI config (models + token limit — not credentials)
             ai_fields = ("sonnet_model", "opus_model", "haiku_model", "daily_token_limit",
-                         "provider", "vertex_project_id", "vertex_region")
+                         "provider", "vertex_project_id", "vertex_region",
+                         "openrouter_api_key", "openrouter_base_url")
             ai_changed = any(
                 getattr(old.ai, f) != getattr(new_config.ai, f) for f in ai_fields
             )
@@ -1232,23 +1233,20 @@ class TradingBrain:
             for r in results:
                 if r.get("pnl") is not None:
                     self._risk.record_trade_result(r["pnl"])
-                # Enrich stop context
+                # Single enriched notification for SL/TP closes
+                pv = await self._portfolio.total_value()
                 stop_ctx = {
                     "entry_price": r.get("entry_price"),
                     "opened_at": r.get("opened_at"),
                     "pnl": r.get("pnl"),
                     "pnl_pct": r.get("pnl_pct", 0),
-                    "portfolio_value": await self._portfolio.total_value(),
+                    "fee": r.get("fee", 0),
+                    "portfolio_value": pv,
                     "position_count": self._portfolio.position_count,
                     "max_positions": self._config.risk.max_positions,
+                    "cash": self._portfolio.cash,
                 }
                 await self._notifier.stop_triggered(symbol, reason, price, tag=tag, context=stop_ctx)
-                # Enrich trade with portfolio context
-                r["portfolio_value"] = stop_ctx["portfolio_value"]
-                r["position_count"] = self._portfolio.position_count
-                r["max_positions"] = self._config.risk.max_positions
-                r["cash"] = self._portfolio.cash
-                await self._notifier.trade_executed(r)
 
                 # Strategy callbacks (skip if analyze() is running in executor to avoid thread-safety issues)
                 if not self._analyzing and self._strategy:
@@ -1363,22 +1361,20 @@ class TradingBrain:
                 )
                 if result:
                     self._risk.record_trade_result(result["pnl"])
-                    # Enrich stop context
+                    # Single enriched notification for SL/TP closes
+                    pv = await self._portfolio.total_value()
                     cond_stop_ctx = {
                         "entry_price": result.get("entry_price"),
                         "opened_at": result.get("opened_at"),
                         "pnl": result.get("pnl"),
                         "pnl_pct": result.get("pnl_pct", 0),
-                        "portfolio_value": await self._portfolio.total_value(),
+                        "fee": result.get("fee", 0),
+                        "portfolio_value": pv,
                         "position_count": self._portfolio.position_count,
                         "max_positions": self._config.risk.max_positions,
+                        "cash": self._portfolio.cash,
                     }
                     await self._notifier.stop_triggered(symbol, reason, fill_price, tag=tag, context=cond_stop_ctx)
-                    result["portfolio_value"] = cond_stop_ctx["portfolio_value"]
-                    result["position_count"] = self._portfolio.position_count
-                    result["max_positions"] = self._config.risk.max_positions
-                    result["cash"] = self._portfolio.cash
-                    await self._notifier.trade_executed(result)
 
                     # Strategy callbacks (skip if analyze() in executor — thread-safety)
                     if not self._analyzing and self._strategy:

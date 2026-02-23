@@ -298,7 +298,6 @@ class CandidateManager:
                 if results and self._notifier:
                     for trade in results:
                         await self._notifier.candidate_stop_triggered(slot, trade)
-                        await self._notifier.candidate_trade_executed(slot, trade)
             except Exception as e:
                 log.error("candidate.sl_tp_error", slot=slot, error=str(e))
 

@@ -4112,6 +4112,83 @@ def test_ai_client_daily_tokens_property():
     assert ai.daily_tokens_used == 12345
 
 
+@pytest.mark.asyncio
+async def test_ai_client_openrouter_provider():
+    """OpenRouter provider sends correct request format and parses response."""
+    from src.orchestrator.ai_client import AIClient
+    from src.shell.config import AIConfig
+
+    config = AIConfig(provider="openrouter", openrouter_api_key="test-key")
+    mock_db = AsyncMock()
+    mock_db.fetchone = AsyncMock(return_value={"total": 0})
+    mock_db.execute = AsyncMock()
+    mock_db.commit = AsyncMock()
+
+    ai = AIClient(config, db=mock_db)
+    await ai.initialize()
+
+    assert ai._http is not None
+    assert ai._client is None  # Anthropic SDK not used
+
+    # Mock the httpx response
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": "Hello from OpenRouter"}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+    }
+    ai._http.post = AsyncMock(return_value=mock_response)
+
+    result = await ai.ask("test prompt", model="claude-sonnet-4-5", system="be helpful", purpose="test")
+
+    assert result == "Hello from OpenRouter"
+    assert ai.daily_tokens_used == 150
+
+    # Verify request format
+    call_args = ai._http.post.call_args
+    assert call_args[0][0] == "/chat/completions"
+    payload = call_args[1]["json"]
+    assert payload["model"] == "anthropic/claude-sonnet-4-5"  # auto-prefixed
+    assert payload["messages"][0] == {"role": "system", "content": "be helpful"}
+    assert payload["messages"][1] == {"role": "user", "content": "test prompt"}
+
+
+@pytest.mark.asyncio
+async def test_ai_client_openrouter_model_prefix():
+    """OpenRouter auto-prefixes anthropic/ but preserves explicit prefixes."""
+    from src.orchestrator.ai_client import AIClient
+    from src.shell.config import AIConfig
+
+    config = AIConfig(provider="openrouter", openrouter_api_key="test-key")
+    mock_db = AsyncMock()
+    mock_db.fetchone = AsyncMock(return_value={"total": 0})
+    mock_db.execute = AsyncMock()
+    mock_db.commit = AsyncMock()
+
+    ai = AIClient(config, db=mock_db)
+    await ai.initialize()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    ai._http.post = AsyncMock(return_value=mock_response)
+
+    # Model without prefix gets anthropic/ added
+    await ai.ask("test", model="claude-opus-4-6", purpose="test")
+    payload = ai._http.post.call_args[1]["json"]
+    assert payload["model"] == "anthropic/claude-opus-4-6"
+
+    # Model with explicit prefix preserved
+    await ai.ask("test", model="anthropic/claude-opus-4-6", purpose="test")
+    payload = ai._http.post.call_args[1]["json"]
+    assert payload["model"] == "anthropic/claude-opus-4-6"
+
+
 # ======================== Session D Audit Fix Tests ========================
 
 
@@ -7419,11 +7496,11 @@ async def test_notifier_enriched_stop_triggered():
     assert "STOP LOSS" in msg
     assert "BTC/USD" in msg
     assert "auto_BTCUSD_001" in msg
-    assert "Trigger:" in msg
+    assert "Exit:" in msg
     assert "Entry:" in msg
     assert "P&L:" in msg
+    assert "Hold:" in msg
     assert "Portfolio:" in msg
-    assert "3/18" in msg
 
 
 @pytest.mark.asyncio

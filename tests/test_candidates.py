@@ -612,7 +612,7 @@ async def test_manager_notifies_on_trade():
 
 @pytest.mark.asyncio
 async def test_manager_notifies_on_sl_tp():
-    """CandidateManager dispatches both stop_triggered and trade_executed on SL/TP."""
+    """CandidateManager dispatches stop_triggered on SL/TP."""
     from src.candidates.manager import CandidateManager
 
     config = load_config()
@@ -652,7 +652,7 @@ async def test_manager_notifies_on_sl_tp():
         await mgr.check_sl_tp({"BTC/USD": 48500.0})
 
         mock_notifier.candidate_stop_triggered.assert_called_once()
-        mock_notifier.candidate_trade_executed.assert_called_once()
+        mock_notifier.candidate_trade_executed.assert_not_called()
 
         stop_args = mock_notifier.candidate_stop_triggered.call_args
         assert stop_args[0][0] == 1  # slot

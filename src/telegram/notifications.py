@@ -380,29 +380,41 @@ class Notifier:
         tag_str = f" [{tag}]" if tag else ""
         data = {"symbol": symbol, "reason": reason, "price": price, "tag": tag}
 
-        lines = [f"\U0001F6D1 STOP LOSS \u2014 {symbol}{tag_str}"]
-        trigger_str = f"Trigger: ${price:,.2f}"
+        if reason == "take_profit":
+            header = f"\U0001F3AF TAKE PROFIT \u2014 {symbol}{tag_str}"
+        else:
+            header = f"\U0001F6D1 STOP LOSS \u2014 {symbol}{tag_str}"
+        lines = [header]
+        exit_str = f"Exit: ${price:,.2f}"
         if context:
             data.update(context)
             entry = context.get("entry_price")
             if entry:
-                trigger_str += f" | Entry: ${entry:,.2f}"
-            lines.append(trigger_str)
+                exit_str += f" | Entry: ${entry:,.2f}"
+            lines.append(exit_str)
             pnl = context.get("pnl")
+            fee = context.get("fee", 0)
             if pnl is not None:
                 pnl_pct = context.get("pnl_pct", 0) * 100
-                hold = _format_hold_duration(context.get("opened_at"))
-                lines.append(f"P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%) | Hold: {hold}")
+                pnl_str = f"P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)"
+                if fee:
+                    pnl_str += f" | Fee: ${fee:.2f}"
+                lines.append(pnl_str)
+            hold = _format_hold_duration(context.get("opened_at"))
+            lines.append(f"Hold: {hold}")
             pv = context.get("portfolio_value")
             pc = context.get("position_count")
             mp = context.get("max_positions")
+            cash = context.get("cash")
             if pv is not None:
                 ctx = f"Portfolio: ${pv:,.2f}"
-                if pc is not None and mp is not None:
+                if cash is not None:
+                    ctx += f" | Cash: ${cash:,.2f}"
+                elif pc is not None and mp is not None:
                     ctx += f" | Positions: {pc}/{mp}"
                 lines.append(ctx)
         else:
-            lines.append(trigger_str)
+            lines.append(exit_str)
             lines.append(f"Reason: {reason}")
 
         await self._dispatch("stop_triggered", data, "\n".join(lines))
@@ -749,11 +761,23 @@ class Notifier:
         tag_str = f" [{tag}]" if tag else ""
         pnl = trade.get("pnl")
         pnl_pct = trade.get("pnl_pct", 0) * 100
+        fee = trade.get("fee", 0)
+        entry = trade.get("entry_price")
 
-        lines = [f"\U0001F6D1 [C{slot}] STOP LOSS \u2014 {symbol}{tag_str}"]
-        lines.append(f"Trigger: ${price:,.2f}")
+        if reason == "take_profit":
+            header = f"\U0001F3AF [C{slot}] TAKE PROFIT \u2014 {symbol}{tag_str}"
+        else:
+            header = f"\U0001F6D1 [C{slot}] STOP LOSS \u2014 {symbol}{tag_str}"
+        lines = [header]
+        exit_str = f"Exit: ${price:,.2f}"
+        if entry:
+            exit_str += f" | Entry: ${entry:,.2f}"
+        lines.append(exit_str)
         if pnl is not None:
-            lines.append(f"P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
+            pnl_str = f"P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)"
+            if fee:
+                pnl_str += f" | Fee: ${fee:.2f}"
+            lines.append(pnl_str)
 
         data = {**trade, "slot": slot}
         await self._dispatch("candidate_stop_triggered", data, "\n".join(lines))
