@@ -16,15 +16,6 @@ from src.shell.database import Database
 
 log = structlog.get_logger()
 
-# Cost per million tokens (approximate, as of 2025)
-MODEL_COSTS = {
-    "claude-opus-4-6": {"input": 15.0, "output": 75.0},
-    "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
-    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
-}
-
-
 class AIClient:
     """Unified AI client supporting Anthropic, Vertex, and OpenRouter providers."""
 
@@ -127,8 +118,8 @@ class AIClient:
         total_tokens = input_tokens + output_tokens
         self._daily_tokens_used += total_tokens
 
-        # Calculate cost (use base model name for lookup)
-        costs = MODEL_COSTS.get(model, {"input": 3.0, "output": 15.0})
+        # Calculate cost from config pricing
+        costs = self._get_model_costs(model)
         cost = (input_tokens * costs["input"] + output_tokens * costs["output"]) / 1_000_000
 
         # Log to database
@@ -143,6 +134,16 @@ class AIClient:
                  output_tokens=output_tokens, cost=f"${cost:.4f}", purpose=purpose)
 
         return text
+
+    def _get_model_costs(self, model: str) -> dict:
+        """Resolve per-million-token pricing from config for the given model."""
+        c = self._config
+        if model == c.opus_model:
+            return {"input": c.opus_input_cost, "output": c.opus_output_cost}
+        elif model == c.haiku_model:
+            return {"input": c.haiku_input_cost, "output": c.haiku_output_cost}
+        else:  # sonnet or unknown — default to sonnet pricing
+            return {"input": c.sonnet_input_cost, "output": c.sonnet_output_cost}
 
     async def _call_anthropic(
         self, prompt: str, model: str, system: str,

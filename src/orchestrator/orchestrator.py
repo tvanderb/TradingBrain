@@ -264,21 +264,6 @@ class Orchestrator:
             await self._notifier.orchestrator_cycle_started()
 
         try:
-            # --- Pre-phase: budget gate ---
-            if self._ai.tokens_remaining < 200000:
-                log.warning(
-                    "orchestrator.insufficient_budget",
-                    remaining=self._ai.tokens_remaining,
-                )
-                if self._notifier:
-                    await self._notifier.orchestrator_cycle_completed(
-                        "SKIPPED_BUDGET",
-                        strategy_version=None,
-                        candidate_count=len(self._candidate_manager.get_active_slots()) if self._candidate_manager else 0,
-                        max_candidates=self._config.orchestrator.max_candidates,
-                    )
-                return "Orchestrator: Skipped — insufficient token budget remaining."
-
             # --- Pre-phase: compute reflection_due flag ---
             state = CycleState(cycle_id=self._cycle_id, trigger=trigger)
             state.context["reflection_due"] = await self._should_reflect()
@@ -834,7 +819,6 @@ Current fund state for review.
 - Max drawdown: {self._config.risk.max_drawdown_pct * 100:.0f}% from peak (system halts)
 - Consecutive loss halt: {self._config.risk.rollback_consecutive_losses} consecutive losses (persists across days)
 - Max candidate slots: {self._config.orchestrator.max_candidates}
-- Token budget: {context["token_usage"].get("used", 0)} / {context["token_usage"].get("daily_limit", 0)} tokens used today (${context["token_usage"].get("total_cost", 0):.4f})
 
 ---
 

@@ -160,6 +160,5 @@ def _build_system_constraints(orchestrator: Orchestrator, context: dict) -> str:
         f"- Max daily loss: {cfg.risk.max_daily_loss_pct * 100:.0f}% of portfolio (trading halts)\n"
         f"- Max drawdown: {cfg.risk.max_drawdown_pct * 100:.0f}% from peak (system halts)\n"
         f"- Consecutive loss halt: {cfg.risk.rollback_consecutive_losses} consecutive losses\n"
-        f"- Max candidate slots: {cfg.orchestrator.max_candidates}\n"
-        f"- Token budget: {context['token_usage'].get('used', 0)} / {context['token_usage'].get('daily_limit', 0)} tokens used today (${context['token_usage'].get('total_cost', 0):.4f})"
+        f"- Max candidate slots: {cfg.orchestrator.max_candidates}"
     )

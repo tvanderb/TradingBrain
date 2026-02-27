@@ -558,7 +558,10 @@ class TradingBrain:
             # AI config (models + token limit — not credentials)
             ai_fields = ("sonnet_model", "opus_model", "haiku_model", "daily_token_limit",
                          "provider", "vertex_project_id", "vertex_region",
-                         "openrouter_api_key", "openrouter_base_url")
+                         "openrouter_api_key", "openrouter_base_url",
+                         "opus_input_cost", "opus_output_cost",
+                         "sonnet_input_cost", "sonnet_output_cost",
+                         "haiku_input_cost", "haiku_output_cost")
             ai_changed = any(
                 getattr(old.ai, f) != getattr(new_config.ai, f) for f in ai_fields
             )

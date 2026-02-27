@@ -37,6 +37,13 @@ class AIConfig:
     vertex_region: str = "us-east5"
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Token pricing (cost per million tokens, USD)
+    opus_input_cost: float = 15.0
+    opus_output_cost: float = 75.0
+    sonnet_input_cost: float = 3.0
+    sonnet_output_cost: float = 15.0
+    haiku_input_cost: float = 0.80
+    haiku_output_cost: float = 4.0
 
 
 @dataclass
@@ -207,6 +214,14 @@ def load_config() -> Config:
 
         openrouter = ai.get("openrouter", {})
         config.ai.openrouter_base_url = openrouter.get("base_url", config.ai.openrouter_base_url)
+
+        pricing = ai.get("pricing", {})
+        config.ai.opus_input_cost = pricing.get("opus_input", config.ai.opus_input_cost)
+        config.ai.opus_output_cost = pricing.get("opus_output", config.ai.opus_output_cost)
+        config.ai.sonnet_input_cost = pricing.get("sonnet_input", config.ai.sonnet_input_cost)
+        config.ai.sonnet_output_cost = pricing.get("sonnet_output", config.ai.sonnet_output_cost)
+        config.ai.haiku_input_cost = pricing.get("haiku_input", config.ai.haiku_input_cost)
+        config.ai.haiku_output_cost = pricing.get("haiku_output", config.ai.haiku_output_cost)
 
         orch = settings.get("orchestrator", {})
         config.orchestrator.start_hour = orch.get("start_hour", config.orchestrator.start_hour)

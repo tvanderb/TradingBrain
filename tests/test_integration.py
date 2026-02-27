@@ -1551,36 +1551,7 @@ async def test_orchestration_nightly_cycle_no_change():
         os.unlink(config.db_path)
 
 
-@pytest.mark.asyncio
-async def test_orchestration_cycle_insufficient_budget():
-    """T1b: Orchestrator skips cycle when token budget is insufficient."""
-    from src.shell.config import load_config
-    from src.shell.database import Database
-    from src.shell.data_store import DataStore
-    from src.orchestrator.orchestrator import Orchestrator
-
-    config = load_config()
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        config.db_path = f.name
-
-    try:
-        db = Database(config.db_path)
-        await db.connect()
-        data_store = DataStore(db, config.data)
-
-        ai = AsyncMock()
-        ai.tokens_remaining = 100  # Way below 50000 threshold
-
-        orch = Orchestrator(config, db, ai, MagicMock(), data_store)
-        report = await orch.run_nightly_cycle()
-
-        assert "insufficient" in report.lower() or "Skipped" in report
-        # AI should NOT have been called
-        ai.ask_opus.assert_not_called()
-
-        await db.close()
-    finally:
-        os.unlink(config.db_path)
+## Budget gate removed — orchestrator should never self-restrict based on token budget
 
 
 # --- T2: Strategy Deploy + Archive + Rollback ---
