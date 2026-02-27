@@ -25,6 +25,7 @@ from src.shell.config import load_config, Config
 from src.shell.contract import Action, Intent, OrderType, RiskLimits, Signal, SymbolData, Portfolio
 from src.shell.database import Database
 from src.shell.data_store import DataStore
+from src.shell.external_data import ExternalDataCollector
 from src.shell.kraken import KrakenREST, KrakenWebSocket
 from src.shell.portfolio import PortfolioTracker
 from src.shell.risk import RiskManager
@@ -60,6 +61,7 @@ class TradingBrain:
         self._orchestrator: Orchestrator | None = None
         self._reporter: Reporter | None = None
         self._data_store: DataStore | None = None
+        self._external_data: ExternalDataCollector | None = None
         self._telegram: TelegramBot | None = None
         self._notifier: Notifier | None = None
         self._scheduler: AsyncIOScheduler | None = None
@@ -99,7 +101,8 @@ class TradingBrain:
         self._kraken = KrakenREST(self._config.kraken)
         self._risk = RiskManager(self._config.risk)
         self._portfolio = PortfolioTracker(self._config, self._db, self._kraken)
-        self._data_store = DataStore(self._db, self._config.data)
+        self._data_store = DataStore(self._db, self._config.data,
+                                     external_data_config=self._config.external_data)
         await self._portfolio.initialize()
         await self._risk.initialize(self._db, tz_name=self._config.timezone)
 
@@ -127,6 +130,11 @@ class TradingBrain:
 
         # 3e. Bootstrap historical data if DB is sparse
         await self._bootstrap_historical_data()
+
+        # 3f. External market data collector
+        self._external_data = ExternalDataCollector(self._config, self._data_store)
+        self._external_data.set_activity_logger(self._activity)
+        await self._external_data.backfill_on_startup()
 
         # 4. Strategy (L4: fallback chain with paused mode)
         self._strategy = await load_strategy_with_fallback(self._db)
@@ -206,6 +214,10 @@ class TradingBrain:
         if self._telegram.app:
             self._notifier.set_app(self._telegram.app)
 
+        # 6b. Wire notifier into external data collector (for degraded-state alerts)
+        if self._external_data:
+            self._external_data.set_notifier(self._notifier)
+
         # 7. Candidate Manager
         self._candidate_manager = CandidateManager(self._config, self._db)
         await self._candidate_manager.initialize()
@@ -239,6 +251,7 @@ class TradingBrain:
                 commands=self._commands,
                 activity_logger=self._activity,
                 candidate_manager=self._candidate_manager,
+                external_data=self._external_data,
             )
             self._notifier.set_ws_manager(ws_manager)
             self._activity.set_ws_manager(activity_ws)
@@ -390,6 +403,28 @@ class TradingBrain:
             self._weekly_report, CronTrigger(day_of_week="sun", hour=20, minute=0),
             id="weekly_report", name="Weekly Report",
         )
+
+        # External market data polling (first run handled by backfill_on_startup)
+        if self._external_data:
+            self._scheduler.add_job(
+                self._external_data.poll_funding_rates, IntervalTrigger(hours=8),
+                id="poll_funding_rates", name="Poll Funding Rates",
+                next_run_time=None,
+            )
+            self._scheduler.add_job(
+                self._external_data.poll_open_interest, IntervalTrigger(hours=1),
+                id="poll_open_interest", name="Poll Open Interest",
+                next_run_time=None,
+            )
+            self._scheduler.add_job(
+                self._external_data.poll_fear_greed, CronTrigger(hour=0, minute=15),
+                id="poll_fear_greed", name="Poll Fear & Greed",
+            )
+            self._scheduler.add_job(
+                self._external_data.poll_coingecko, IntervalTrigger(hours=1),
+                id="poll_coingecko", name="Poll CoinGecko",
+                next_run_time=None,
+            )
 
         log.info("scheduler.configured", scan_interval=scan_interval)
 
@@ -1775,6 +1810,10 @@ class TradingBrain:
         # 5b. Stop Telegram
         if self._telegram:
             await self._telegram.stop()
+
+        # 5c. Close external data clients
+        if self._external_data:
+            await self._external_data.close()
 
         # 6. Close Kraken REST
         if self._kraken:

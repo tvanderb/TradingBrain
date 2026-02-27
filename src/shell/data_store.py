@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import structlog
 
-from src.shell.config import DataConfig
+from src.shell.config import DataConfig, ExternalDataConfig
 from src.shell.database import Database
 
 log = structlog.get_logger()
@@ -22,9 +22,11 @@ log = structlog.get_logger()
 class DataStore:
     """Manages historical OHLCV data with tiered retention."""
 
-    def __init__(self, db: Database, config: DataConfig) -> None:
+    def __init__(self, db: Database, config: DataConfig,
+                 external_data_config: ExternalDataConfig | None = None) -> None:
         self._db = db
         self._config = config
+        self._external_data_config = external_data_config
 
     async def store_candles(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
         """Store candles from a DataFrame. Returns count of new rows inserted."""
@@ -268,6 +270,18 @@ class DataStore:
             )"""
         )
 
+        # External market data (only if config is set — backward compatible)
+        if self._external_data_config:
+            edc = self._external_data_config
+            fr_cutoff = (datetime.now(timezone.utc) - timedelta(days=edc.funding_rate_retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+            await self._db.execute("DELETE FROM funding_rates WHERE timestamp < ?", (fr_cutoff,))
+
+            oi_cutoff = (datetime.now(timezone.utc) - timedelta(days=edc.open_interest_retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+            await self._db.execute("DELETE FROM open_interest WHERE timestamp < ?", (oi_cutoff,))
+
+            iv_cutoff = (datetime.now(timezone.utc) - timedelta(days=edc.index_value_retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+            await self._db.execute("DELETE FROM index_values WHERE timestamp < ?", (iv_cutoff,))
+
         await self._db.commit()
 
     async def run_nightly_maintenance(self) -> None:
@@ -277,3 +291,37 @@ class DataStore:
         await self.aggregate_1h_to_daily()
         await self.prune_old_data()
         log.info("data.maintenance_complete")
+
+    # --- External market data storage ---
+
+    async def store_funding_rate(self, symbol: str, timestamp: str, rate: float) -> None:
+        """Store a single funding rate record. Deduplicates via UNIQUE constraint."""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO funding_rates (symbol, timestamp, rate) VALUES (?, ?, ?)",
+            (symbol, timestamp, rate),
+        )
+        await self._db.commit()
+
+    async def store_funding_rates_batch(self, rows: list[tuple[str, str, float]]) -> None:
+        """Store multiple funding rate records (for backfill). Each row: (symbol, timestamp, rate)."""
+        await self._db.executemany(
+            "INSERT OR IGNORE INTO funding_rates (symbol, timestamp, rate) VALUES (?, ?, ?)",
+            rows,
+        )
+        await self._db.commit()
+
+    async def store_open_interest(self, symbol: str, timestamp: str, value: float) -> None:
+        """Store an open interest snapshot. Deduplicates via UNIQUE constraint."""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO open_interest (symbol, timestamp, value) VALUES (?, ?, ?)",
+            (symbol, timestamp, value),
+        )
+        await self._db.commit()
+
+    async def store_index_value(self, index_type: str, timestamp: str, value: float) -> None:
+        """Store a global index value. Deduplicates via UNIQUE constraint."""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO index_values (index_type, timestamp, value) VALUES (?, ?, ?)",
+            (index_type, timestamp, value),
+        )
+        await self._db.commit()

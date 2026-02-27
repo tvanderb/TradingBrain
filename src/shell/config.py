@@ -103,6 +103,14 @@ class OrchestratorConfig:
 
 
 @dataclass
+class ExternalDataConfig:
+    coingecko_api_key: str = ""
+    funding_rate_retention_days: int = 90
+    open_interest_retention_days: int = 30
+    index_value_retention_days: int = 90
+
+
+@dataclass
 class DataConfig:
     candle_5m_retention_days: int = 30
     candle_1h_retention_days: int = 365
@@ -147,6 +155,7 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    external_data: ExternalDataConfig = field(default_factory=ExternalDataConfig)
     fees: FeeConfig = field(default_factory=FeeConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -268,6 +277,7 @@ def load_config() -> Config:
     config.ai.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
     config.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     config.telegram.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    config.external_data.coingecko_api_key = os.getenv("COINGECKO_API_KEY", "")
 
     # Validate critical values
     _validate_config(config)

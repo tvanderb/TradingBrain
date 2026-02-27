@@ -387,6 +387,33 @@ CREATE TABLE IF NOT EXISTS candidate_daily_performance (
     UNIQUE(candidate_slot, date)
 );
 
+-- External market data: funding rates (Binance Futures, per-symbol)
+CREATE TABLE IF NOT EXISTS funding_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    rate REAL NOT NULL,
+    UNIQUE(symbol, timestamp)
+);
+
+-- External market data: open interest (Binance Futures, per-symbol)
+CREATE TABLE IF NOT EXISTS open_interest (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    value REAL NOT NULL,
+    UNIQUE(symbol, timestamp)
+);
+
+-- External market data: global indices (F&G, dominance, market cap)
+CREATE TABLE IF NOT EXISTS index_values (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    index_type TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    value REAL NOT NULL,
+    UNIQUE(index_type, timestamp)
+);
+
 -- Indexes for common queries
 -- Note: idx_positions_tag and idx_positions_symbol created after special migrations
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, timestamp);
@@ -413,6 +440,9 @@ CREATE INDEX IF NOT EXISTS idx_predictions_graded ON predictions(graded_at);
 CREATE INDEX IF NOT EXISTS idx_sdv_version ON strategy_doc_versions(version);
 CREATE INDEX IF NOT EXISTS idx_cand_signals_slot ON candidate_signals(candidate_slot, created_at);
 CREATE INDEX IF NOT EXISTS idx_cand_daily_perf ON candidate_daily_performance(candidate_slot, date);
+CREATE INDEX IF NOT EXISTS idx_funding_rates_sym_ts ON funding_rates(symbol, timestamp);
+CREATE INDEX IF NOT EXISTS idx_open_interest_sym_ts ON open_interest(symbol, timestamp);
+CREATE INDEX IF NOT EXISTS idx_index_values_type_ts ON index_values(index_type, timestamp);
 """
 
 # Migrations for existing databases (columns added after initial schema)

@@ -56,7 +56,8 @@ async def test_database_schema():
                      "scan_results", "capital_events", "orders", "conditional_orders",
                      "system_meta", "activity_log",
                      "predictions", "strategy_doc_versions",
-                     "candidate_signals", "candidate_daily_performance"]
+                     "candidate_signals", "candidate_daily_performance",
+                     "funding_rates", "open_interest", "index_values"]
         for t in required:
             assert t in tables, f"Missing table: {t}"
 

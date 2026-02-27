@@ -94,6 +94,9 @@ class ActivityLogger:
     async def candidate(self, summary: str, severity: str = "info", detail: dict | None = None) -> None:
         await self.log("CANDIDATE", summary, severity, detail)
 
+    async def data(self, summary: str, severity: str = "info", detail: dict | None = None) -> None:
+        await self.log("DATA", summary, severity, detail)
+
     # --- Query methods ---
 
     async def recent(self, limit: int = 30) -> list[dict]:

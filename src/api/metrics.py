@@ -85,6 +85,14 @@ cand_active = Gauge("tb_candidate_active", "Candidate slot active (1/0)", ["slot
 cand_position_value = Gauge("tb_candidate_position_value_usd", "Candidate position value", ["slot", "symbol", "tag"], registry=registry)
 cand_position_pnl = Gauge("tb_candidate_position_pnl_usd", "Candidate position P&L", ["slot", "symbol", "tag"], registry=registry)
 
+# --- External market data gauges ---
+tb_ext_last_poll = Gauge("tb_external_data_last_poll_seconds", "Seconds since last successful poll", ["source"], registry=registry)
+tb_ext_failures = Gauge("tb_external_data_consecutive_failures", "Consecutive poll failures", ["source"], registry=registry)
+tb_fear_greed_value = Gauge("tb_fear_greed_value", "Current Fear & Greed Index (0-100)", registry=registry)
+tb_btc_dominance = Gauge("tb_btc_dominance_pct", "BTC market cap dominance (%)", registry=registry)
+tb_eth_dominance = Gauge("tb_eth_dominance_pct", "ETH market cap dominance (%)", registry=registry)
+tb_total_market_cap = Gauge("tb_total_market_cap_usd", "Total crypto market cap (USD)", registry=registry)
+
 # --- Prediction & reflection gauges ---
 tb_predictions_total = Gauge("tb_predictions_total", "Total predictions stored", registry=registry)
 tb_predictions_ungraded = Gauge("tb_predictions_ungraded", "Pending ungraded predictions", registry=registry)
@@ -281,6 +289,39 @@ async def metrics_handler(request: web.Request) -> web.Response:
                 tb_days_since_reflection.set(days)
             else:
                 tb_days_since_reflection.set(-1)
+        except Exception:
+            pass
+
+        # --- External market data ---
+        external_data = ctx.get("external_data")
+        if external_data:
+            for source, count in external_data._consecutive_failures.items():
+                tb_ext_failures.labels(source=source).set(count)
+
+        try:
+            fg_row = await db.fetchone(
+                "SELECT value FROM index_values WHERE index_type = 'fear_greed' ORDER BY timestamp DESC LIMIT 1"
+            )
+            if fg_row:
+                tb_fear_greed_value.set(fg_row["value"])
+
+            btc_dom = await db.fetchone(
+                "SELECT value FROM index_values WHERE index_type = 'btc_dominance' ORDER BY timestamp DESC LIMIT 1"
+            )
+            if btc_dom:
+                tb_btc_dominance.set(btc_dom["value"])
+
+            eth_dom = await db.fetchone(
+                "SELECT value FROM index_values WHERE index_type = 'eth_dominance' ORDER BY timestamp DESC LIMIT 1"
+            )
+            if eth_dom:
+                tb_eth_dominance.set(eth_dom["value"])
+
+            mcap = await db.fetchone(
+                "SELECT value FROM index_values WHERE index_type = 'total_market_cap' ORDER BY timestamp DESC LIMIT 1"
+            )
+            if mcap:
+                tb_total_market_cap.set(mcap["value"])
         except Exception:
             pass
 

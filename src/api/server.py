@@ -73,6 +73,7 @@ def create_app(
     commands=None,
     activity_logger=None,
     candidate_manager=None,
+    external_data=None,
 ) -> tuple[web.Application, WebSocketManager, ActivityWebSocketManager]:
     """Create and configure the aiohttp application."""
     app = web.Application(middlewares=[error_middleware, auth_middleware])
@@ -91,6 +92,7 @@ def create_app(
         "commands": commands,
         "activity_logger": activity_logger,
         "candidate_manager": candidate_manager,
+        "external_data": external_data,
         "started_at": datetime.now(timezone.utc),
     }
 

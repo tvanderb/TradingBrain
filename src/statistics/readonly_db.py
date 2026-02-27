@@ -304,4 +304,36 @@ def get_schema_description() -> dict:
                 "strategy_version": "Candidate strategy version",
             },
         },
+        "funding_rates": {
+            "description": "Funding rates from Binance Futures — indicates leveraged positioning bias. "
+                           "Positive rates mean longs pay shorts (bullish crowding), negative means shorts pay longs. "
+                           "Collected every 8 hours per symbol.",
+            "columns": {
+                "symbol": "Binance Futures symbol (e.g., BTCUSDT)",
+                "timestamp": "Funding rate timestamp (UTC)",
+                "rate": "Funding rate as decimal (e.g., 0.0001 = 0.01%)",
+            },
+        },
+        "open_interest": {
+            "description": "Open interest from Binance Futures — total outstanding contracts. "
+                           "Rising OI with rising price = new money entering (trend confirmation). "
+                           "Falling OI = positions closing (trend exhaustion). Collected hourly per symbol.",
+            "columns": {
+                "symbol": "Binance Futures symbol (e.g., BTCUSDT)",
+                "timestamp": "Snapshot timestamp (UTC)",
+                "value": "Total open interest in contracts",
+            },
+        },
+        "index_values": {
+            "description": "Global market indices — macro sentiment and structure indicators. "
+                           "index_type values: 'fear_greed' (0-100, Alternative.me), "
+                           "'btc_dominance' (% of total crypto market cap), "
+                           "'eth_dominance' (% of total crypto market cap), "
+                           "'total_market_cap' (USD, total crypto market cap).",
+            "columns": {
+                "index_type": "One of: fear_greed, btc_dominance, eth_dominance, total_market_cap",
+                "timestamp": "Value timestamp (UTC)",
+                "value": "Index value (scale depends on index_type)",
+            },
+        },
     }
