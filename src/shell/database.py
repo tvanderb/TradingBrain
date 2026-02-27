@@ -268,10 +268,10 @@ CREATE TABLE IF NOT EXISTS conditional_orders (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- Candidate strategy slots (up to 3 simultaneous)
+-- Candidate strategy slots (up to 6 simultaneous)
 CREATE TABLE IF NOT EXISTS candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slot INTEGER NOT NULL UNIQUE CHECK(slot BETWEEN 1 AND 3),
+    slot INTEGER NOT NULL UNIQUE CHECK(slot BETWEEN 1 AND 6),
     strategy_version TEXT NOT NULL,
     code TEXT NOT NULL,
     code_hash TEXT NOT NULL,
@@ -606,6 +606,55 @@ class Database:
             log.info("database.special_migration.complete",
                      migration="observations_unique_date",
                      before=len(rows), after=len(by_date))
+
+        # Expand candidates slot constraint from BETWEEN 1 AND 3 to BETWEEN 1 AND 6
+        cursor = await self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='candidates'"
+        )
+        row = await cursor.fetchone()
+        if row and "BETWEEN 1 AND 3" in row[0]:
+            log.info("database.special_migration", migration="candidates_expand_slots")
+            existing = await self._conn.execute("SELECT * FROM candidates ORDER BY id")
+            rows = [dict(r) for r in await existing.fetchall()]
+
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute("DROP TABLE candidates")
+                await self._conn.execute("""CREATE TABLE candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot INTEGER NOT NULL UNIQUE CHECK(slot BETWEEN 1 AND 6),
+                    strategy_version TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    description TEXT,
+                    backtest_summary TEXT,
+                    portfolio_snapshot TEXT NOT NULL,
+                    evaluation_duration_days INTEGER,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    created_at TEXT DEFAULT (datetime('now', 'utc')),
+                    resolved_at TEXT
+                )""")
+                await self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_candidates_slot ON candidates(slot)"
+                )
+                for r in rows:
+                    await self._conn.execute(
+                        """INSERT INTO candidates
+                           (slot, strategy_version, code, code_hash, description,
+                            backtest_summary, portfolio_snapshot, evaluation_duration_days,
+                            status, created_at, resolved_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (r["slot"], r["strategy_version"], r["code"], r["code_hash"],
+                         r.get("description"), r.get("backtest_summary"),
+                         r["portfolio_snapshot"], r.get("evaluation_duration_days"),
+                         r["status"], r.get("created_at"), r.get("resolved_at")),
+                    )
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
+            log.info("database.special_migration.complete",
+                     migration="candidates_expand_slots", rows=len(rows))
 
     async def close(self) -> None:
         if self._conn:

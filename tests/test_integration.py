@@ -845,6 +845,81 @@ async def test_trade_performance_module():
 
 
 @pytest.mark.asyncio
+async def test_trade_performance_candidate_data():
+    """Trade performance module includes candidate_performance section."""
+    from src.shell.database import Database
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+    from src.statistics.loader import load_analysis_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        # Seed a candidate
+        await db.execute(
+            """INSERT INTO candidates (slot, strategy_version, code, code_hash,
+               portfolio_snapshot, description, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (1, "v_cand_1", "code", "hash1", '{"cash":1000}', "test candidate", "running"),
+        )
+
+        # Seed candidate trades
+        await db.execute(
+            """INSERT INTO candidate_trades (candidate_slot, symbol, side, qty,
+               entry_price, exit_price, pnl, pnl_pct, fees, strategy_version,
+               opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (1, "BTC/USD", "long", 0.001, 50000, 51000, 1.0, 0.02, 0.20,
+             "v_cand_1", "2026-01-01", "2026-01-01 12:00:00"),
+        )
+        await db.execute(
+            """INSERT INTO candidate_trades (candidate_slot, symbol, side, qty,
+               entry_price, exit_price, pnl, pnl_pct, fees, strategy_version,
+               opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (1, "BTC/USD", "long", 0.001, 50000, 49000, -1.0, -0.02, 0.20,
+             "v_cand_1", "2026-01-02", "2026-01-02 12:00:00"),
+        )
+        await db.commit()
+
+        # Load and run
+        module = load_analysis_module("trade_performance")
+        ro = ReadOnlyDB(db.conn)
+        result = await module.analyze(ro, get_schema_description())
+
+        assert isinstance(result, dict)
+        assert "candidate_performance" in result
+
+        cp = result["candidate_performance"]
+        assert "by_slot" in cp
+        assert "by_version" in cp
+        assert "slots" in cp
+
+        # Slot 1: 2 trades, 1 win, 1 loss
+        assert 1 in cp["by_slot"]
+        slot1 = cp["by_slot"][1]
+        assert slot1["trades"] == 2
+        assert slot1["wins"] == 1
+        assert slot1["win_rate"] == 0.5
+
+        # By version
+        assert "v_cand_1" in cp["by_version"]
+        assert cp["by_version"]["v_cand_1"]["trades"] == 2
+
+        # Slot context
+        assert len(cp["slots"]) == 1
+        assert cp["slots"][0]["version"] == "v_cand_1"
+        assert cp["slots"][0]["status"] == "running"
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
 async def test_analysis_modules_empty_db():
     """Both analysis modules handle empty database gracefully."""
     from src.shell.database import Database

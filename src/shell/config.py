@@ -98,7 +98,7 @@ class OrchestratorConfig:
     max_cycle_duration_hours: float = 2.5
     max_revisions: int = 12             # inner loop: code quality iterations
     max_strategy_iterations: int = 9    # outer loop: Opus strategy direction
-    max_candidates: int = 3             # max simultaneous candidate strategy slots
+    max_candidates: int = 6             # max simultaneous candidate strategy slots
     reflection_interval_days: int = 7   # days between reflection cycles
 
 

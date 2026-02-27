@@ -721,6 +721,40 @@ async def test_manager_heartbeat_logging():
 
 
 @pytest.mark.asyncio
+async def test_candidate_slot_5():
+    """Candidate creation in slot 5 works with expanded 6-slot schema."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        runner = await mgr.create_candidate(
+            slot=5, code=VALID_STRATEGY_CODE, version="v_slot5",
+            description="Slot 5 test candidate",
+        )
+
+        assert runner is not None
+        assert 5 in mgr.get_active_slots()
+
+        # DB has the row
+        row = await db.fetchone("SELECT * FROM candidates WHERE slot = 5")
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["strategy_version"] == "v_slot5"
+        assert row["slot"] == 5
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
 async def test_candidate_context_enhanced_fields():
     """get_context_for_orchestrator includes running_hours and total_scans."""
     from src.candidates.manager import CandidateManager

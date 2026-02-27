@@ -325,4 +325,71 @@ class Analysis(AnalysisBase):
             else:
                 report[f"rolling_{period_name}"] = {"trades": 0, "win_rate": 0, "net_pnl": 0, "fees": 0}
 
+        # --- Candidate Performance ---
+        candidate_perf = {}
+
+        # Per-slot aggregate from closed candidate trades
+        by_slot = await db.fetchall(
+            """SELECT
+                candidate_slot,
+                COUNT(*) as trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(pnl), 0) as net_pnl,
+                COALESCE(AVG(pnl), 0) as avg_pnl
+            FROM candidate_trades WHERE closed_at IS NOT NULL
+            GROUP BY candidate_slot ORDER BY candidate_slot"""
+        )
+        candidate_perf["by_slot"] = {}
+        for row in by_slot:
+            slot = row["candidate_slot"]
+            candidate_perf["by_slot"][slot] = {
+                "trades": row["trades"],
+                "wins": row["wins"],
+                "win_rate": row["wins"] / row["trades"] if row["trades"] else 0,
+                "net_pnl": row["net_pnl"],
+                "avg_pnl": row["avg_pnl"],
+            }
+
+        # Per-strategy-version across all candidates
+        by_version = await db.fetchall(
+            """SELECT
+                strategy_version,
+                COUNT(*) as trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(pnl), 0) as net_pnl,
+                COALESCE(AVG(pnl), 0) as avg_pnl
+            FROM candidate_trades
+            WHERE closed_at IS NOT NULL AND strategy_version IS NOT NULL
+            GROUP BY strategy_version ORDER BY net_pnl DESC"""
+        )
+        candidate_perf["by_version"] = {}
+        for row in by_version:
+            ver = row["strategy_version"]
+            candidate_perf["by_version"][ver] = {
+                "trades": row["trades"],
+                "wins": row["wins"],
+                "win_rate": row["wins"] / row["trades"] if row["trades"] else 0,
+                "net_pnl": row["net_pnl"],
+                "avg_pnl": row["avg_pnl"],
+            }
+
+        # Slot context: join with candidates table for status/description
+        slot_context = await db.fetchall(
+            """SELECT slot, strategy_version, description, status, created_at, resolved_at
+            FROM candidates ORDER BY slot"""
+        )
+        candidate_perf["slots"] = [
+            {
+                "slot": r["slot"],
+                "version": r["strategy_version"],
+                "description": r["description"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "resolved_at": r["resolved_at"],
+            }
+            for r in slot_context
+        ]
+
+        report["candidate_performance"] = candidate_perf
+
         return report
