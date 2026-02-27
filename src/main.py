@@ -390,8 +390,21 @@ class TradingBrain:
             id="daily_reset", name="Daily Reset",
         )
 
+        # Orchestration cooldown — auto-compute from cycle times
+        cycle_times = self._get_effective_cycle_times()
+        if len(cycle_times) >= 2:
+            minutes_list = sorted(h * 60 + m for h, m in cycle_times)
+            gaps = []
+            for i in range(len(minutes_list)):
+                next_i = (i + 1) % len(minutes_list)
+                gap = (minutes_list[next_i] - minutes_list[i]) % 1440
+                gaps.append(gap)
+            self._min_cycle_gap_hours = min(gaps) / 60 / 2
+        else:
+            self._min_cycle_gap_hours = 6.0
+
         # Orchestration cycles
-        for i, (hour, minute) in enumerate(self._get_effective_cycle_times()):
+        for i, (hour, minute) in enumerate(cycle_times):
             self._scheduler.add_job(
                 self._nightly_orchestration,
                 CronTrigger(hour=hour, minute=minute),
@@ -1530,6 +1543,25 @@ class TradingBrain:
 
     async def _nightly_orchestration(self, trigger: str = "scheduled") -> None:
         """Run the AI review cycle with timeout enforcement."""
+        # Restart guard: skip if a cycle ran recently (prevents re-triggering on deploy restart)
+        if trigger == "scheduled":
+            last = await self._db.fetchone(
+                "SELECT created_at FROM orchestrator_log ORDER BY id DESC LIMIT 1"
+            )
+            if last and last["created_at"]:
+                try:
+                    last_dt = datetime.strptime(
+                        last["created_at"][:19], "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=timezone.utc)
+                    hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    if hours_since < self._min_cycle_gap_hours:
+                        log.info("orchestrator.skipped_cooldown",
+                                 hours_since=round(hours_since, 1),
+                                 min_gap=self._min_cycle_gap_hours)
+                        return
+                except (ValueError, TypeError):
+                    pass  # Can't parse — proceed
+
         timeout_seconds = self._config.orchestrator.max_cycle_duration_hours * 3600
 
         try:

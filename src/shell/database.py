@@ -686,6 +686,26 @@ class Database:
             log.info("database.special_migration.complete",
                      migration="candidates_expand_slots", rows=len(rows))
 
+        # Deduplicate candidate_trades (recovery bug from Phase 4)
+        dedup_done = await self._conn.execute(
+            "SELECT value FROM system_meta WHERE key = 'migration_dedup_candidate_trades'"
+        )
+        if not (await dedup_done.fetchone()):
+            result = await self._conn.execute("""
+                DELETE FROM candidate_trades WHERE id NOT IN (
+                    SELECT MIN(id) FROM candidate_trades
+                    GROUP BY candidate_slot, symbol, tag, opened_at, closed_at
+                )
+            """)
+            deleted = result.rowcount
+            await self._conn.execute(
+                "INSERT INTO system_meta (key, value) VALUES ('migration_dedup_candidate_trades', '1')"
+            )
+            await self._conn.commit()
+            if deleted:
+                log.info("database.special_migration", migration="dedup_candidate_trades",
+                         deleted=deleted)
+
     async def close(self) -> None:
         if self._conn:
             await self._conn.commit()

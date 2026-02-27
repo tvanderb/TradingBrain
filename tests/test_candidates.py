@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -796,3 +796,218 @@ async def test_candidate_context_enhanced_fields():
         await db.close()
     finally:
         os.unlink(config.db_path)
+
+
+# --- Phase 7: Bug Fix Tests ---
+
+
+@pytest.mark.asyncio
+async def test_recovery_no_duplicate_trades():
+    """Recovery loads trades into _all_trades but NOT _trades, preventing re-insertion."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        runner = await mgr.create_candidate(
+            slot=1, code=SIGNAL_STRATEGY_CODE, version="v_dedup",
+        )
+
+        # Generate a trade: BUY then SELL
+        runner._execute_signal(Signal(
+            symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+            intent=Intent.DAY, confidence=0.8, reasoning="buy",
+        ), 50000.0)
+        runner._execute_signal(Signal(
+            symbol="BTC/USD", action=Action.SELL, size_pct=1.0,
+            intent=Intent.DAY, confidence=0.8, reasoning="sell",
+        ), 51000.0)
+
+        # Persist — writes trades to DB
+        await mgr.persist_state()
+
+        trade_count = await db.fetchone(
+            "SELECT COUNT(*) as cnt FROM candidate_trades WHERE candidate_slot = 1"
+        )
+        assert trade_count["cnt"] == 1
+
+        # Simulate restart: new manager, recover from DB
+        mgr2 = CandidateManager(config, db)
+        await mgr2.initialize()
+
+        # Persist again — should NOT re-insert the same trade
+        await mgr2.persist_state()
+
+        trade_count2 = await db.fetchone(
+            "SELECT COUNT(*) as cnt FROM candidate_trades WHERE candidate_slot = 1"
+        )
+        assert trade_count2["cnt"] == 1, f"Expected 1 trade, got {trade_count2['cnt']} (duplicates!)"
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_recovery_stats_survive():
+    """After recovery, _trades is empty but _all_trades has full history for stats."""
+    from src.candidates.manager import CandidateManager
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+
+        mgr = CandidateManager(config, db)
+        runner = await mgr.create_candidate(
+            slot=1, code=SIGNAL_STRATEGY_CODE, version="v_stats",
+        )
+
+        # Generate a winning trade
+        runner._execute_signal(Signal(
+            symbol="BTC/USD", action=Action.BUY, size_pct=0.05,
+            intent=Intent.DAY, confidence=0.8, reasoning="buy",
+        ), 50000.0)
+        runner._execute_signal(Signal(
+            symbol="BTC/USD", action=Action.SELL, size_pct=1.0,
+            intent=Intent.DAY, confidence=0.8, reasoning="sell",
+        ), 51000.0)
+
+        await mgr.persist_state()
+
+        # Simulate restart
+        mgr2 = CandidateManager(config, db)
+        await mgr2.initialize()
+
+        runner2 = mgr2.get_runner(1)
+        assert runner2 is not None
+
+        # _trades should be empty (no re-persist buffer)
+        assert len(runner2._trades) == 0
+        # _all_trades should have the full history
+        assert len(runner2._all_trades) == 1
+
+        # Stats should reflect the trade
+        status = runner2.get_status()
+        assert status["trade_count"] == 1
+        assert status["wins"] == 1
+        assert status["pnl"] > 0
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_orchestration_cooldown_skips_recent():
+    """Scheduled orchestration skipped if last cycle ran within cooldown window."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = load_config()
+    brain._min_cycle_gap_hours = 6.0
+
+    # Mock DB with recent orchestrator_log entry (1 hour ago)
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    mock_db = AsyncMock()
+    mock_db.fetchone = AsyncMock(return_value={"created_at": recent_time})
+    brain._db = mock_db
+
+    # Mock orchestrator
+    mock_orch = AsyncMock()
+    brain._orchestrator = mock_orch
+
+    await brain._nightly_orchestration(trigger="scheduled")
+
+    # run_nightly_cycle should NOT have been called
+    mock_orch.run_nightly_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_cooldown_allows_old():
+    """Scheduled orchestration proceeds if last cycle was outside cooldown window."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = load_config()
+    brain._min_cycle_gap_hours = 6.0
+
+    # Mock DB with old orchestrator_log entry (12 hours ago)
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+    mock_db = AsyncMock()
+    mock_db.fetchone = AsyncMock(return_value={"created_at": old_time})
+    brain._db = mock_db
+
+    # Mock orchestrator + notifier (needed for after cycle runs)
+    mock_orch = AsyncMock()
+    mock_orch.run_nightly_cycle = AsyncMock(return_value={"status": "ok"})
+    brain._orchestrator = mock_orch
+    brain._notifier = AsyncMock()
+    brain._scan_state = {"strategy_hash": "dummy"}
+
+    with patch("src.main.get_code_hash", return_value="dummy"), \
+         patch("src.main.get_strategy_path", return_value="/tmp/fake"):
+        await brain._nightly_orchestration(trigger="scheduled")
+
+    # run_nightly_cycle SHOULD have been called
+    mock_orch.run_nightly_cycle.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_manual_bypasses_cooldown():
+    """Manual /orchestrate bypasses cooldown even if recent cycle exists."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = load_config()
+    brain._min_cycle_gap_hours = 6.0
+
+    # Mock DB with very recent entry (5 minutes ago)
+    recent_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    mock_db = AsyncMock()
+    mock_db.fetchone = AsyncMock(return_value={"created_at": recent_time})
+    brain._db = mock_db
+
+    # Mock orchestrator + notifier
+    mock_orch = AsyncMock()
+    mock_orch.run_nightly_cycle = AsyncMock(return_value={"status": "ok"})
+    brain._orchestrator = mock_orch
+    brain._notifier = AsyncMock()
+    brain._scan_state = {"strategy_hash": "dummy"}
+
+    with patch("src.main.get_code_hash", return_value="dummy"), \
+         patch("src.main.get_strategy_path", return_value="/tmp/fake"):
+        await brain._nightly_orchestration(trigger="manual")
+
+    # Manual trigger — should run despite recent cycle
+    mock_orch.run_nightly_cycle.assert_called_once()
+
+
+def test_min_cycle_gap_auto_compute():
+    """_min_cycle_gap_hours auto-computed from cycle times."""
+    from src.main import TradingBrain
+
+    brain = TradingBrain()
+    brain._config = load_config()
+    brain._scheduler = MagicMock()
+    brain._strategy = None
+    brain._scan_state = {"paused": True}
+
+    # Test with default ["03:30", "15:30"]
+    brain._config.orchestrator.cycle_times = ["03:30", "15:30"]
+    brain._setup_jobs()
+    assert brain._min_cycle_gap_hours == 6.0  # 12h gap / 2
+
+    # Test with 4 evenly-spaced cycles
+    brain._config.orchestrator.cycle_times = ["00:00", "06:00", "12:00", "18:00"]
+    brain._setup_jobs()
+    assert brain._min_cycle_gap_hours == 3.0  # 6h gap / 2

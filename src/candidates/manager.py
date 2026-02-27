@@ -108,7 +108,7 @@ class CandidateManager:
                     }
 
                 # Restore completed trades for accurate status
-                runner._trades = [dict(t) for t in trade_rows]
+                runner._trades = []  # Already persisted in DB — don't re-insert
                 runner._all_trades = [dict(t) for t in trade_rows]
 
                 # Recalculate cash from trades
@@ -116,8 +116,8 @@ class CandidateManager:
                 # Since we store positions, just recompute cash from snapshot
                 # minus current position cost
                 pos_cost = sum(p["avg_entry"] * p["qty"] for p in runner._positions.values())
-                trade_pnl = sum(t.get("pnl", 0) or 0 for t in runner._trades)
-                trade_fees = sum(t.get("fees", 0) or 0 for t in runner._trades)
+                trade_pnl = sum(t.get("pnl", 0) or 0 for t in runner._all_trades)
+                trade_fees = sum(t.get("fees", 0) or 0 for t in runner._all_trades)
                 runner._cash = initial_cash - pos_cost + trade_pnl + trade_fees
                 # Don't let cash go negative from rounding
                 runner._cash = max(0, runner._cash)
