@@ -77,7 +77,7 @@ services:
       - "127.0.0.1:3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
-      - GF_SERVER_ROOT_URL=http://178.156.216.93
+      - GF_SERVER_ROOT_URL=http://46.225.235.179
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
     deploy:

@@ -190,6 +190,15 @@
       when: ansible_os_family == "Debian"
 
     # =========================================================
+    # PHASE 3b: Set Timezone
+    # =========================================================
+
+    - name: Set timezone to America/New_York
+      community.general.timezone:
+        name: America/New_York
+      tags: [setup]
+
+    # =========================================================
     # PHASE 4: Unattended Security Upgrades (Debian/Ubuntu)
     # =========================================================
 
