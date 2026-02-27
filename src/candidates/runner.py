@@ -152,7 +152,8 @@ class CandidateRunner:
         return self._cash + position_value
 
     def run_scan(
-        self, markets: dict[str, SymbolData], timestamp: datetime
+        self, markets: dict[str, SymbolData], timestamp: datetime,
+        market_context=None,
     ) -> list[dict]:
         """Run strategy.analyze() and process signals with paper fills.
 
@@ -163,7 +164,10 @@ class CandidateRunner:
 
         # Run strategy with timeout protection (called from executor already)
         try:
-            signals = self._strategy.analyze(dict(markets), portfolio, timestamp)
+            try:
+                signals = self._strategy.analyze(dict(markets), portfolio, timestamp, market_context)
+            except TypeError:
+                signals = self._strategy.analyze(dict(markets), portfolio, timestamp)
         except Exception as e:
             log.warning("candidate.strategy_error", slot=self.slot, error=str(e))
             return []

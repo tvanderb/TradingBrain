@@ -79,6 +79,19 @@ class SymbolData:
     volume_24h: float
     maker_fee_pct: float = 0.25   # Per-pair fee from Kraken (%)
     taker_fee_pct: float = 0.40   # Per-pair fee from Kraken (%)
+    funding_rate: Optional[float] = None      # Latest Binance funding rate (e.g., 0.0001)
+    open_interest: Optional[float] = None     # Latest Binance OI in contracts
+
+
+@dataclass(frozen=True)
+class MarketContext:
+    """Cross-market data that isn't per-symbol."""
+    fear_greed_value: Optional[int] = None           # 0-100
+    fear_greed_classification: Optional[str] = None  # "Extreme Fear" ... "Extreme Greed"
+    btc_dominance: Optional[float] = None            # Percentage (e.g., 54.2)
+    eth_dominance: Optional[float] = None            # Percentage
+    total_market_cap: Optional[float] = None         # USD
+    timestamp: Optional[datetime] = None             # When this data was collected
 
 
 @dataclass(frozen=True)
@@ -148,6 +161,7 @@ class StrategyBase:
         markets: dict[str, SymbolData],
         portfolio: Portfolio,
         timestamp: datetime,
+        market_context: Optional[MarketContext] = None,
     ) -> list[Signal]:
         """Called every scan interval. Return trading signals (may be empty)."""
         raise NotImplementedError

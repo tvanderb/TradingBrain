@@ -139,4 +139,166 @@ class Analysis(AnalysisBase):
             "expected_scans_per_hour": 12 * len(symbols),
         }
 
+        # --- External Data: Fear & Greed + Market Indices ---
+        external_data = {}
+
+        # Check if external data tables exist (backward-compatible)
+        has_index = await db.fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='index_values'"
+        )
+        if has_index:
+            for index_type in ("fear_greed", "btc_dominance", "eth_dominance", "total_market_cap"):
+                latest = await db.fetchone(
+                    "SELECT value, timestamp FROM index_values WHERE index_type = ? ORDER BY timestamp DESC LIMIT 1",
+                    (index_type,),
+                )
+                avg_7d = await db.fetchone(
+                    "SELECT AVG(value) as avg_val, COUNT(*) as cnt FROM index_values "
+                    "WHERE index_type = ? AND timestamp >= datetime('now', '-7 days')",
+                    (index_type,),
+                )
+                avg_30d = await db.fetchone(
+                    "SELECT AVG(value) as avg_val, COUNT(*) as cnt FROM index_values "
+                    "WHERE index_type = ? AND timestamp >= datetime('now', '-30 days')",
+                    (index_type,),
+                )
+
+                entry = {
+                    "current": latest["value"] if latest else None,
+                    "timestamp": latest["timestamp"] if latest else None,
+                    "avg_7d": round(avg_7d["avg_val"], 2) if avg_7d and avg_7d["avg_val"] is not None else None,
+                    "avg_30d": round(avg_30d["avg_val"], 2) if avg_30d and avg_30d["avg_val"] is not None else None,
+                    "samples_7d": avg_7d["cnt"] if avg_7d else 0,
+                }
+
+                # Trend for fear_greed and dominance (compare current vs 7d avg)
+                if entry["current"] is not None and entry["avg_7d"] is not None and entry["avg_7d"] != 0:
+                    diff = entry["current"] - entry["avg_7d"]
+                    threshold = abs(entry["avg_7d"]) * 0.05  # 5% threshold for stable
+                    if diff > threshold:
+                        entry["trend"] = "rising"
+                    elif diff < -threshold:
+                        entry["trend"] = "falling"
+                    else:
+                        entry["trend"] = "stable"
+
+                external_data[index_type] = entry
+
+        report["external_data"] = external_data
+
+        # --- External Data: Per-Symbol Funding Rates ---
+        funding_summary = {}
+        has_funding = await db.fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='funding_rates'"
+        )
+        if has_funding:
+            fr_symbols = await db.fetchall(
+                "SELECT DISTINCT symbol FROM funding_rates"
+            )
+            for row in fr_symbols:
+                sym = row["symbol"]
+                latest = await db.fetchone(
+                    "SELECT rate, timestamp FROM funding_rates WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+                avg_7d = await db.fetchone(
+                    "SELECT AVG(rate) as avg_rate, COUNT(*) as cnt FROM funding_rates "
+                    "WHERE symbol = ? AND timestamp >= datetime('now', '-7 days')",
+                    (sym,),
+                )
+                # Trend from last 3 readings
+                recent_3 = await db.fetchall(
+                    "SELECT rate FROM funding_rates WHERE symbol = ? ORDER BY timestamp DESC LIMIT 3",
+                    (sym,),
+                )
+                trend = None
+                if len(recent_3) >= 3:
+                    rates = [r["rate"] for r in reversed(recent_3)]
+                    if rates[-1] > rates[0]:
+                        trend = "rising"
+                    elif rates[-1] < rates[0]:
+                        trend = "falling"
+                    else:
+                        trend = "stable"
+
+                latest_rate = latest["rate"] if latest else None
+                extreme = False
+                if latest_rate is not None:
+                    extreme = abs(latest_rate) > 0.0001  # >0.01%
+
+                funding_summary[sym] = {
+                    "latest_rate": latest_rate,
+                    "timestamp": latest["timestamp"] if latest else None,
+                    "avg_7d": round(avg_7d["avg_rate"], 6) if avg_7d and avg_7d["avg_rate"] is not None else None,
+                    "trend": trend,
+                    "extreme": extreme,
+                }
+
+        report["funding_rates"] = funding_summary
+
+        # --- External Data: Per-Symbol Open Interest ---
+        oi_summary = {}
+        has_oi = await db.fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='open_interest'"
+        )
+        if has_oi:
+            oi_symbols = await db.fetchall(
+                "SELECT DISTINCT symbol FROM open_interest"
+            )
+            for row in oi_symbols:
+                sym = row["symbol"]
+                latest = await db.fetchone(
+                    "SELECT value, timestamp FROM open_interest WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+                val_24h_ago = await db.fetchone(
+                    "SELECT value FROM open_interest WHERE symbol = ? "
+                    "AND timestamp <= datetime('now', '-1 day') ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+                val_7d_ago = await db.fetchone(
+                    "SELECT value FROM open_interest WHERE symbol = ? "
+                    "AND timestamp <= datetime('now', '-7 days') ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+
+                current_val = latest["value"] if latest else None
+                change_24h = None
+                change_7d = None
+                if current_val and val_24h_ago and val_24h_ago["value"] and val_24h_ago["value"] > 0:
+                    change_24h = (current_val - val_24h_ago["value"]) / val_24h_ago["value"]
+                if current_val and val_7d_ago and val_7d_ago["value"] and val_7d_ago["value"] > 0:
+                    change_7d = (current_val - val_7d_ago["value"]) / val_7d_ago["value"]
+
+                oi_summary[sym] = {
+                    "latest_value": current_val,
+                    "timestamp": latest["timestamp"] if latest else None,
+                    "change_24h_pct": round(change_24h, 4) if change_24h is not None else None,
+                    "change_7d_pct": round(change_7d, 4) if change_7d is not None else None,
+                }
+
+        report["open_interest"] = oi_summary
+
+        # --- External Data Health ---
+        data_health = {}
+        for table, label in [("funding_rates", "funding_rate"), ("open_interest", "open_interest"), ("index_values", "index_values")]:
+            has_table = await db.fetchone(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+            if has_table:
+                latest_ts = await db.fetchone(
+                    f"SELECT MAX(timestamp) as ts FROM {table}"
+                )
+                count = await db.fetchone(
+                    f"SELECT COUNT(*) as cnt FROM {table}"
+                )
+                data_health[label] = {
+                    "latest_timestamp": latest_ts["ts"] if latest_ts else None,
+                    "total_records": count["cnt"] if count else 0,
+                }
+            else:
+                data_health[label] = {"latest_timestamp": None, "total_records": 0}
+
+        report["external_data_health"] = data_health
+
         return report

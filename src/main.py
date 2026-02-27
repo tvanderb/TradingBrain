@@ -22,10 +22,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.shell.config import load_config, Config
-from src.shell.contract import Action, Intent, OrderType, RiskLimits, Signal, SymbolData, Portfolio
+from src.shell.contract import Action, Intent, MarketContext, OrderType, RiskLimits, Signal, SymbolData, Portfolio
 from src.shell.database import Database
 from src.shell.data_store import DataStore
 from src.shell.external_data import ExternalDataCollector
+from src.shell.symbol_mapping import to_binance_symbol
 from src.shell.kraken import KrakenREST, KrakenWebSocket
 from src.shell.portfolio import PortfolioTracker
 from src.shell.risk import RiskManager
@@ -880,6 +881,11 @@ class TradingBrain:
                     if df_1d.empty:
                         log.warning("scan.candle_fallback", symbol=symbol, timeframe="1d", fallback="5m")
 
+                    # Look up external market data for this symbol
+                    binance_sym = to_binance_symbol(symbol)
+                    funding = await self._data_store.get_latest_funding_rate(binance_sym)
+                    oi = await self._data_store.get_latest_open_interest(binance_sym)
+
                     markets[symbol] = SymbolData(
                         symbol=symbol,
                         current_price=price,
@@ -890,6 +896,8 @@ class TradingBrain:
                         volume_24h=vol_24h,
                         maker_fee_pct=pair_fees[0] if pair_fees else self._config.kraken.maker_fee_pct,
                         taker_fee_pct=pair_fees[1] if pair_fees else self._config.kraken.taker_fee_pct,
+                        funding_rate=funding,
+                        open_interest=oi,
                     )
 
                     scan_symbols[symbol] = {
@@ -915,14 +923,36 @@ class TradingBrain:
             portfolio = await self._portfolio.get_portfolio(prices)
             portfolio_value = portfolio.total_value
 
+            # Build MarketContext from latest external index data
+            market_context = None
+            try:
+                ctx_data = await self._data_store.get_latest_market_context()
+                fg = ctx_data.get("fear_greed", {})
+                market_context = MarketContext(
+                    fear_greed_value=int(fg["value"]) if fg.get("value") is not None else None,
+                    fear_greed_classification=None,  # Not stored in index_values
+                    btc_dominance=ctx_data.get("btc_dominance", {}).get("value"),
+                    eth_dominance=ctx_data.get("eth_dominance", {}).get("value"),
+                    total_market_cap=ctx_data.get("total_market_cap", {}).get("value"),
+                    timestamp=datetime.now(timezone.utc),
+                )
+            except Exception as e:
+                log.warning("scan.market_context_error", error=str(e))
+
             # Run strategy (with timeout to catch infinite loops in AI-rewritten code)
+            now = datetime.now()
             executor_future = None
             try:
                 self._analyzing = True
                 loop = asyncio.get_running_loop()
-                executor_future = loop.run_in_executor(
-                    None, self._strategy.analyze, dict(markets), portfolio, datetime.now()
-                )
+
+                def _run_analyze():
+                    try:
+                        return self._strategy.analyze(dict(markets), portfolio, now, market_context)
+                    except TypeError:
+                        return self._strategy.analyze(dict(markets), portfolio, now)
+
+                executor_future = loop.run_in_executor(None, _run_analyze)
                 signals = await asyncio.wait_for(asyncio.shield(executor_future), timeout=30)
             except asyncio.TimeoutError:
                 log.error("scan.strategy_timeout", note="strategy.analyze() took >30s")
@@ -1164,7 +1194,7 @@ class TradingBrain:
             # Run candidate strategies (paper simulation alongside active strategy)
             if self._candidate_manager and self._candidate_manager.get_active_slots():
                 try:
-                    await self._candidate_manager.run_scans(markets, datetime.now(timezone.utc))
+                    await self._candidate_manager.run_scans(markets, datetime.now(timezone.utc), market_context)
                     await self._candidate_manager.persist_state()
                 except Exception as e:
                     log.error("scan.candidate_error", error=str(e))

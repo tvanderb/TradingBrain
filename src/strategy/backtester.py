@@ -269,6 +269,8 @@ class Backtester:
                     volume_24h=float(hist_1h.tail(24)["volume"].sum()) if len(hist_1h) >= 24 else 0,
                     maker_fee_pct=pair_fees[0] if pair_fees else self._maker_fee,
                     taker_fee_pct=pair_fees[1] if pair_fees else self._taker_fee,
+                    funding_rate=None,
+                    open_interest=None,
                 )
 
             if not markets:
@@ -307,7 +309,10 @@ class Backtester:
 
             # Call strategy
             try:
-                signals = self._strategy.analyze(markets, portfolio, ts)
+                try:
+                    signals = self._strategy.analyze(markets, portfolio, ts, None)
+                except TypeError:
+                    signals = self._strategy.analyze(markets, portfolio, ts)
             except Exception as e:
                 strategy_errors += 1
                 if strategy_errors == 1:
@@ -728,6 +733,8 @@ class Backtester:
                     volume_24h=float(historical.tail(24)["volume"].sum()) if len(historical) >= 24 else 0,
                     maker_fee_pct=pair_fees[0] if pair_fees else self._maker_fee,
                     taker_fee_pct=pair_fees[1] if pair_fees else self._taker_fee,
+                    funding_rate=None,
+                    open_interest=None,
                 )
 
             if not markets:
@@ -766,7 +773,10 @@ class Backtester:
 
             # Call strategy
             try:
-                signals = self._strategy.analyze(markets, portfolio, ts)
+                try:
+                    signals = self._strategy.analyze(markets, portfolio, ts, None)
+                except TypeError:
+                    signals = self._strategy.analyze(markets, portfolio, ts)
             except Exception as e:
                 strategy_errors += 1
                 if strategy_errors == 1:

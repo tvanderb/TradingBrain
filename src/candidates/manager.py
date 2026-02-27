@@ -265,13 +265,14 @@ class CandidateManager:
         log.info("candidate.promoted", slot=slot, version=runner.version)
         return code
 
-    async def run_scans(self, markets: dict[str, SymbolData], timestamp: datetime) -> None:
+    async def run_scans(self, markets: dict[str, SymbolData], timestamp: datetime,
+                        market_context=None) -> None:
         """Run strategy.analyze() for each active candidate."""
         from src.shell.contract import SymbolData  # avoid circular import at module level
 
         for slot, runner in list(self._runners.items()):
             try:
-                results = runner.run_scan(markets, timestamp)
+                results = runner.run_scan(markets, timestamp, market_context)
                 if results:
                     log.info("candidate.scan_complete", slot=slot,
                              signals=len(results))

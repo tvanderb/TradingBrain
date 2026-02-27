@@ -157,6 +157,8 @@ def _make_sample_data() -> tuple[dict[str, SymbolData], Portfolio, RiskLimits]:
             candles_1d=df.resample("1D").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna(),
             spread=0.001,
             volume_24h=1000000,
+            funding_rate=0.0001,
+            open_interest=50000.0,
         )
 
     portfolio = Portfolio(
@@ -231,7 +233,10 @@ def validate_strategy(code: str) -> SandboxResult:
         markets, portfolio, risk_limits = _make_sample_data()
         def _run_strategy_test():
             strategy.initialize(risk_limits, list(markets.keys()))
-            return strategy.analyze(markets, portfolio, datetime.now())
+            try:
+                return strategy.analyze(markets, portfolio, datetime.now(), None)
+            except TypeError:
+                return strategy.analyze(markets, portfolio, datetime.now())
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_strategy_test)
@@ -264,7 +269,7 @@ def validate_strategy(code: str) -> SandboxResult:
     except BaseException as e:
         msg = f"Runtime error: {type(e).__name__}: {e}"
         if isinstance(e, AttributeError) and "SymbolData" in str(e):
-            msg += " — SymbolData has: candles_5m, candles_1h, candles_1d (NOT .candles or .data)"
+            msg += " — SymbolData has: candles_5m, candles_1h, candles_1d, funding_rate, open_interest (NOT .candles or .data)"
         elif isinstance(e, AttributeError) and "Portfolio" in str(e):
             msg += " — Portfolio has: cash, total_value, positions, recent_trades, daily_pnl, total_pnl, fees_today"
         errors.append(msg)

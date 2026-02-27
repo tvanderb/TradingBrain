@@ -325,3 +325,39 @@ class DataStore:
             (index_type, timestamp, value),
         )
         await self._db.commit()
+
+    # --- External market data reads ---
+
+    async def get_latest_funding_rate(self, symbol: str) -> float | None:
+        """Get the most recent funding rate for a Binance symbol."""
+        row = await self._db.fetchone(
+            "SELECT rate FROM funding_rates WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+            (symbol,),
+        )
+        return row["rate"] if row else None
+
+    async def get_latest_open_interest(self, symbol: str) -> float | None:
+        """Get the most recent open interest for a Binance symbol."""
+        row = await self._db.fetchone(
+            "SELECT value FROM open_interest WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+            (symbol,),
+        )
+        return row["value"] if row else None
+
+    async def get_latest_market_context(self) -> dict:
+        """Get all latest index values for building MarketContext.
+
+        Returns dict with keys: fear_greed, btc_dominance, eth_dominance, total_market_cap.
+        Each has 'value' and 'timestamp'. Missing data returns None values.
+        """
+        result = {}
+        for index_type in ("fear_greed", "btc_dominance", "eth_dominance", "total_market_cap"):
+            row = await self._db.fetchone(
+                "SELECT value, timestamp FROM index_values WHERE index_type = ? ORDER BY timestamp DESC LIMIT 1",
+                (index_type,),
+            )
+            if row:
+                result[index_type] = {"value": row["value"], "timestamp": row["timestamp"]}
+            else:
+                result[index_type] = {"value": None, "timestamp": None}
+        return result

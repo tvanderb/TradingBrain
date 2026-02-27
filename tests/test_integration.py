@@ -97,7 +97,7 @@ async def test_database_crud():
 # --- IO Contract ---
 
 def test_contract_types():
-    from src.shell.contract import Signal, Action, Intent, OrderType, SymbolData, Portfolio, RiskLimits
+    from src.shell.contract import Signal, Action, Intent, OrderType, SymbolData, Portfolio, RiskLimits, MarketContext
 
     sig = Signal(symbol="BTC/USD", action=Action.BUY, size_pct=0.02)
     assert sig.symbol == "BTC/USD"
@@ -113,6 +113,12 @@ def test_contract_types():
     limits = RiskLimits(max_trade_pct=0.05, default_trade_pct=0.02,
                         max_positions=5, max_daily_loss_pct=0.03, max_drawdown_pct=0.10)
     assert limits.max_trade_pct == 0.05
+
+    # Phase 6: MarketContext
+    ctx = MarketContext(fear_greed_value=50, btc_dominance=54.0)
+    assert ctx.fear_greed_value == 50
+    assert ctx.btc_dominance == 54.0
+    assert ctx.eth_dominance is None  # default
 
 
 # --- Risk Manager ---

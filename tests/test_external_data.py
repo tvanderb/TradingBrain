@@ -530,3 +530,277 @@ async def test_collector_activity_logging_on_backfill():
     assert "funding" in summary.lower()
 
     await collector.close()
+
+
+# --- Phase 6: Contract type tests ---
+
+def test_market_context_construction():
+    """MarketContext can be constructed with all fields and with defaults."""
+    from src.shell.contract import MarketContext
+    from datetime import datetime, timezone
+
+    # All fields
+    ctx = MarketContext(
+        fear_greed_value=73,
+        fear_greed_classification="Greed",
+        btc_dominance=54.2,
+        eth_dominance=17.3,
+        total_market_cap=2.5e12,
+        timestamp=datetime(2024, 2, 28, tzinfo=timezone.utc),
+    )
+    assert ctx.fear_greed_value == 73
+    assert ctx.fear_greed_classification == "Greed"
+    assert ctx.btc_dominance == 54.2
+    assert ctx.eth_dominance == 17.3
+    assert ctx.total_market_cap == 2.5e12
+
+    # All defaults (None)
+    ctx_default = MarketContext()
+    assert ctx_default.fear_greed_value is None
+    assert ctx_default.btc_dominance is None
+    assert ctx_default.timestamp is None
+
+
+def test_symbol_data_with_new_fields():
+    """SymbolData can be constructed with funding_rate and open_interest."""
+    import pandas as pd
+    from src.shell.contract import SymbolData
+
+    df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    sd = SymbolData(
+        symbol="BTC/USD", current_price=50000.0,
+        candles_5m=df, candles_1h=df, candles_1d=df,
+        spread=0.001, volume_24h=1e6,
+        funding_rate=0.0001, open_interest=50000.0,
+    )
+    assert sd.funding_rate == 0.0001
+    assert sd.open_interest == 50000.0
+
+
+def test_symbol_data_backward_compatible():
+    """SymbolData still works without new fields (defaults to None)."""
+    import pandas as pd
+    from src.shell.contract import SymbolData
+
+    df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    sd = SymbolData(
+        symbol="ETH/USD", current_price=2000.0,
+        candles_5m=df, candles_1h=df, candles_1d=df,
+        spread=0.001, volume_24h=5e5,
+    )
+    assert sd.funding_rate is None
+    assert sd.open_interest is None
+
+
+# --- Phase 6: DataStore read method tests ---
+
+@pytest.mark.asyncio
+async def test_datastore_get_latest_funding_rate():
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.shell.config import DataConfig, ExternalDataConfig
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        store = DataStore(db, DataConfig(), external_data_config=ExternalDataConfig())
+
+        # Empty — returns None
+        result = await store.get_latest_funding_rate("BTCUSDT")
+        assert result is None
+
+        # Store some data and retrieve
+        await store.store_funding_rate("BTCUSDT", "2024-02-28 00:00:00", 0.0001)
+        await store.store_funding_rate("BTCUSDT", "2024-02-28 08:00:00", 0.00015)
+
+        result = await store.get_latest_funding_rate("BTCUSDT")
+        assert result == 0.00015  # Most recent
+
+        # Different symbol returns None
+        result = await store.get_latest_funding_rate("ETHUSDT")
+        assert result is None
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_datastore_get_latest_open_interest():
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.shell.config import DataConfig, ExternalDataConfig
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        store = DataStore(db, DataConfig(), external_data_config=ExternalDataConfig())
+
+        # Empty — returns None
+        result = await store.get_latest_open_interest("BTCUSDT")
+        assert result is None
+
+        await store.store_open_interest("BTCUSDT", "2024-02-28 12:00:00", 50000.5)
+        await store.store_open_interest("BTCUSDT", "2024-02-28 13:00:00", 51000.0)
+
+        result = await store.get_latest_open_interest("BTCUSDT")
+        assert result == 51000.0
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_datastore_get_latest_market_context():
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+    from src.shell.config import DataConfig, ExternalDataConfig
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        store = DataStore(db, DataConfig(), external_data_config=ExternalDataConfig())
+
+        # Empty — all None values
+        ctx = await store.get_latest_market_context()
+        assert ctx["fear_greed"]["value"] is None
+        assert ctx["btc_dominance"]["value"] is None
+        assert ctx["eth_dominance"]["value"] is None
+        assert ctx["total_market_cap"]["value"] is None
+
+        # Store and retrieve
+        await store.store_index_value("fear_greed", "2024-02-28 00:00:00", 73)
+        await store.store_index_value("btc_dominance", "2024-02-28 12:00:00", 52.5)
+        await store.store_index_value("eth_dominance", "2024-02-28 12:00:00", 17.3)
+        await store.store_index_value("total_market_cap", "2024-02-28 12:00:00", 2.5e12)
+
+        ctx = await store.get_latest_market_context()
+        assert ctx["fear_greed"]["value"] == 73
+        assert ctx["btc_dominance"]["value"] == 52.5
+        assert ctx["eth_dominance"]["value"] == 17.3
+        assert ctx["total_market_cap"]["value"] == 2.5e12
+
+        # Partial data — missing types return None
+        await db.execute("DELETE FROM index_values WHERE index_type = 'eth_dominance'")
+        await db.commit()
+        ctx = await store.get_latest_market_context()
+        assert ctx["eth_dominance"]["value"] is None
+        assert ctx["fear_greed"]["value"] == 73  # Others still work
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+# --- Phase 6: Strategy fallback tests ---
+
+def test_strategy_analyze_fallback():
+    """Strategy that doesn't accept market_context still works via TypeError fallback."""
+    from src.shell.contract import StrategyBase, RiskLimits, MarketContext
+    from datetime import datetime
+
+    class OldStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            pass
+        def analyze(self, markets, portfolio, timestamp):
+            return []
+
+    class NewStrategy(StrategyBase):
+        def initialize(self, risk_limits, symbols):
+            pass
+        def analyze(self, markets, portfolio, timestamp, market_context=None):
+            self._got_context = market_context
+            return []
+
+    ctx = MarketContext(fear_greed_value=50)
+
+    # Old strategy: TypeError on 4th arg, fallback to 3-arg
+    old = OldStrategy()
+    old.initialize(None, [])
+    try:
+        result = old.analyze({}, None, datetime.now(), ctx)
+    except TypeError:
+        result = old.analyze({}, None, datetime.now())
+    assert result == []
+
+    # New strategy: accepts market_context
+    new = NewStrategy()
+    new.initialize(None, [])
+    result = new.analyze({}, None, datetime.now(), ctx)
+    assert result == []
+    assert new._got_context == ctx
+
+
+# --- Phase 6: Analysis module tests ---
+
+@pytest.mark.asyncio
+async def test_market_analysis_includes_external_data():
+    """Market analysis module includes external_data section."""
+    from src.shell.database import Database
+    from src.statistics.loader import load_analysis_module
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        module = load_analysis_module("market_analysis")
+        rodb = ReadOnlyDB(db.conn)
+        schema = get_schema_description()
+
+        report = await module.analyze(rodb, schema)
+
+        assert "external_data" in report
+        assert "funding_rates" in report
+        assert "open_interest" in report
+        assert "external_data_health" in report
+
+        # All should handle empty gracefully
+        assert isinstance(report["external_data"], dict)
+        assert isinstance(report["funding_rates"], dict)
+        assert isinstance(report["open_interest"], dict)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_trade_performance_includes_market_condition():
+    """Trade performance module includes market_condition section."""
+    from src.shell.database import Database
+    from src.statistics.loader import load_analysis_module
+    from src.statistics.readonly_db import ReadOnlyDB, get_schema_description
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+
+        module = load_analysis_module("trade_performance")
+        rodb = ReadOnlyDB(db.conn)
+        schema = get_schema_description()
+
+        report = await module.analyze(rodb, schema)
+
+        assert "market_condition" in report
+        assert isinstance(report["market_condition"], dict)
+
+        await db.close()
+    finally:
+        os.unlink(db_path)

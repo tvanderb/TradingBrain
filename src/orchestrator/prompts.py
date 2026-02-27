@@ -115,7 +115,7 @@ Strategy code runs in a sandboxed environment. Blocked modules: subprocess, os, 
 Available imports for your strategy code:
 - pandas, numpy, ta (100+ technical indicators), scipy (stats, signal, optimize)
 - Standard library: math, statistics, collections, dataclasses, datetime, functools, itertools, random, copy
-- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, OpenPosition, ClosedTrade)
+- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, MarketContext, OpenPosition, ClosedTrade)
 
 ### Risk Counter Persistence
 Risk counters (daily trade count, daily P&L, consecutive losses) are restored from the database on system restart. The daily reset uses the configured timezone. The consecutive loss counter persists across days — only a winning trade resets it.
@@ -187,7 +187,7 @@ CODE_GEN_SYSTEM = """You are a Python code generator for a crypto trading strate
 You MUST:
 1. Inherit from StrategyBase (imported from src.shell.contract)
 2. Implement initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None
-3. Implement analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime) -> list[Signal]
+3. Implement analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime, market_context: Optional[MarketContext] = None) -> list[Signal]
 4. Keep the strategy in a single file
 5. Include clear docstring explaining the strategy
 
@@ -200,7 +200,7 @@ You MUST NOT:
 Available imports:
 - pandas, numpy, ta, scipy (scipy.stats, scipy.signal, scipy.optimize)
 - Standard library: math, statistics, collections, dataclasses, datetime, functools, itertools, random, copy
-- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, OpenPosition, ClosedTrade)
+- src.shell.contract (Signal, Action, Intent, OrderType, Portfolio, RiskLimits, StrategyBase, SymbolData, MarketContext, OpenPosition, ClosedTrade)
 
 The `ta` library provides 100+ technical indicators:
 - ta.trend: SMA, EMA, MACD, ADX, Ichimoku, Aroon, CCI, DPO, KST, PSAR
@@ -226,6 +226,8 @@ scipy.optimize: minimize (position sizing optimization)
       volume_24h: float
       maker_fee_pct: float       # Per-pair maker fee (%)
       taker_fee_pct: float       # Per-pair taker fee (%)
+      funding_rate: Optional[float]   # Latest Binance funding rate (e.g., 0.0001). None if unavailable.
+      open_interest: Optional[float]  # Latest Binance OI in contracts. None if unavailable.
 
   Each DataFrame has columns: open, high, low, close, volume (DatetimeIndex).
   Access pattern:
@@ -238,6 +240,26 @@ scipy.optimize: minimize (position sizing optimization)
   Always check length before applying indicators:
       if len(df_1h) < 50:
           continue  # Not enough data for this symbol yet
+
+### MarketContext — cross-market data (Optional, may be None)
+
+  class MarketContext:
+      fear_greed_value: Optional[int]           # 0-100 Fear & Greed index
+      fear_greed_classification: Optional[str]  # "Extreme Fear" ... "Extreme Greed"
+      btc_dominance: Optional[float]            # BTC market cap % (e.g., 54.2)
+      eth_dominance: Optional[float]            # ETH market cap %
+      total_market_cap: Optional[float]         # Total crypto market cap in USD
+      timestamp: Optional[datetime]
+
+  Access pattern:
+      if market_context and market_context.fear_greed_value is not None:
+          if market_context.fear_greed_value < 25:
+              # Extreme Fear — potential contrarian buy
+      if market_context and market_context.btc_dominance is not None:
+          # BTC dominance rising = risk-off, altcoin rotation slowing
+
+  IMPORTANT: market_context may be None (backtesting, or external data unavailable).
+  Always guard access: `if market_context and market_context.X is not None`.
 
 ### Portfolio
 
@@ -335,9 +357,15 @@ SymbolData attributes:
   .symbol (str), .current_price (float), .spread (float), .volume_24h (float)
   .candles_5m (DataFrame), .candles_1h (DataFrame), .candles_1d (DataFrame)
   .maker_fee_pct (float), .taker_fee_pct (float)
+  .funding_rate (Optional[float]), .open_interest (Optional[float])
 
   THERE IS NO .candles, .data, .ohlcv, .hourly, .daily, or .df attribute. Only candles_5m, candles_1h, candles_1d.
   Each DataFrame columns: open, high, low, close, volume (DatetimeIndex).
+
+MarketContext attributes (Optional — may be None):
+  .fear_greed_value (Optional[int]), .fear_greed_classification (Optional[str])
+  .btc_dominance (Optional[float]), .eth_dominance (Optional[float])
+  .total_market_cap (Optional[float]), .timestamp (Optional[datetime])
 
 Portfolio attributes:
   .cash, .total_value, .positions (list[OpenPosition]), .recent_trades (list[ClosedTrade])
@@ -363,7 +391,7 @@ Signal constructor (ALL valid kwargs — any other kwarg will crash):
 
 Required method signatures:
   initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None
-  analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime) -> list[Signal]
+  analyze(self, markets: dict[str, SymbolData], portfolio: Portfolio, timestamp: datetime, market_context: Optional[MarketContext] = None) -> list[Signal]
 
 Optional method signatures (called by runner/backtester if defined, fallback to no-op):
   on_fill(self, symbol: str, action: Action, qty: float, price: float, intent: Intent, tag: str = "") -> None
@@ -400,7 +428,8 @@ try 45" rather than generic "loosen entry criteria").
 
 **CRITICAL — IO Contract reference (for accurate revision instructions):**
 When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
-- SymbolData: .candles_5m, .candles_1h, .candles_1d (NOT .hourly, .daily, .data, .candles)
+- SymbolData: .candles_5m, .candles_1h, .candles_1d, .funding_rate, .open_interest (NOT .hourly, .daily, .data, .candles)
+- MarketContext (4th arg to analyze(), Optional): .fear_greed_value, .btc_dominance, .eth_dominance, .total_market_cap (all Optional, may be None in backtest)
 - Signal kwargs: symbol, action, size_pct, order_type, limit_price, stop_loss, take_profit, intent, confidence, reasoning, slippage_tolerance, tag
 - Signal.reasoning (NOT 'reason'). Signal.intent: Intent.DAY | Intent.SWING | Intent.POSITION (NOT SCALP).
 - Action: BUY, SELL, CLOSE, MODIFY (NOT SHORT — system is long-only)

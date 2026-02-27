@@ -392,4 +392,63 @@ class Analysis(AnalysisBase):
 
         report["candidate_performance"] = candidate_perf
 
+        # --- Market Condition Correlation (Fear & Greed at trade open) ---
+        market_condition = {}
+        has_index = await db.fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='index_values'"
+        )
+        if has_index:
+            closed_trades = await db.fetchall(
+                "SELECT opened_at, pnl FROM trades WHERE closed_at IS NOT NULL AND opened_at IS NOT NULL"
+            )
+
+            # Bucket definitions
+            fg_buckets = {
+                "extreme_fear": (0, 24),
+                "fear": (25, 44),
+                "neutral": (45, 55),
+                "greed": (56, 74),
+                "extreme_greed": (75, 100),
+            }
+            bucket_stats = {name: {"trades": 0, "wins": 0, "total_pnl": 0.0} for name in fg_buckets}
+
+            for trade in closed_trades:
+                opened_at = trade["opened_at"]
+                if not opened_at:
+                    continue
+
+                # Find closest Fear & Greed reading before trade open
+                fg_row = await db.fetchone(
+                    "SELECT value FROM index_values WHERE index_type = 'fear_greed' "
+                    "AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+                    (opened_at,),
+                )
+                if not fg_row or fg_row["value"] is None:
+                    continue
+
+                fg_value = int(fg_row["value"])
+                pnl = trade["pnl"] or 0
+
+                # Assign to bucket
+                for bucket_name, (low, high) in fg_buckets.items():
+                    if low <= fg_value <= high:
+                        bucket_stats[bucket_name]["trades"] += 1
+                        bucket_stats[bucket_name]["total_pnl"] += pnl
+                        if pnl > 0:
+                            bucket_stats[bucket_name]["wins"] += 1
+                        break
+
+            # Build result with win rate and avg PnL per regime
+            for bucket_name, stats in bucket_stats.items():
+                if stats["trades"] > 0:
+                    market_condition[bucket_name] = {
+                        "trades": stats["trades"],
+                        "wins": stats["wins"],
+                        "win_rate": round(stats["wins"] / stats["trades"], 4),
+                        "total_pnl": round(stats["total_pnl"], 4),
+                        "avg_pnl": round(stats["total_pnl"] / stats["trades"], 4),
+                    }
+
+        report["market_condition"] = market_condition
+
         return report
