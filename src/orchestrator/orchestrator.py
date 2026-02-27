@@ -171,7 +171,7 @@ class Orchestrator:
             return parsed  # Already new format
         # Old format: single decision — move action-specific fields into a decisions list
         action_fields = {
-            "decision", "slot", "replace_slot", "specific_changes",
+            "decision", "slot", "replace_slot", "specific_changes", "pseudocode",
             "strategy_characterization", "evaluation_duration_days", "position_handling",
         }
         single = {k: parsed.pop(k) for k in list(parsed.keys()) if k in action_fields}
@@ -179,6 +179,25 @@ class Orchestrator:
             single["decision"] = "NO_CHANGE"
         parsed["decisions"] = [single]
         return parsed
+
+    @staticmethod
+    def _extract_strategy_description(code: str) -> str | None:
+        """Extract strategy description from the Strategy class docstring."""
+        import ast
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == "Strategy":
+                    docstring = ast.get_docstring(node)
+                    if docstring:
+                        return docstring[:500]
+            # Fall back to module docstring
+            module_doc = ast.get_docstring(tree)
+            if module_doc:
+                return module_doc[:500]
+        except SyntaxError:
+            pass
+        return None
 
     async def _store_thought(
         self,
@@ -870,6 +889,7 @@ Respond in JSON format."""
             return "Cannot create candidate: all slots full and no replace_slot specified."
 
         changes = str(decision.get("specific_changes") or "")
+        pseudocode = decision.get("pseudocode") or None
         original_changes = changes
         max_inner = self._config.orchestrator.max_revisions
         max_outer = self._config.orchestrator.max_strategy_iterations
@@ -897,10 +917,18 @@ Respond in JSON format."""
             inner_changes = changes
 
             for inner in range(max_inner):
+                # Build pseudocode section for gen prompt
+                if pseudocode:
+                    spec_section = (
+                        f"## Algorithmic Specification (PSEUDOCODE)\n{pseudocode}\n\n"
+                        f"## Context & Rationale\n{inner_changes}"
+                    )
+                else:
+                    spec_section = f"## Change Request\n{inner_changes}"
+
                 gen_prompt = f"""Generate a new trading strategy based on these requirements:
 
-## Change Request
-{inner_changes}
+{spec_section}
 
 ## Current Strategy (for reference)
 ```python
@@ -953,6 +981,12 @@ Generate the complete strategy.py file."""
                     "current_instructions": inner_changes,
                     "original_reasoning": decision.get("reasoning", ""),
                 }
+                # Build pseudocode section for review prompt
+                pseudocode_review = (
+                    f"\n\n## Algorithmic Specification (PSEUDOCODE) — the code MUST implement this\n"
+                    f"{pseudocode}"
+                ) if pseudocode else ""
+
                 review_prompt = f"""Review this trading strategy code for correctness and safety.
 
 ## Changes from current strategy (diff)
@@ -966,6 +1000,7 @@ Generate the complete strategy.py file."""
 ```
 
 This is a candidate strategy that will run in paper simulation alongside the active strategy.
+{pseudocode_review}
 
 ## What the code was asked to implement
 {inner_changes}
@@ -1009,7 +1044,7 @@ This is a candidate strategy that will run in paper simulation alongside the act
 
             # Opus reviews backtest — pass current changes so reviewer knows
             # what was actually attempted (may differ from original decision)
-            bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff, attempt_history, current_changes=changes)
+            bt_review = await self._review_backtest(backtest_result, backtest_summary, decision, diff, attempt_history, current_changes=changes, pseudocode=pseudocode)
 
             if bt_review.get("deploy", False):
                 # Deploy to candidate slot
@@ -1022,11 +1057,15 @@ This is a candidate strategy that will run in paper simulation alongside the act
                 fund_positions = await self._db.fetchall("SELECT * FROM positions")
                 initial_positions = [dict(p) for p in fund_positions]
 
+                # Extract description from code docstring, with fallbacks
+                extracted_desc = self._extract_strategy_description(approved_code)
+                candidate_description = extracted_desc or changes[:500]
+
                 await self._candidate_manager.create_candidate(
                     slot=slot,
                     code=approved_code,
                     version=version,
-                    description=changes[:500],
+                    description=candidate_description,
                     backtest_summary=backtest_summary[:2000] if backtest_summary else "",
                     evaluation_duration_days=eval_days,
                     portfolio_snapshot=snapshot,
@@ -1037,7 +1076,7 @@ This is a candidate strategy that will run in paper simulation alongside the act
                 from src.strategy.loader import hash_code_string
                 code_hash = hash_code_string(approved_code)
                 characterization = decision.get("strategy_characterization", "")
-                desc = characterization if characterization else f"Candidate slot {slot}: {changes[:200]}"
+                desc = characterization if characterization else (extracted_desc or f"Candidate slot {slot}: {changes[:200]}")
                 await self._db.execute(
                     """INSERT INTO strategy_versions
                        (version, code_hash, description, backtest_result, market_conditions, code)
@@ -1196,6 +1235,7 @@ This is a candidate strategy that will run in paper simulation alongside the act
             else "trade_performance"
         )
         changes = str(decision.get("specific_changes") or "")
+        pseudocode = decision.get("pseudocode") or None
         current_code = context.get(
             "market_analysis_code"
             if module_name == "market_analysis"
@@ -1205,11 +1245,19 @@ This is a candidate strategy that will run in paper simulation alongside the act
         max_revisions = self._config.orchestrator.max_revisions
 
         for attempt in range(max_revisions):
+            # Build pseudocode section for gen prompt
+            if pseudocode:
+                spec_section = (
+                    f"## Algorithmic Specification (PSEUDOCODE)\n{pseudocode}\n\n"
+                    f"## Context & Rationale\n{changes}"
+                )
+            else:
+                spec_section = f"## Change Request\n{changes}"
+
             # Sonnet generates analysis module code
             gen_prompt = f"""Generate a new {module_name.replace("_", " ")} module based on these requirements:
 
-## Change Request
-{changes}
+{spec_section}
 
 ## Current Module Code (for reference)
 ```python
@@ -1255,11 +1303,17 @@ Generate the complete {module_name}.py file."""
                 continue
 
             # Opus reviews for mathematical correctness
+            pseudocode_review = (
+                f"\n\n## Algorithmic Specification (PSEUDOCODE) — the code MUST implement this\n"
+                f"{pseudocode}"
+            ) if pseudocode else ""
+
             review_prompt = f"""Review this {module_name.replace("_", " ")} module for mathematical correctness and safety:
 
 ```python
 {code}
 ```
+{pseudocode_review}
 
 The orchestrator wants to change this module because: {changes}"""
 
@@ -1417,7 +1471,7 @@ The orchestrator wants to change this module because: {changes}"""
     async def _review_backtest(
         self, result: BacktestResult | None, summary: str, decision: dict, diff: str,
         attempt_history: list[dict] | None = None,
-        *, current_changes: str | None = None,
+        *, current_changes: str | None = None, pseudocode: str | None = None,
     ) -> dict:
         """Opus reviews backtest results and decides whether to deploy to candidate slot.
 
@@ -1447,12 +1501,18 @@ The orchestrator wants to change this module because: {changes}"""
         else:
             change_context = f"## Strategy Change Context\n{json.dumps({k: decision.get(k) for k in ('decision', 'reasoning', 'specific_changes')}, indent=2, default=str)}"
 
+        pseudocode_section = (
+            f"\n\n## Original Algorithmic Specification\n{pseudocode}"
+            if pseudocode else ""
+        )
+
         review_prompt = f"""Review these backtest results and decide whether to deploy the strategy to a candidate slot.
 
 ## Backtest Results
 {summary}
 
 {change_context}
+{pseudocode_section}
 
 ## Code Diff
 ```diff

@@ -165,7 +165,8 @@ Respond in JSON:
             "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
             "slot": null,
             "replace_slot": null,
-            "specific_changes": "What to build (CREATE_CANDIDATE only)",
+            "specific_changes": "WHY — context and rationale for the change",
+            "pseudocode": "WHAT — algorithmic spec (indicators, thresholds, logic). Required for CREATE_CANDIDATE and analysis updates.",
             "strategy_characterization": "Brief characterization (CREATE_CANDIDATE only)",
             "evaluation_duration_days": null,
             "position_handling": null
@@ -298,15 +299,33 @@ The `analyze()` method has a 30-second timeout in production. Strategies with he
 - Use ta's functional API (e.g., ta.momentum.rsi()) not class-based API.
 - Add early returns / guard clauses for empty or insufficient data.
 
+### Pseudocode Compliance
+When an algorithmic specification (pseudocode) is provided, implement it EXACTLY.
+The pseudocode is the algorithmic spec written by the fund manager. Your job is to translate
+it into working Python within the framework contract — not to improve, simplify, or substitute
+the algorithm. Deviations from the pseudocode spec will be caught in code review and rejected.
+
+If the pseudocode specifies RSI(14) < 35, use RSI with period 14 and threshold 35.
+If it specifies EMA crossover, implement EMA crossover — not MACD or SMA.
+
 Output ONLY the Python code. No markdown, no explanation, just the code."""
 
 CODE_REVIEW_SYSTEM = """You are a code reviewer for a trading strategy. Check for:
 
-1. IO Contract compliance — correct inheritance, method signatures, return types
-2. Safety — no forbidden imports, no side effects, no network calls
-3. Logic correctness — edge cases, division by zero, empty data handling
-4. Risk management — stop losses set, position sizing within limits
-5. Long-only compliance — no SHORT signals (system has no margin access)
+1. Pseudocode compliance — if a pseudocode spec is provided, verify the generated code
+   implements it faithfully. Check:
+   - Correct indicators with correct parameters (RSI(14) not RSI(10))
+   - Correct thresholds and comparisons (< 35 not < 30)
+   - Correct logic structure (AND/OR, entry/exit conditions match spec)
+   - No substituted strategies (spec says momentum breakout, code must not be mean-reversion)
+   - All specified conditions present (no dropped conditions)
+   - Risk management matches spec (SL/TP calculation method)
+   If no pseudocode is provided, evaluate the code against the natural language description.
+2. IO Contract compliance — correct inheritance, method signatures, return types
+3. Safety — no forbidden imports, no side effects, no network calls
+4. Logic correctness — edge cases, division by zero, empty data handling
+5. Risk management — stop losses set, position sizing within limits
+6. Long-only compliance — no SHORT signals (system has no margin access)
 7. Tag hygiene — MODIFY signals must include a tag. MODIFY without tag will be rejected.
 8. Data access correctness — see IO Contract below. Flag ANY wrong attribute name as an error.
 
@@ -374,6 +393,10 @@ BACKTEST_REVIEW_SYSTEM = """You are reviewing backtest results for a crypto trad
 **After approval:** Strategy enters a candidate slot for forward paper testing with live market data (7-14+ days). That's where actual performance is evaluated.
 
 **If rejecting:** Provide specific, actionable revision instructions. Focus on WHY zero trades occurred (which filter is too restrictive? data access issue?) and what concrete change to make.
+
+When the strategy was built from pseudocode, reference specific parts in your revision
+instructions (e.g., "the RSI threshold of 35 produced zero signals in the backtest period —
+try 45" rather than generic "loosen entry criteria").
 
 **CRITICAL — IO Contract reference (for accurate revision instructions):**
 When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
@@ -488,34 +511,45 @@ The `db` object provides:
 
 The `schema` parameter describes all available tables and columns.
 
+### Pseudocode Compliance
+When an algorithmic specification (pseudocode) is provided, implement it EXACTLY.
+The pseudocode specifies what metrics to compute and how. Your job is to translate it
+into working Python with correct SQL queries and mathematical formulas — not to change
+what is being computed.
+
 Output ONLY the Python code. No markdown, no explanation, just the code."""
 
 ANALYSIS_REVIEW_SYSTEM = """You are a mathematical correctness reviewer for a trading analysis module. Focus on:
 
-1. **Formula correctness** — verify standard statistical definitions:
+1. **Pseudocode compliance** — if a pseudocode spec is provided, verify the generated code
+   computes the specified metrics using the specified methods. Check correct formulas, correct
+   SQL queries, all specified outputs present, no substituted or dropped metrics.
+   If no pseudocode is provided, evaluate against the natural language description.
+
+2. **Formula correctness** — verify standard statistical definitions:
    - Win rate = wins / total (not wins / losses)
    - Expectancy = (win_rate * avg_win) + (loss_rate * avg_loss)
    - Sharpe ratio = mean(returns) / std(returns) * sqrt(periods)
    - Drawdown = (peak - current) / peak
    - Any other formulas used
 
-2. **Edge cases** — check all paths:
+3. **Edge cases** — check all paths:
    - Division by zero when no trades, no scans, no wins, no losses
    - Empty query results (fetchone returns None, fetchall returns [])
    - NULL values in database columns (use COALESCE in SQL)
    - Single-element lists (std dev undefined, averages trivial)
 
-3. **SQL correctness**:
+4. **SQL correctness**:
    - No write operations (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE)
    - Correct GROUP BY / aggregate combinations
    - Date/time comparisons use consistent formats
 
-4. **Statistical validity**:
+5. **Statistical validity**:
    - Sample sizes noted where relevant
    - Rolling windows handle partial data at edges
    - Percentages are correctly computed (0.0-1.0 or 0-100, consistent)
 
-5. **Safety**:
+6. **Safety**:
    - No forbidden imports
    - No side effects
 
@@ -632,6 +666,50 @@ Based on your observations and evaluation, decide what actions to take. You have
 
 You may include multiple decisions. They execute sequentially — a CANCEL frees a slot before a subsequent CREATE fills it.
 
+### Pseudocode Specification
+
+For CREATE_CANDIDATE, MARKET_ANALYSIS_UPDATE, and TRADE_ANALYSIS_UPDATE, you MUST write
+a `pseudocode` field containing the algorithmic specification for the code you want generated.
+
+This is the most critical field in your decision. The code generator (Sonnet) translates
+your pseudocode into Python, and the code reviewer validates the output against your pseudocode.
+If your pseudocode is vague, the generated code will drift from your intent.
+
+**Good pseudocode for a strategy:**
+```
+FOR each symbol:
+  df_1h = 1-hour candles
+  rsi_14 = RSI(14) on df_1h close
+  ema_50 = EMA(50) on daily close
+  ema_200 = EMA(200) on daily close
+  atr_14 = ATR(14) on df_1h
+
+  ENTRY (BUY):
+    rsi_14 < 35 AND price > ema_200 AND ema_50 > ema_200
+    size = 5% of portfolio
+    stop_loss = entry - (atr_14 * 2)
+    take_profit = entry + (atr_14 * 3)
+    intent = SWING
+
+  EXIT (CLOSE):
+    rsi_14 > 70 OR price < ema_200
+```
+
+**Good pseudocode for an analysis module:**
+```
+QUERY trades closed in last 30 days
+COMPUTE: win_rate, avg_win, avg_loss, expectancy, profit_factor
+COMPUTE: per-symbol breakdown (trades, win_rate, avg_pnl)
+COMPUTE: rolling 7-day Sharpe ratio from daily P&L
+RETURN dict with all metrics
+```
+
+**Bad pseudocode:** "Build a momentum strategy" (too vague — Sonnet will choose
+its own indicators and thresholds)
+
+Use `specific_changes` for the WHY (context, rationale, what you learned).
+Use `pseudocode` for the WHAT (exact algorithm, indicators, thresholds, logic).
+
 ### Predictions (Optional)
 Include falsifiable predictions — especially when taking action. Each prediction: claim, evidence, falsification criteria, confidence (low/medium/high), evaluation_timeframe.
 
@@ -644,7 +722,8 @@ Respond in JSON:
             "decision": "NO_CHANGE" | "CREATE_CANDIDATE" | "CANCEL_CANDIDATE" | "PROMOTE_CANDIDATE" | "MARKET_ANALYSIS_UPDATE" | "TRADE_ANALYSIS_UPDATE",
             "slot": null,
             "replace_slot": null,
-            "specific_changes": "What to build (CREATE_CANDIDATE / analysis updates only)",
+            "specific_changes": "WHY — context and rationale for the change",
+            "pseudocode": "WHAT — algorithmic spec (indicators, thresholds, logic). Required for CREATE_CANDIDATE and analysis updates.",
             "strategy_characterization": "Brief characterization (CREATE_CANDIDATE only)",
             "evaluation_duration_days": null,
             "position_handling": null

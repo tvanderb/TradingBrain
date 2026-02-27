@@ -7336,6 +7336,7 @@ class Strategy(StrategyBase):
                     "decision": "CREATE_CANDIDATE",
                     "reasoning": "Need to adjust parameters",
                     "specific_changes": "Increase RSI threshold",
+                    "pseudocode": "FOR each symbol:\n  rsi_14 = RSI(14)\n  IF rsi_14 < 40: BUY",
                     "slot": None,
                     "replace_slot": None,
                     "evaluation_duration_days": 7,
@@ -7412,6 +7413,282 @@ class Strategy(StrategyBase):
         )
         assert cand is not None
         assert cand["slot"] == 1
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+# --- Pseudocode Pipeline Tests ---
+
+def test_extract_strategy_description():
+    """_extract_strategy_description extracts Strategy class docstring."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    # With Strategy class docstring
+    code_with_docstring = '''
+from src.shell.contract import StrategyBase
+
+class Strategy(StrategyBase):
+    """RSI mean-reversion strategy with EMA trend filter.
+
+    Entry: RSI(14) < 35 when price above EMA(200).
+    Exit: RSI(14) > 70 or price below EMA(200).
+    """
+    def initialize(self, risk_limits, symbols):
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+    desc = Orchestrator._extract_strategy_description(code_with_docstring)
+    assert desc is not None
+    assert "RSI mean-reversion" in desc
+    assert "EMA trend filter" in desc
+
+    # Without any docstring — falls back to None
+    code_no_docstring = '''
+class Strategy:
+    def initialize(self, risk_limits, symbols):
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+    desc = Orchestrator._extract_strategy_description(code_no_docstring)
+    assert desc is None
+
+    # Module docstring fallback (no Strategy class docstring)
+    code_module_doc = '''
+"""Module-level docstring for this strategy."""
+
+class Strategy:
+    def initialize(self, risk_limits, symbols):
+        pass
+'''
+    desc = Orchestrator._extract_strategy_description(code_module_doc)
+    assert desc is not None
+    assert "Module-level docstring" in desc
+
+    # Syntax error — returns None gracefully
+    desc = Orchestrator._extract_strategy_description("def broken(:")
+    assert desc is None
+
+
+def test_normalize_decisions_includes_pseudocode():
+    """_normalize_decisions passes pseudocode through from old single-decision format."""
+    from src.orchestrator.orchestrator import Orchestrator
+
+    # Old format with pseudocode
+    parsed = {
+        "decision": "CREATE_CANDIDATE",
+        "specific_changes": "Build RSI strategy",
+        "pseudocode": "RSI(14) < 35 => BUY",
+        "reasoning": "Testing",
+    }
+    result = Orchestrator._normalize_decisions(parsed)
+    assert "decisions" in result
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["pseudocode"] == "RSI(14) < 35 => BUY"
+    assert result["decisions"][0]["specific_changes"] == "Build RSI strategy"
+    # reasoning should stay at top level (not an action field)
+    assert result.get("reasoning") == "Testing"
+
+    # New format — decisions list stays as-is
+    parsed_new = {
+        "decisions": [
+            {"decision": "CREATE_CANDIDATE", "pseudocode": "EMA crossover", "specific_changes": "Test"}
+        ],
+        "reasoning": "New format test",
+    }
+    result = Orchestrator._normalize_decisions(parsed_new)
+    assert result["decisions"][0]["pseudocode"] == "EMA crossover"
+
+    # Old format without pseudocode — backward compat
+    parsed_no_pseudo = {
+        "decision": "CREATE_CANDIDATE",
+        "specific_changes": "Build something",
+        "reasoning": "No pseudocode",
+    }
+    result = Orchestrator._normalize_decisions(parsed_no_pseudo)
+    assert "pseudocode" not in result["decisions"][0]
+
+
+@pytest.mark.asyncio
+async def test_create_candidate_pseudocode_in_prompts():
+    """Pseudocode appears in both gen prompt and review prompt during candidate creation."""
+    from src.orchestrator.orchestrator import Orchestrator
+    from src.candidates.manager import CandidateManager
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 500
+        ai.get_daily_usage = AsyncMock(return_value={
+            "used": 500, "daily_limit": 1500000, "total_cost": 0.02, "models": {}
+        })
+
+        valid_code = '''
+from src.shell.contract import StrategyBase, Signal, RiskLimits
+
+class Strategy(StrategyBase):
+    """RSI strategy with pseudocode spec."""
+    def initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None:
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+        ai.ask_sonnet = AsyncMock(return_value=valid_code)
+        ai.ask_opus = AsyncMock(return_value=json.dumps({
+            "approved": True, "issues": [], "feedback": "Good",
+        }))
+
+        candidate_manager = CandidateManager(config, db)
+        await candidate_manager.initialize()
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store,
+                            candidate_manager=candidate_manager)
+        orch._cycle_id = "test_pseudo"
+
+        decision = {
+            "decision": "CREATE_CANDIDATE",
+            "specific_changes": "Build RSI strategy for momentum",
+            "pseudocode": "FOR each symbol:\n  rsi = RSI(14)\n  IF rsi < 35: BUY 5%",
+            "evaluation_duration_days": 7,
+        }
+        context = {
+            "strategy_code": "# placeholder",
+            "strategy_doc": "# doc",
+            "performance_7d": {},
+        }
+
+        mock_bt_result = MagicMock()
+        mock_bt_result.summary.return_value = "Trades: 5"
+        mock_bt_result.detailed_summary.return_value = "Detailed: Trades: 5"
+
+        with patch.object(orch, "_run_backtest", new_callable=AsyncMock) as mock_bt:
+            # Backtest passes, Opus deploys
+            mock_bt.return_value = (True, "Trades: 5", mock_bt_result)
+
+            # Override ask_opus to approve both code review and backtest review
+            call_count = 0
+            async def mock_opus(prompt, system="", purpose=""):
+                nonlocal call_count
+                call_count += 1
+                if "backtest" in purpose:
+                    return json.dumps({"deploy": True, "reasoning": "OK", "concerns": [], "revision_instructions": ""})
+                return json.dumps({"approved": True, "issues": [], "feedback": "Good"})
+            ai.ask_opus = AsyncMock(side_effect=mock_opus)
+
+            result = await orch._create_candidate(decision, context)
+
+        assert "candidate" in result.lower() or "deployed" in result.lower()
+
+        # Verify pseudocode appeared in Sonnet gen prompt
+        gen_call = ai.ask_sonnet.call_args
+        gen_prompt = gen_call[0][0]
+        assert "Algorithmic Specification (PSEUDOCODE)" in gen_prompt
+        assert "RSI(14)" in gen_prompt
+        assert "rsi < 35" in gen_prompt
+
+        # Verify pseudocode appeared in Opus code review prompt
+        # First opus call is the code review
+        review_call = ai.ask_opus.call_args_list[0]
+        review_prompt = review_call[0][0]
+        assert "Algorithmic Specification (PSEUDOCODE)" in review_prompt
+        assert "RSI(14)" in review_prompt
+
+        await db.close()
+    finally:
+        os.unlink(config.db_path)
+
+
+@pytest.mark.asyncio
+async def test_create_candidate_no_pseudocode_fallback():
+    """Without pseudocode, gen prompt uses 'Change Request' format (backward compat)."""
+    from src.orchestrator.orchestrator import Orchestrator
+    from src.candidates.manager import CandidateManager
+    from src.shell.config import load_config
+    from src.shell.database import Database
+    from src.shell.data_store import DataStore
+
+    config = load_config()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        config.db_path = f.name
+
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        data_store = DataStore(db, config.data)
+
+        ai = AsyncMock()
+        ai.tokens_remaining = 1000000
+        ai._daily_tokens_used = 500
+        ai.get_daily_usage = AsyncMock(return_value={
+            "used": 500, "daily_limit": 1500000, "total_cost": 0.02, "models": {}
+        })
+
+        valid_code = '''
+from src.shell.contract import StrategyBase, Signal, RiskLimits
+
+class Strategy(StrategyBase):
+    """Test strategy."""
+    def initialize(self, risk_limits: RiskLimits, symbols: list[str]) -> None:
+        pass
+    def analyze(self, markets, portfolio, timestamp):
+        return []
+'''
+        ai.ask_sonnet = AsyncMock(return_value=valid_code)
+
+        candidate_manager = CandidateManager(config, db)
+        await candidate_manager.initialize()
+
+        orch = Orchestrator(config, db, ai, MagicMock(), data_store,
+                            candidate_manager=candidate_manager)
+        orch._cycle_id = "test_no_pseudo"
+
+        # Decision WITHOUT pseudocode — backward compat
+        decision = {
+            "decision": "CREATE_CANDIDATE",
+            "specific_changes": "Build a momentum breakout strategy",
+            "evaluation_duration_days": 7,
+        }
+        context = {
+            "strategy_code": "# placeholder",
+            "strategy_doc": "# doc",
+            "performance_7d": {},
+        }
+
+        mock_bt_result = MagicMock()
+        mock_bt_result.summary.return_value = "Trades: 5"
+        mock_bt_result.detailed_summary.return_value = "Detailed: Trades: 5"
+
+        with patch.object(orch, "_run_backtest", new_callable=AsyncMock) as mock_bt:
+            mock_bt.return_value = (True, "Trades: 5", mock_bt_result)
+
+            async def mock_opus(prompt, system="", purpose=""):
+                if "backtest" in purpose:
+                    return json.dumps({"deploy": True, "reasoning": "OK", "concerns": [], "revision_instructions": ""})
+                return json.dumps({"approved": True, "issues": [], "feedback": "Good"})
+            ai.ask_opus = AsyncMock(side_effect=mock_opus)
+
+            result = await orch._create_candidate(decision, context)
+
+        # Verify fallback: gen prompt uses "Change Request", NOT "Algorithmic Specification"
+        gen_call = ai.ask_sonnet.call_args
+        gen_prompt = gen_call[0][0]
+        assert "## Change Request" in gen_prompt
+        assert "Algorithmic Specification" not in gen_prompt
+        assert "momentum breakout" in gen_prompt
 
         await db.close()
     finally:
