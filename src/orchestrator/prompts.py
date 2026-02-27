@@ -426,6 +426,10 @@ When the strategy was built from pseudocode, reference specific parts in your re
 instructions (e.g., "the RSI threshold of 35 produced zero signals in the backtest period —
 try 45" rather than generic "loosen entry criteria").
 
+**If rejecting AND pseudocode was provided:** Rewrite the pseudocode to incorporate your
+revision instructions. This becomes the new algorithmic specification for the next attempt.
+The revised pseudocode must be a complete, standalone spec (not a diff or amendment).
+
 **CRITICAL — IO Contract reference (for accurate revision instructions):**
 When writing revision_instructions, ONLY reference these exact names. Using wrong names wastes iterations.
 - SymbolData: .candles_5m, .candles_1h, .candles_1d, .funding_rate, .open_interest (NOT .hourly, .daily, .data, .candles)
@@ -440,7 +444,8 @@ Respond in JSON:
     "deploy": true | false,
     "reasoning": "Your analysis of the backtest results and why you chose to deploy or reject",
     "concerns": ["Any concerns worth noting even if deploying"],
-    "revision_instructions": "If rejecting: specific new direction for the next attempt. If deploying: empty string."
+    "revision_instructions": "If rejecting: specific new direction for the next attempt. If deploying: empty string.",
+    "revised_pseudocode": "If rejecting AND original pseudocode was provided: complete revised algorithmic spec. Otherwise: empty string."
 }"""
 
 REFLECTION_USER_TEMPLATE = """You are conducting your periodic reflection — reviewing the past {reflection_days} days of decisions, grading your predictions, evaluating your principles, and rewriting the strategy document.

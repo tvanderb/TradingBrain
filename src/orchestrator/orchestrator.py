@@ -982,10 +982,19 @@ Generate the complete strategy.py file."""
                     "original_reasoning": decision.get("reasoning", ""),
                 }
                 # Build pseudocode section for review prompt
-                pseudocode_review = (
-                    f"\n\n## Algorithmic Specification (PSEUDOCODE) — the code MUST implement this\n"
-                    f"{pseudocode}"
-                ) if pseudocode else ""
+                if pseudocode:
+                    if outer > 0:
+                        pseudocode_review = (
+                            f"\n\n## Revised Algorithmic Specification (PSEUDOCODE) — updated based on backtest results\n"
+                            f"{pseudocode}"
+                        )
+                    else:
+                        pseudocode_review = (
+                            f"\n\n## Algorithmic Specification (PSEUDOCODE) — the code MUST implement this\n"
+                            f"{pseudocode}"
+                        )
+                else:
+                    pseudocode_review = ""
 
                 review_prompt = f"""Review this trading strategy code for correctness and safety.
 
@@ -1094,6 +1103,12 @@ This is a candidate strategy that will run in paper simulation alongside the act
             revision = bt_review.get("revision_instructions", "")
             attempt_history.append({"attempt": outer + 1, "outcome": "rejected",
                                     "backtest_summary": backtest_summary, "reasoning": reasoning})
+
+            # Update pseudocode if backtest review provided a revised spec
+            revised_pc = bt_review.get("revised_pseudocode")
+            if revised_pc and revised_pc.strip():
+                pseudocode = revised_pc
+                log.info("orchestrator.pseudocode_revised", outer=outer + 1)
 
             if revision:
                 changes = f"Original goal: {original_changes}\n\nRevision from fund manager (attempt {outer + 1}): {revision}"
@@ -1502,7 +1517,7 @@ The orchestrator wants to change this module because: {changes}"""
             change_context = f"## Strategy Change Context\n{json.dumps({k: decision.get(k) for k in ('decision', 'reasoning', 'specific_changes')}, indent=2, default=str)}"
 
         pseudocode_section = (
-            f"\n\n## Original Algorithmic Specification\n{pseudocode}"
+            f"\n\n## Current Algorithmic Specification (revise this in revised_pseudocode if rejecting)\n{pseudocode}"
             if pseudocode else ""
         )
 
