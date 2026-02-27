@@ -56,6 +56,13 @@ class _RecorderPhase(Phase):
         return PhaseResult(phase_name=self.name, success=True, data={})
 
 
+def _mock_orchestrator():
+    """Create a mock orchestrator with a properly typed _ai._daily_tokens_used."""
+    orch = MagicMock()
+    orch._ai._daily_tokens_used = 0
+    return orch
+
+
 # ---------------------------------------------------------------------------
 # CycleState
 # ---------------------------------------------------------------------------
@@ -84,9 +91,34 @@ async def test_phases_execute_in_order():
     """Phases run in the order they are provided."""
     phases = [_RecorderPhase("a"), _RecorderPhase("b"), _RecorderPhase("c")]
     state = CycleState(cycle_id="test")
-    cycle = OrchestrationCycle(phases, MagicMock())
+    cycle = OrchestrationCycle(phases, _mock_orchestrator())
     state = await cycle.run(state)
     assert state.context["order"] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_token_tracking_per_phase():
+    """OrchestrationCycle tracks token usage per phase via AI client snapshot."""
+
+    class _TokenPhase(Phase):
+        name = "token_test"
+        required = True
+
+        async def execute(self, state, orchestrator):
+            # Simulate the AI client consuming tokens during this phase
+            orchestrator._ai._daily_tokens_used += 1500
+            return PhaseResult(phase_name=self.name, success=True, data={})
+
+    orch = _mock_orchestrator()
+    orch._ai._daily_tokens_used = 1000  # Starting value
+
+    state = CycleState(cycle_id="test")
+    cycle = OrchestrationCycle([_TokenPhase()], orch)
+    state = await cycle.run(state)
+
+    result = state.phase_results["token_test"]
+    assert result.tokens_used == 1500
+    assert orch._ai._daily_tokens_used == 2500  # 1000 + 1500
 
 
 @pytest.mark.asyncio
@@ -94,7 +126,7 @@ async def test_phase_results_accumulated():
     """Each phase's result is stored in state.phase_results."""
     phases = [_SuccessPhase()]
     state = CycleState(cycle_id="test")
-    cycle = OrchestrationCycle(phases, MagicMock())
+    cycle = OrchestrationCycle(phases, _mock_orchestrator())
     state = await cycle.run(state)
     assert "success" in state.phase_results
     assert state.phase_results["success"].success is True
@@ -109,7 +141,7 @@ async def test_required_phase_failure_aborts():
     """A required phase failure raises RuntimeError and stops the cycle."""
     phases = [_FailPhase(), _SuccessPhase()]
     state = CycleState(cycle_id="test")
-    cycle = OrchestrationCycle(phases, MagicMock())
+    cycle = OrchestrationCycle(phases, _mock_orchestrator())
     with pytest.raises(RuntimeError, match="Required phase 'fail' failed"):
         await cycle.run(state)
     # success phase should not have run
@@ -121,7 +153,7 @@ async def test_optional_phase_failure_continues():
     """An optional phase failure logs but does not abort — next phase runs."""
     phases = [_OptionalFailPhase(), _SuccessPhase()]
     state = CycleState(cycle_id="test")
-    cycle = OrchestrationCycle(phases, MagicMock())
+    cycle = OrchestrationCycle(phases, _mock_orchestrator())
     state = await cycle.run(state)
     # Optional phase recorded as failed
     assert state.phase_results["optional_fail"].success is False

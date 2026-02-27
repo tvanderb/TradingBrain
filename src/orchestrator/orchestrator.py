@@ -73,6 +73,10 @@ from src.orchestrator.prompts import (  # noqa: F401
     REFLECTION_USER_TEMPLATE,
     ANALYSIS_CODE_GEN_SYSTEM,
     ANALYSIS_REVIEW_SYSTEM,
+    SYSTEM_CONTEXT,
+    OBSERVE_PHASE_INSTRUCTIONS,
+    EVALUATE_PHASE_INSTRUCTIONS,
+    DECIDE_PHASE_INSTRUCTIONS,
 )
 
 
@@ -229,7 +233,9 @@ class Orchestrator:
 
     async def _run_nightly_cycle_locked(self, trigger: str = "scheduled") -> str:
         from src.orchestrator.cycle import CycleState, OrchestrationCycle
-        from src.orchestrator.phases import ReflectPhase, ObservePhase, ExecutePhase
+        from src.orchestrator.phases import (
+            ReflectPhase, ObservePhase, EvaluatePhase, DecidePhase, ExecutePhase,
+        )
 
         self._running = True
         self._cycle_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -259,7 +265,13 @@ class Orchestrator:
             state.context["reflection_due"] = await self._should_reflect()
 
             # --- Run phases ---
-            phases = [ReflectPhase(), ObservePhase(), ExecutePhase()]
+            phases = [
+                ReflectPhase(),
+                ObservePhase(),
+                EvaluatePhase(),
+                DecidePhase(),
+                ExecutePhase(),
+            ]
             cycle = OrchestrationCycle(phases, self)
             state = await cycle.run(state)
 

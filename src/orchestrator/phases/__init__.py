@@ -3,6 +3,15 @@
 from src.orchestrator.phases.base import Phase
 from src.orchestrator.phases.reflect import ReflectPhase
 from src.orchestrator.phases.observe import ObservePhase
+from src.orchestrator.phases.evaluate import EvaluatePhase
+from src.orchestrator.phases.decide import DecidePhase
 from src.orchestrator.phases.execute import ExecutePhase
 
-__all__ = ["Phase", "ReflectPhase", "ObservePhase", "ExecutePhase"]
+__all__ = [
+    "Phase",
+    "ReflectPhase",
+    "ObservePhase",
+    "EvaluatePhase",
+    "DecidePhase",
+    "ExecutePhase",
+]

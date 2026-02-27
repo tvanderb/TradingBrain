@@ -980,9 +980,9 @@ def test_analysis_code_gen_prompts_exist():
     # Layer 1: Identity — character dimensions, no directives
     assert "Radical Honesty" in LAYER_1_IDENTITY
     assert "Probabilistic Thinking" in LAYER_1_IDENTITY
-    assert "Long-Term Orientation" in LAYER_1_IDENTITY
-    assert "uncertainty" in LAYER_1_IDENTITY.lower()
-    assert "Change" in LAYER_1_IDENTITY
+    assert "Bias Toward Action" in LAYER_1_IDENTITY
+    assert "Continuous Improvement" in LAYER_1_IDENTITY
+    assert "risk" in LAYER_1_IDENTITY.lower()
 
     # Fund mandate — brief, method-agnostic
     assert "capital preservation" in FUND_MANDATE.lower()
@@ -1410,13 +1410,34 @@ async def test_orchestration_nightly_cycle_no_change():
             "used": 500, "daily_limit": 1500000, "total_cost": 0.02, "models": {}
         })
 
-        # Opus returns a NO_CHANGE decision
-        ai.ask_opus = AsyncMock(return_value=json.dumps({
-            "decision": "NO_CHANGE",
-            "reasoning": "Markets are stable, no changes needed.",
-            "market_observations": "BTC consolidating near 70k",
-            "cross_reference_findings": "",
-        }))
+        # Opus returns phase-appropriate responses (observe → evaluate → decide)
+        async def mock_ask_opus(prompt, system="", purpose=""):
+            if purpose == "observe":
+                return json.dumps({
+                    "market_observations": "BTC consolidating near 70k",
+                    "strategy_signal_assessment": "No signals",
+                    "analysis_module_assessment": "",
+                    "since_last_cycle_summary": "",
+                    "data_quality_notes": "",
+                    "notable_conditions": "",
+                })
+            elif purpose == "evaluate":
+                return json.dumps({
+                    "active_strategy_assessment": "Strategy performing adequately",
+                    "candidate_assessments": [],
+                    "analysis_tool_assessment": "",
+                    "cross_reference_findings": "",
+                    "whats_working": "",
+                    "whats_failing": "",
+                    "hypotheses": "",
+                })
+            elif purpose == "decide":
+                return json.dumps({
+                    "decision": "NO_CHANGE",
+                    "reasoning": "Markets are stable, no changes needed.",
+                })
+            return "{}"
+        ai.ask_opus = AsyncMock(side_effect=mock_ask_opus)
 
         orch = Orchestrator(config, db, ai, MagicMock(), data_store)
         report = await orch.run_nightly_cycle()
@@ -1430,7 +1451,7 @@ async def test_orchestration_nightly_cycle_no_change():
             (orch._cycle_id,),
         )
         assert len(thoughts) >= 1
-        assert thoughts[0]["step"] == "analysis"
+        assert thoughts[0]["step"] == "observe"
 
         # Verify observation stored
         obs = await db.fetchall("SELECT * FROM orchestrator_observations")
@@ -7288,8 +7309,29 @@ class Strategy(StrategyBase):
         async def mock_ask_opus(prompt, system="", purpose=""):
             nonlocal opus_call_count
             opus_call_count += 1
-            # Call 1: nightly analysis — CREATE_CANDIDATE decision
-            if purpose == "nightly_analysis":
+            # OBSERVE phase — market observations
+            if purpose == "observe":
+                return json.dumps({
+                    "market_observations": "BTC trending up",
+                    "strategy_signal_assessment": "Signals active",
+                    "analysis_module_assessment": "",
+                    "since_last_cycle_summary": "",
+                    "data_quality_notes": "",
+                    "notable_conditions": "",
+                })
+            # EVALUATE phase — performance assessment
+            if purpose == "evaluate":
+                return json.dumps({
+                    "active_strategy_assessment": "Needs adjustment",
+                    "candidate_assessments": [],
+                    "analysis_tool_assessment": "",
+                    "cross_reference_findings": "",
+                    "whats_working": "",
+                    "whats_failing": "RSI thresholds too conservative",
+                    "hypotheses": "",
+                })
+            # DECIDE phase — CREATE_CANDIDATE decision
+            if purpose == "decide":
                 return json.dumps({
                     "decision": "CREATE_CANDIDATE",
                     "reasoning": "Need to adjust parameters",
@@ -7298,8 +7340,6 @@ class Strategy(StrategyBase):
                     "replace_slot": None,
                     "evaluation_duration_days": 7,
                     "position_handling": None,
-                    "cross_reference_findings": "",
-                    "market_observations": "BTC trending up",
                 })
             # Code reviews — always approve
             if "candidate_review" in purpose:
